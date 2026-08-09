@@ -1,0 +1,33 @@
+{
+  "name": "@agentbridge/mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "agentbridge-mcp": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch"
+  },
+  "dependencies": {
+    "@agentbridge/collaboration": "0.1.0",
+    "@agentbridge/connectors": "0.1.0",
+    "@agentbridge/audit": "0.1.0",
+    "@agentbridge/protocol": "0.1.0",
+    "@agentbridge/storage": "0.1.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  }
+}

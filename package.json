@@ -1,0 +1,30 @@
+{
+  "name": "agentbridge",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.5"
+  },
+  "workspaces": [
+    "packages/*",
+    "tests"
+  ],
+  "scripts": {
+    "build": "npm run build:protocol && npm run build:storage && npm run build:audit && npm run build:connectors && npm run build:collaboration && npm run build:mcp && npm run build:cli",
+    "build:protocol": "npm run build -w @agentbridge/protocol",
+    "build:storage": "npm run build -w @agentbridge/storage",
+    "build:audit": "npm run build -w @agentbridge/audit",
+    "build:collaboration": "npm run build -w @agentbridge/collaboration",
+    "build:connectors": "npm run build -w @agentbridge/connectors",
+    "build:mcp": "npm run build -w @agentbridge/mcp",
+    "build:cli": "npm run build -w @agentbridge/cli",
+    "start:mcp": "npm run build:mcp && npm run start -w @agentbridge/mcp",
+    "baseline": "node scripts/resource-baseline.mjs",
+    "release": "npm run build && node scripts/build-release.mjs",
+    "test": "npm run unit -w @agentbridge/tests",
+    "typecheck": "npm run build"
+  },
+  "devDependencies": {
+    "esbuild": "^0.21.5"
+  }
+}

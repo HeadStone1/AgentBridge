@@ -1,0 +1,22 @@
+{
+  "name": "@agentbridge/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "agentbridge": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@agentbridge/connectors": "0.1.0",
+    "@agentbridge/audit": "0.1.0",
+    "@agentbridge/storage": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  }
+}

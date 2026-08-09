@@ -1,0 +1,14 @@
+{
+  "name": "@agentbridge/tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "unit": "vitest run",
+    "unit:watch": "vitest"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "vitest": "^1.0.0"
+  }
+}
