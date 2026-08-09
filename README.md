@@ -899,7 +899,7 @@ git push origin v0.4.0
 npm login
 npm run release:npm
 npm pack ./artifacts/npm --dry-run
-npm publish ./artifacts/npm --access public --provenance
+npm publish ./artifacts/npm --access public
 ```
 
 首次发布成功后，在 npmjs.com 的 `@headstone/agentbridge` 包设置中添加 GitHub Actions Trusted Publisher：

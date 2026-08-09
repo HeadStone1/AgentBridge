@@ -39,7 +39,7 @@ const packageJson = {
   homepage: 'https://github.com/HeadStone1/AgentBridge#readme',
   bugs: { url: 'https://github.com/HeadStone1/AgentBridge/issues' },
   keywords: ['mcp', 'claude', 'codex', 'agent', 'collaboration'],
-  publishConfig: { access: 'public', provenance: true },
+  publishConfig: { access: 'public' },
 };
 
 writeFileSync(join(output, 'package.json'), `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8');
