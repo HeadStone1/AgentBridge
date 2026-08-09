@@ -1,6 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
@@ -14,28 +12,29 @@ const cliFixture = resolve(fileURLToPath(new URL('../fixtures/fake-codex.mjs', i
 
 describe('Codex GUI-first backend selection', () => {
   it('discovers the executable bundled with Codex Desktop on Windows', () => {
-    const directory = mkdtempSync(join(tmpdir(), 'agentbridge-codex-desktop-'));
-    const executable = join(directory, 'OpenAI', 'Codex', 'bin', 'codex.exe');
-    mkdirSync(resolve(executable, '..'), { recursive: true });
-    writeFileSync(executable, 'fixture');
-    writeFileSync(join(resolve(executable, '..'), 'codex-26.1.0.exe'), 'versioned fixture');
-    writeFileSync(join(resolve(executable, '..'), 'codex-command-runner.exe'), 'unrelated helper');
-    try {
-      const candidates = discoverCodexCommands({
-        platform: 'win32',
-        env: { LOCALAPPDATA: directory },
-        homeDirectory: directory,
-      });
-      expect(candidates[0]).toMatchObject({
-        command: executable,
-        source: 'desktop',
-        mode: 'auto',
-      });
-      expect(candidates.some((candidate) => candidate.command.endsWith('codex-26.1.0.exe'))).toBe(true);
-      expect(candidates.some((candidate) => candidate.command.endsWith('codex-command-runner.exe'))).toBe(false);
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
+    const directory = 'C:\\Users\\fixture\\AppData\\Local';
+    const desktopBin = win32.join(directory, 'OpenAI', 'Codex', 'bin');
+    const executable = win32.join(desktopBin, 'codex.exe');
+    const versionedExecutable = win32.join(desktopBin, 'codex-26.1.0.exe');
+    const existingPaths = new Set([desktopBin, executable, versionedExecutable]);
+
+    const candidates = discoverCodexCommands({
+      platform: 'win32',
+      env: { LOCALAPPDATA: directory },
+      homeDirectory: 'C:\\Users\\fixture',
+      pathExists: (path) => existingPaths.has(path),
+      readDirectory: (path) => path === desktopBin
+        ? ['codex.exe', 'codex-26.1.0.exe', 'codex-command-runner.exe']
+        : [],
+    });
+
+    expect(candidates[0]).toMatchObject({
+      command: executable,
+      source: 'desktop',
+      mode: 'auto',
+    });
+    expect(candidates.some((candidate) => candidate.command === versionedExecutable)).toBe(true);
+    expect(candidates.some((candidate) => candidate.command.endsWith('codex-command-runner.exe'))).toBe(false);
   });
 
   it('prefers App Server when the discovered executable supports it', async () => {

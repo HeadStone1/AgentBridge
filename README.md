@@ -2,7 +2,7 @@
 
 AgentBridge 是一个本地优先的 MCP 协作核心，让 Claude Code 和 Codex 能在同一个项目中互相提问、回复、重试、达成一致，并把讨论状态保存在项目本地的 SQLite 数据库中。
 
-> 当前版本：v0.4.0。本项目以 GitHub Release 分发本地 stdio MCP；便携包自带 Node.js 运行时，不要求用户另外安装 Node 或 npm。
+> 当前版本：v0.4.1。本项目以 GitHub Release 分发本地 stdio MCP；便携包自带 Node.js 运行时，不要求用户另外安装 Node 或 npm。
 
 ## 使用方法（先看这里）
 
@@ -882,9 +882,9 @@ npm run release:package
 3. 提交代码后创建与 `package.json` 完全一致的标签：
 
 ```bash
-git tag v0.4.0
+git tag v0.4.1
 git push origin main
-git push origin v0.4.0
+git push origin v0.4.1
 ```
 
 标签推送后，[GitHub Actions Release 工作流](.github/workflows/release.yml) 会再次执行构建和测试，然后分别在 Windows、Linux、macOS runner 上打包自带运行时的压缩包，生成 `SHA256SUMS.txt`，最后创建 GitHub Release。标签与 `package.json` 版本不一致时工作流会拒绝发布。
