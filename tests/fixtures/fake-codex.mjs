@@ -8,6 +8,14 @@ if (args.includes('--version')) {
 const resumeIndex = args.indexOf('resume');
 const threadId = resumeIndex >= 0 ? args[resumeIndex + 1] : 'thread_fake_codex';
 
+if (resumeIndex >= 0) {
+  const resumeArgs = args.slice(resumeIndex + 2, -1);
+  if (resumeArgs.includes('--sandbox') || resumeArgs.includes('--color')) {
+    console.error('exec-only options must appear before the resume subcommand');
+    process.exit(2);
+  }
+}
+
 if (resumeIndex < 0) {
   console.log(JSON.stringify({ type: 'thread.started', thread_id: threadId }));
 }

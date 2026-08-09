@@ -110,7 +110,6 @@ export class CodexConnector implements AgentConnector {
     const args = [
       ...this.extraArgs,
       'exec',
-      ...(existingThread ? ['resume', existingThread] : []),
       '--json',
       '--sandbox',
       this.sandbox,
@@ -119,6 +118,7 @@ export class CodexConnector implements AgentConnector {
       ...(this.model ? ['--model', this.model] : []),
       '--color',
       'never',
+      ...(existingThread ? ['resume', existingThread] : []),
     ];
     return args;
   }

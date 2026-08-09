@@ -7255,6 +7255,11 @@ var CollaborationService = class {
     if (!["FAILED", "PEER_BUSY", "TIMEOUT", "NEEDS_USER_DECISION"].includes(discussion.status)) {
       throw new Error(`Discussion ${params.discussionId} cannot be retried from ${discussion.status}`);
     }
+    const messages = this.storage.getMessages(params.discussionId);
+    const lastMessage = messages.at(-1);
+    if (!lastMessage) {
+      throw new Error(`Discussion ${params.discussionId} has no message to retry`);
+    }
     if (discussion.status === "FAILED") {
       this.storage.updateDiscussionStatus(params.discussionId, "CREATED");
     }
@@ -7266,10 +7271,12 @@ var CollaborationService = class {
       agent: params.agent,
       metadata: { retryCount: discussion.retryCount, maxRetries: discussion.maxRetries }
     });
+    const peerResponse = await this.dispatchToAgent(params.discussionId, lastMessage.receiver, lastMessage.content, [lastMessage]);
     return {
       discussionId: discussion.id,
       status: "DISCUSSING",
-      retryCount: discussion.retryCount
+      retryCount: discussion.retryCount,
+      ...peerResponse ? { peerResponse } : {}
     };
   }
   async dispatchToAgent(discussionId, receiver, prompt, previousMessages) {
@@ -7438,6 +7445,9 @@ import { createRequire } from "node:module";
 var DEFAULT_MAX_TURNS = 6;
 var MAX_ALLOWED_TURNS = 50;
 var MAX_TEXT_LENGTH = 1e5;
+var SQLITE_STARTUP_TIMEOUT_MS = 5e3;
+var SQLITE_RETRY_DELAY_MS = 25;
+var SQLITE_RETRY_BUFFER = new Int32Array(new SharedArrayBuffer(4));
 var DEFAULT_DB_PATH = process.env.AGENTBRIDGE_DB_PATH ?? join(process.cwd(), ".agentbridge", "agentbridge.sqlite");
 var require2 = createRequire(import.meta.url);
 var { DatabaseSync } = require2("node:sqlite");
@@ -7545,24 +7555,35 @@ var Storage = class {
       mkdirSync(dirname(dbPath), { recursive: true });
     }
     this.db = new DatabaseSync(dbPath);
-    this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
-    this.db.exec(SCHEMA);
-    this.ensureSchemaCompatibility();
+    try {
+      this.db.exec(`PRAGMA busy_timeout = ${SQLITE_STARTUP_TIMEOUT_MS};`);
+      this.db.exec("PRAGMA foreign_keys = ON;");
+      retrySqliteBusy(() => this.db.exec("PRAGMA journal_mode = WAL;"));
+      retrySqliteBusy(() => this.db.exec(SCHEMA));
+      this.ensureSchemaCompatibility();
+    } catch (error3) {
+      try {
+        this.db.close();
+      } catch {
+      }
+      throw error3;
+    }
   }
   ensureSchemaCompatibility() {
-    const columns = this.db.prepare("PRAGMA table_info(discussions)").all();
-    if (!columns.some((column) => column.name === "peer")) {
-      this.db.exec("ALTER TABLE discussions ADD COLUMN peer TEXT");
-    }
-    if (!columns.some((column) => column.name === "retry_count")) {
-      this.db.exec("ALTER TABLE discussions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0");
-    }
-    if (!columns.some((column) => column.name === "max_retries")) {
-      this.db.exec("ALTER TABLE discussions ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 2");
-    }
-    const messageColumns = this.db.prepare("PRAGMA table_info(messages)").all();
-    if (!messageColumns.some((column) => column.name === "provider_session_id")) {
-      this.db.exec("ALTER TABLE messages ADD COLUMN provider_session_id TEXT");
+    this.ensureColumn("discussions", "peer", "ALTER TABLE discussions ADD COLUMN peer TEXT");
+    this.ensureColumn("discussions", "retry_count", "ALTER TABLE discussions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("discussions", "max_retries", "ALTER TABLE discussions ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 2");
+    this.ensureColumn("messages", "provider_session_id", "ALTER TABLE messages ADD COLUMN provider_session_id TEXT");
+  }
+  ensureColumn(table, columnName, alterSql) {
+    const hasColumn = () => this.db.prepare(`PRAGMA table_info(${table})`).all().some((column) => column.name === columnName);
+    if (hasColumn())
+      return;
+    try {
+      retrySqliteBusy(() => this.db.exec(alterSql));
+    } catch (error3) {
+      if (!hasColumn())
+        throw error3;
     }
   }
   close() {
@@ -7918,6 +7939,28 @@ function assertRetries(value) {
   if (!Number.isInteger(value) || value < 0 || value > 10) {
     throw new Error("maxRetries must be an integer between 0 and 10");
   }
+}
+function retrySqliteBusy(action, timeoutMs = SQLITE_STARTUP_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try {
+      action();
+      return;
+    } catch (error3) {
+      if (!isSqliteBusy(error3) || Date.now() >= deadline)
+        throw error3;
+      Atomics.wait(SQLITE_RETRY_BUFFER, 0, 0, Math.min(SQLITE_RETRY_DELAY_MS, deadline - Date.now()));
+    }
+  }
+}
+function isSqliteBusy(error3) {
+  if (typeof error3 !== "object" || error3 === null)
+    return false;
+  const sqliteError = error3;
+  if (sqliteError.errcode === 5)
+    return true;
+  const message = typeof sqliteError.message === "string" ? sqliteError.message.toLowerCase() : "";
+  return message.includes("database is locked") || message.includes("database is busy");
 }
 
 // packages/mcp/dist/server.js
@@ -19450,7 +19493,6 @@ var CodexConnector = class {
     const args = [
       ...this.extraArgs,
       "exec",
-      ...existingThread ? ["resume", existingThread] : [],
       "--json",
       "--sandbox",
       this.sandbox,
@@ -19458,7 +19500,8 @@ var CodexConnector = class {
       ...this.ignoreRules ? ["--ignore-rules"] : [],
       ...this.model ? ["--model", this.model] : [],
       "--color",
-      "never"
+      "never",
+      ...existingThread ? ["resume", existingThread] : []
     ];
     return args;
   }

@@ -141,6 +141,7 @@ export interface RetryDiscussionOutput {
   discussionId: string;
   status: 'DISCUSSING';
   retryCount: number;
+  peerResponse?: Message;
 }
 
 export * from './stateMachine.js';

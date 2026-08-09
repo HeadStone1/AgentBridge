@@ -20,6 +20,9 @@ export type { StoragePort } from './port.js';
 const DEFAULT_MAX_TURNS = 6;
 const MAX_ALLOWED_TURNS = 50;
 const MAX_TEXT_LENGTH = 100_000;
+const SQLITE_STARTUP_TIMEOUT_MS = 5_000;
+const SQLITE_RETRY_DELAY_MS = 25;
+const SQLITE_RETRY_BUFFER = new Int32Array(new SharedArrayBuffer(4));
 const DEFAULT_DB_PATH = process.env.AGENTBRIDGE_DB_PATH ?? join(process.cwd(), '.agentbridge', 'agentbridge.sqlite');
 
 type SqliteStatement = {
@@ -145,25 +148,38 @@ export class Storage {
       mkdirSync(dirname(dbPath), { recursive: true });
     }
     this.db = new DatabaseSync(dbPath);
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
-    this.db.exec(SCHEMA);
-    this.ensureSchemaCompatibility();
+    try {
+      // Configure lock waiting before journal_mode or schema setup: both can
+      // require a write lock when two stdio MCP processes start together.
+      this.db.exec(`PRAGMA busy_timeout = ${SQLITE_STARTUP_TIMEOUT_MS};`);
+      this.db.exec('PRAGMA foreign_keys = ON;');
+      retrySqliteBusy(() => this.db.exec('PRAGMA journal_mode = WAL;'));
+      retrySqliteBusy(() => this.db.exec(SCHEMA));
+      this.ensureSchemaCompatibility();
+    } catch (error) {
+      try { this.db.close(); } catch { /* preserve the initialization error */ }
+      throw error;
+    }
   }
 
   private ensureSchemaCompatibility(): void {
-    const columns = this.db.prepare('PRAGMA table_info(discussions)').all() as { name: string }[];
-    if (!columns.some((column) => column.name === 'peer')) {
-      this.db.exec('ALTER TABLE discussions ADD COLUMN peer TEXT');
-    }
-    if (!columns.some((column) => column.name === 'retry_count')) {
-      this.db.exec('ALTER TABLE discussions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0');
-    }
-    if (!columns.some((column) => column.name === 'max_retries')) {
-      this.db.exec('ALTER TABLE discussions ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 2');
-    }
-    const messageColumns = this.db.prepare('PRAGMA table_info(messages)').all() as { name: string }[];
-    if (!messageColumns.some((column) => column.name === 'provider_session_id')) {
-      this.db.exec('ALTER TABLE messages ADD COLUMN provider_session_id TEXT');
+    this.ensureColumn('discussions', 'peer', 'ALTER TABLE discussions ADD COLUMN peer TEXT');
+    this.ensureColumn('discussions', 'retry_count', 'ALTER TABLE discussions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('discussions', 'max_retries', 'ALTER TABLE discussions ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 2');
+    this.ensureColumn('messages', 'provider_session_id', 'ALTER TABLE messages ADD COLUMN provider_session_id TEXT');
+  }
+
+  private ensureColumn(table: string, columnName: string, alterSql: string): void {
+    const hasColumn = () => (this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[])
+      .some((column) => column.name === columnName);
+    if (hasColumn()) return;
+
+    try {
+      retrySqliteBusy(() => this.db.exec(alterSql));
+    } catch (error) {
+      // A second process may have completed the same migration after our
+      // initial table_info check. Only suppress the error if the column now exists.
+      if (!hasColumn()) throw error;
     }
   }
 
@@ -694,4 +710,25 @@ function assertRetries(value: number): void {
   if (!Number.isInteger(value) || value < 0 || value > 10) {
     throw new Error('maxRetries must be an integer between 0 and 10');
   }
+}
+
+function retrySqliteBusy(action: () => void, timeoutMs = SQLITE_STARTUP_TIMEOUT_MS): void {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try {
+      action();
+      return;
+    } catch (error) {
+      if (!isSqliteBusy(error) || Date.now() >= deadline) throw error;
+      Atomics.wait(SQLITE_RETRY_BUFFER, 0, 0, Math.min(SQLITE_RETRY_DELAY_MS, deadline - Date.now()));
+    }
+  }
+}
+
+function isSqliteBusy(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const sqliteError = error as { errcode?: unknown; message?: unknown };
+  if (sqliteError.errcode === 5) return true;
+  const message = typeof sqliteError.message === 'string' ? sqliteError.message.toLowerCase() : '';
+  return message.includes('database is locked') || message.includes('database is busy');
 }

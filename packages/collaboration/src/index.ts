@@ -297,6 +297,12 @@ export class CollaborationService {
       throw new Error(`Discussion ${params.discussionId} cannot be retried from ${discussion.status}`);
     }
 
+    const messages = this.storage.getMessages(params.discussionId);
+    const lastMessage = messages.at(-1);
+    if (!lastMessage) {
+      throw new Error(`Discussion ${params.discussionId} has no message to retry`);
+    }
+
     if (discussion.status === 'FAILED') {
       this.storage.updateDiscussionStatus(params.discussionId, 'CREATED');
     }
@@ -308,10 +314,17 @@ export class CollaborationService {
       agent: params.agent,
       metadata: { retryCount: discussion.retryCount, maxRetries: discussion.maxRetries },
     });
+    const peerResponse = await this.dispatchToAgent(
+      params.discussionId,
+      lastMessage.receiver,
+      lastMessage.content,
+      [lastMessage],
+    );
     return {
       discussionId: discussion.id,
       status: 'DISCUSSING',
       retryCount: discussion.retryCount,
+      ...(peerResponse ? { peerResponse } : {}),
     };
   }
 

@@ -209,6 +209,7 @@ describe('CollaborationService', () => {
 
   it('requires an explicit retry after a connector failure', async () => {
     const retryStorage = new Storage(':memory:');
+    let attempts = 0;
     const retryCollaboration = new CollaborationService(
       retryStorage,
       new AuditService(retryStorage),
@@ -218,7 +219,24 @@ describe('CollaborationService', () => {
           agentType: 'codex',
           isAvailable: async () => true,
           isBusy: async () => false,
-          sendAndWait: async () => { throw new Error('simulated connector failure'); },
+          sendAndWait: async (context) => {
+            attempts += 1;
+            if (attempts === 1) throw new Error('simulated connector failure');
+            return {
+              message: {
+                id: 'msg_retry_response',
+                discussionId: context.discussionId,
+                sender: 'codex',
+                receiver: 'claude',
+                role: 'response',
+                content: 'retry succeeded',
+                createdAt: new Date().toISOString(),
+                parentMessageId: null,
+                correlationId: 'cor_retry_response',
+              },
+              duration: 1,
+            };
+          },
         },
       },
     );
@@ -238,6 +256,9 @@ describe('CollaborationService', () => {
     const retried = await retryCollaboration.retryDiscussion({ discussionId, agent: 'claude' });
     expect(retried.status).toBe('DISCUSSING');
     expect(retried.retryCount).toBe(1);
+    expect(retried.peerResponse?.content).toBe('retry succeeded');
+    expect(attempts).toBe(2);
+    expect(retryStorage.getMessages(discussionId)).toHaveLength(2);
     retryStorage.close();
   });
 });

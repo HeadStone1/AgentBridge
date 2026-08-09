@@ -207,7 +207,6 @@ var CodexConnector = class {
     const args = [
       ...this.extraArgs,
       "exec",
-      ...existingThread ? ["resume", existingThread] : [],
       "--json",
       "--sandbox",
       this.sandbox,
@@ -215,7 +214,8 @@ var CodexConnector = class {
       ...this.ignoreRules ? ["--ignore-rules"] : [],
       ...this.model ? ["--model", this.model] : [],
       "--color",
-      "never"
+      "never",
+      ...existingThread ? ["resume", existingThread] : []
     ];
     return args;
   }
@@ -731,6 +731,9 @@ function canTransition(from, to) {
 var DEFAULT_MAX_TURNS = 6;
 var MAX_ALLOWED_TURNS = 50;
 var MAX_TEXT_LENGTH = 1e5;
+var SQLITE_STARTUP_TIMEOUT_MS = 5e3;
+var SQLITE_RETRY_DELAY_MS = 25;
+var SQLITE_RETRY_BUFFER = new Int32Array(new SharedArrayBuffer(4));
 var DEFAULT_DB_PATH = process.env.AGENTBRIDGE_DB_PATH ?? join(process.cwd(), ".agentbridge", "agentbridge.sqlite");
 var require2 = createRequire(import.meta.url);
 var { DatabaseSync } = require2("node:sqlite");
@@ -838,24 +841,35 @@ var Storage = class {
       mkdirSync(dirname(dbPath), { recursive: true });
     }
     this.db = new DatabaseSync(dbPath);
-    this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
-    this.db.exec(SCHEMA);
-    this.ensureSchemaCompatibility();
+    try {
+      this.db.exec(`PRAGMA busy_timeout = ${SQLITE_STARTUP_TIMEOUT_MS};`);
+      this.db.exec("PRAGMA foreign_keys = ON;");
+      retrySqliteBusy(() => this.db.exec("PRAGMA journal_mode = WAL;"));
+      retrySqliteBusy(() => this.db.exec(SCHEMA));
+      this.ensureSchemaCompatibility();
+    } catch (error) {
+      try {
+        this.db.close();
+      } catch {
+      }
+      throw error;
+    }
   }
   ensureSchemaCompatibility() {
-    const columns = this.db.prepare("PRAGMA table_info(discussions)").all();
-    if (!columns.some((column) => column.name === "peer")) {
-      this.db.exec("ALTER TABLE discussions ADD COLUMN peer TEXT");
-    }
-    if (!columns.some((column) => column.name === "retry_count")) {
-      this.db.exec("ALTER TABLE discussions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0");
-    }
-    if (!columns.some((column) => column.name === "max_retries")) {
-      this.db.exec("ALTER TABLE discussions ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 2");
-    }
-    const messageColumns = this.db.prepare("PRAGMA table_info(messages)").all();
-    if (!messageColumns.some((column) => column.name === "provider_session_id")) {
-      this.db.exec("ALTER TABLE messages ADD COLUMN provider_session_id TEXT");
+    this.ensureColumn("discussions", "peer", "ALTER TABLE discussions ADD COLUMN peer TEXT");
+    this.ensureColumn("discussions", "retry_count", "ALTER TABLE discussions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("discussions", "max_retries", "ALTER TABLE discussions ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 2");
+    this.ensureColumn("messages", "provider_session_id", "ALTER TABLE messages ADD COLUMN provider_session_id TEXT");
+  }
+  ensureColumn(table, columnName, alterSql) {
+    const hasColumn = () => this.db.prepare(`PRAGMA table_info(${table})`).all().some((column) => column.name === columnName);
+    if (hasColumn())
+      return;
+    try {
+      retrySqliteBusy(() => this.db.exec(alterSql));
+    } catch (error) {
+      if (!hasColumn())
+        throw error;
     }
   }
   close() {
@@ -1211,6 +1225,28 @@ function assertRetries(value) {
   if (!Number.isInteger(value) || value < 0 || value > 10) {
     throw new Error("maxRetries must be an integer between 0 and 10");
   }
+}
+function retrySqliteBusy(action, timeoutMs = SQLITE_STARTUP_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try {
+      action();
+      return;
+    } catch (error) {
+      if (!isSqliteBusy(error) || Date.now() >= deadline)
+        throw error;
+      Atomics.wait(SQLITE_RETRY_BUFFER, 0, 0, Math.min(SQLITE_RETRY_DELAY_MS, deadline - Date.now()));
+    }
+  }
+}
+function isSqliteBusy(error) {
+  if (typeof error !== "object" || error === null)
+    return false;
+  const sqliteError = error;
+  if (sqliteError.errcode === 5)
+    return true;
+  const message = typeof sqliteError.message === "string" ? sqliteError.message.toLowerCase() : "";
+  return message.includes("database is locked") || message.includes("database is busy");
 }
 
 // packages/cli/dist/mcpConfig.js

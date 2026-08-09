@@ -25,7 +25,8 @@ can share one project SQLite database.
 
 ## Development
 
-Requires Node.js 22.5 or newer because the storage layer uses `node:sqlite`.
+Requires Node.js 22.13 or newer because the storage layer uses `node:sqlite`
+without the earlier `--experimental-sqlite` runtime flag.
 
 ```bash
 npm install
