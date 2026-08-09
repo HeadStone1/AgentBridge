@@ -2,6 +2,11 @@
 
 ## 2026-08-10
 
+### v0.4.2 跨平台发布打包修复
+
+- 修复 `build-release.mjs` 在 Linux/macOS Runner 上把原生 `esbuild` 二进制文件交给 Node.js 解释执行的问题，改用 esbuild JavaScript API 统一生成 CLI/MCP bundle。
+- `v0.4.1` 的核心构建和 67 项测试已通过，但 Linux、macOS 和 npm job 在 bundle 阶段失败；因此版本升级到 `0.4.2` 后重新执行完整三平台发布。
+
 ### v0.4.1 GitHub Release CI 修复
 
 - 修复首次 `v0.4.0` 标签构建中暴露的干净环境依赖：根脚本新增 `pretest` 构建步骤，使 `npm test` 在干净环境中也会先生成集成测试需要的 `packages/mcp/dist/cli.js`。
