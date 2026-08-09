@@ -1,5 +1,10 @@
 const args = process.argv.slice(2);
 
+if (args.includes('app-server')) {
+  console.error('app-server is not supported by this fixture');
+  process.exit(2);
+}
+
 if (args.includes('--version')) {
   console.log('codex 0.0.0-test');
   process.exit(0);

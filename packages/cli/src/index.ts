@@ -5,11 +5,24 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import process from 'node:process';
-import { ClaudeConnector, CodexAppServerConnector, CodexConnector } from '@agentbridge/connectors';
+import {
+  ClaudeConnector,
+  CodexAutoConnector,
+  CodexConnector,
+  discoverCodexCommands,
+  type CodexBackendMode,
+} from '@agentbridge/connectors';
 import { AuditService } from '@agentbridge/audit';
 import { Storage } from '@agentbridge/storage';
 import type { AgentType, SessionStatus } from '@agentbridge/protocol';
 import { configureClaudeJson, configureCodexToml, removeClaudeJson, removeCodexToml } from './mcpConfig.js';
+import { defaultCodexConfig, resolveMcpEntry } from './paths.js';
+import {
+  CURRENT_VERSION,
+  checkForUpdate,
+  installUpdate,
+  rollbackInstalledRelease,
+} from './releaseManager.js';
 
 type Options = Record<string, string | boolean>;
 
@@ -37,8 +50,16 @@ async function main(argv: string[]): Promise<void> {
     case 'doctor':
       console.log(JSON.stringify(await doctor(projectPath, options), null, 2));
       return;
+    case 'version':
+    case '--version':
+    case '-v':
+      console.log(CURRENT_VERSION);
+      return;
     case 'update':
-      console.log(JSON.stringify(updateInfo(), null, 2));
+      console.log(JSON.stringify(await update(options), null, 2));
+      return;
+    case 'rollback':
+      console.log(JSON.stringify(rollbackInstalledRelease(), null, 2));
       return;
     case 'uninstall':
       console.log(JSON.stringify(uninstall(projectPath, options.yes === true, options), null, 2));
@@ -67,32 +88,54 @@ function setupProject(projectPath: string, options: Options): Record<string, unk
   const project = initProject(projectPath);
   if (options['no-config'] === true) return { project, configured: [] };
 
-  const mcpCommand = String(options['mcp-command'] ?? process.execPath);
+  const releaseLauncher = process.env.AGENTBRIDGE_LAUNCHER;
+  const mcpCommand = String(options['mcp-command'] ?? releaseLauncher ?? process.execPath);
   const mcpEntry = String(options['mcp-entry'] ?? defaultMcpEntry());
-  const env: Record<string, string> = {};
+  const sharedEnv: Record<string, string> = {
+    AGENTBRIDGE_DB_PATH: join(projectPath, '.agentbridge', 'agentbridge.sqlite'),
+    AGENTBRIDGE_PROJECT_PATH: projectPath,
+  };
   if (typeof options['codex-app-command'] === 'string') {
-    env.AGENTBRIDGE_CODEX_APP_COMMAND = options['codex-app-command'];
+    sharedEnv.AGENTBRIDGE_CODEX_APP_COMMAND = options['codex-app-command'];
   }
-  const server = { command: mcpCommand, args: mcpCommand === process.execPath ? [mcpEntry] : [], env };
+  if (typeof options['codex-command'] === 'string') {
+    sharedEnv.AGENTBRIDGE_CODEX_COMMAND = options['codex-command'];
+  }
+  if (typeof options['codex-mode'] === 'string') {
+    sharedEnv.AGENTBRIDGE_CODEX_MODE = parseCodexMode(options['codex-mode']);
+  }
+  const args = releaseLauncher && mcpCommand === releaseLauncher
+    ? ['mcp']
+    : mcpCommand === process.execPath ? [mcpEntry] : [];
+  const claudeServer = {
+    command: mcpCommand,
+    args,
+    env: { ...sharedEnv, AGENTBRIDGE_AGENT: 'claude' },
+  };
+  const codexServer = {
+    command: mcpCommand,
+    args,
+    env: { ...sharedEnv, AGENTBRIDGE_AGENT: 'codex' },
+    cwd: projectPath,
+  };
   const claudeConfig = String(options['claude-config'] ?? join(homedir(), '.claude.json'));
-  const codexConfig = String(options['codex-config'] ?? join(homedir(), '.codex', 'config.toml'));
+  const codexConfig = String(options['codex-config'] ?? defaultCodexConfig(projectPath));
   return {
     project,
+    codexBackend: {
+      strategy: sharedEnv.AGENTBRIDGE_CODEX_MODE ?? 'auto',
+      appServerFirst: (sharedEnv.AGENTBRIDGE_CODEX_MODE ?? 'auto') !== 'cli',
+      automaticDesktopDiscovery: !sharedEnv.AGENTBRIDGE_CODEX_APP_COMMAND && !sharedEnv.AGENTBRIDGE_CODEX_COMMAND,
+    },
     configured: [
-      configureClaudeJson(claudeConfig, server),
-      configureCodexToml(codexConfig, server),
+      configureClaudeJson(claudeConfig, claudeServer, projectPath),
+      configureCodexToml(codexConfig, codexServer),
     ],
   };
 }
 
 function defaultMcpEntry(): string {
-  const invoked = process.argv[1];
-  if (!invoked) return resolve('packages', 'mcp', 'dist', 'cli.js');
-  const invokedPath = resolve(invoked);
-  if (basename(invokedPath) === 'agentbridge-cli.mjs') {
-    return join(resolve(invokedPath, '..'), 'agentbridge-mcp.mjs');
-  }
-  return resolve(invokedPath, '..', '..', 'mcp', 'dist', 'cli.js');
+  return resolveMcpEntry(process.argv[1]);
 }
 
 function registerSession(options: Options, projectPath: string): unknown {
@@ -138,36 +181,51 @@ async function doctor(projectPath: string, options: Options = {}): Promise<Recor
   const storage = openStorage(projectPath);
   storage.recoverExpiredSessionLeases();
   storage.close();
-  const appCommand = String(options['codex-app-command'] ?? process.env.AGENTBRIDGE_CODEX_APP_COMMAND ?? '');
-  const [claude, codex, codexAppServer, codexAppDetected] = await Promise.all([
+  const codexMode = parseCodexMode(String(options['codex-mode'] ?? process.env.AGENTBRIDGE_CODEX_MODE ?? 'auto'));
+  const discoveryEnv = { ...process.env };
+  if (typeof options['codex-app-command'] === 'string') {
+    discoveryEnv.AGENTBRIDGE_CODEX_APP_COMMAND = options['codex-app-command'];
+  }
+  if (typeof options['codex-command'] === 'string') {
+    discoveryEnv.AGENTBRIDGE_CODEX_COMMAND = options['codex-command'];
+  }
+  const codexAuto = new CodexAutoConnector({
+    mode: codexMode,
+    candidates: discoverCodexCommands({ env: discoveryEnv }),
+  });
+  const [claude, codexSelection, codexAppDetected] = await Promise.all([
     new ClaudeConnector({ command: process.env.AGENTBRIDGE_CLAUDE_COMMAND }).isAvailable(),
-    new CodexConnector({ command: process.env.AGENTBRIDGE_CODEX_COMMAND ?? process.env.CODEX_CLI_PATH }).isAvailable(),
-    new CodexAppServerConnector({ command: appCommand }).isAvailable(),
+    codexAuto.getSelection(),
     isProcessRunning('codex'),
   ]);
+  const codexCli = codexSelection
+    ? await new CodexConnector({ command: codexSelection.command }).isAvailable()
+    : false;
   checks.providers = {
     claudeCli: claude,
-    codexCli: codex,
-    codexAppServer,
+    codexCli,
+    codexAppServer: codexSelection?.mode === 'app-server',
+    codexSelectedBackend: codexSelection ?? null,
+    codexCandidates: codexAuto.getCandidates().map(({ command, source, label, mode }) => ({ command, source, label, mode })),
     codexAppDetected,
     availability: {
       claude: claude ? 'BACKGROUND' : 'UNAVAILABLE',
-      codex: codex || codexAppServer ? 'BACKGROUND' : 'UNAVAILABLE',
+      codex: codexSelection ? 'BACKGROUND' : 'UNAVAILABLE',
     },
-    note: 'codexAppDetected is informational. Set --codex-app-command to verify and use an App Server executable.',
+    note: 'App Server is preferred. codexAppDetected is informational; AgentBridge only uses capability-probed executables and does not attach to an open GUI session.',
   };
   checks.database = { readable: true, path: process.env.AGENTBRIDGE_DB_PATH ?? join(projectPath, '.agentbridge', 'agentbridge.sqlite') };
   return checks;
 }
 
-function updateInfo(): Record<string, unknown> {
-  return {
-    currentVersion: '0.1.0',
-    channel: 'workspace-source',
-    standaloneBinary: false,
-    automaticUpdate: false,
-    nextStep: 'Run npm run release to produce bundled Node artifacts; signed EXE packaging remains a distribution task.',
-  };
+async function update(options: Options): Promise<unknown> {
+  const channel = options.channel === 'beta' ? 'beta' : 'stable';
+  if (options.channel && options.channel !== 'stable' && options.channel !== 'beta') {
+    throw new Error('--channel must be stable or beta');
+  }
+  const { release, info } = await checkForUpdate({ channel });
+  if (options.install !== true || !info.updateAvailable || !release) return info;
+  return installUpdate(release, info);
 }
 
 function isProcessRunning(processName: string): Promise<boolean> {
@@ -197,8 +255,8 @@ function uninstall(projectPath: string, confirmed: boolean, options: Options): R
   if (!confirmed) throw new Error('Refusing to remove local state without --yes');
   if (resolve(stateDir).split('\\').length < 3) throw new Error('Refusing to remove an unsafe state path');
   const claudeConfig = String(options['claude-config'] ?? join(homedir(), '.claude.json'));
-  const codexConfig = String(options['codex-config'] ?? join(homedir(), '.codex', 'config.toml'));
-  const configResults = [removeClaudeJson(claudeConfig), removeCodexToml(codexConfig)];
+  const codexConfig = String(options['codex-config'] ?? defaultCodexConfig(projectPath));
+  const configResults = [removeClaudeJson(claudeConfig, projectPath), removeCodexToml(codexConfig)];
   if (existsSync(stateDir)) rmSync(stateDir, { recursive: true, force: true });
   return { projectPath, removed: stateDir, configs: configResults };
 }
@@ -206,6 +264,11 @@ function uninstall(projectPath: string, confirmed: boolean, options: Options): R
 function isSupportedNode(version: string): boolean {
   const [major, minor] = version.split('.').map(Number);
   return major > 22 || (major === 22 && minor >= 5);
+}
+
+function parseCodexMode(value: string): CodexBackendMode {
+  if (value === 'auto' || value === 'app-server' || value === 'cli') return value;
+  throw new Error('--codex-mode must be auto, app-server, or cli');
 }
 
 function openStorage(projectPath: string): Storage {
@@ -255,7 +318,9 @@ function printHelp(): void {
     '  register-session             Register a provider-native session',
     '  status [path]               Show sessions, discussions, and metrics',
     '  doctor [path]               Check Node, database, and provider reachability',
-    '  update                      Show release/update channel information',
+    '  version                     Show the installed AgentBridge version',
+    '  update [--install]          Check GitHub Releases; install only with --install',
+    '  rollback                    Switch to the previous locally installed version',
     '  uninstall [path] --yes      Remove local state and AgentBridge MCP entries',
     '',
     'Options:',
@@ -267,7 +332,10 @@ function printHelp(): void {
     '  --no-config                 Do not modify Claude/Codex MCP config',
     '  --mcp-command PATH          MCP executable/command (default: current Node)',
     '  --mcp-entry PATH            MCP entry script for Node mode',
-    '  --codex-app-command PATH    Codex Desktop/App Server executable for no-CLI installs',
+    '  --codex-mode MODE           auto (default), app-server, or cli',
+    '  --codex-app-command PATH    Override Codex App Server executable',
+    '  --codex-command PATH        Override Codex executable (auto/CLI)',
+    '  --channel stable|beta       Select the update channel (default: stable)',
     '  --claude-config PATH',
     '  --codex-config PATH',
   ].join('\n'));

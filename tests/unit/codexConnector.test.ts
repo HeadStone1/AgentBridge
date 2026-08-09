@@ -20,15 +20,16 @@ describe('CodexConnector', () => {
       prompt: 'first',
       discussionId: 'dsc_codex_test',
     });
-    expect(first.message.content).toBe('initial codex response');
+    expect(first.content).toBe('initial codex response');
 
     const second = await connector.sendAndWait({
       projectPath: process.cwd(),
       prompt: 'second',
       discussionId: 'dsc_codex_test',
+      providerSessionId: first.providerSessionId,
+      providerSessionKind: first.providerSessionKind,
     });
-    expect(second.message.content).toBe('resumed codex response');
-    expect(second.message.sender).toBe('codex');
-    expect(second.message.receiver).toBe('claude');
+    expect(second.content).toBe('resumed codex response');
+    expect(second.providerSessionKind).toBe('codex-cli');
   });
 });

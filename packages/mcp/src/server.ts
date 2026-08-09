@@ -73,7 +73,7 @@ function buildTools(agentType: AgentType): Tool[] {
     },
     {
       name: 'close_discussion',
-      description: 'Record this agent\'s acceptance. The discussion completes only after both agents accept the same conclusion.',
+      description: 'Record this agent\'s acceptance and ask the peer to confirm. The discussion completes only after both agents accept the same conclusion.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -130,7 +130,7 @@ export function createMCPServer(
   };
 
   const server = new Server(
-    { name: 'agentbridge', version: '0.1.0' },
+    { name: 'agentbridge', version: process.env.AGENTBRIDGE_VERSION ?? '0.1.0' },
     { capabilities: { tools: {} } },
   );
 

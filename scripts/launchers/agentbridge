@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+AGENTBRIDGE_INSTALL_ROOT=${AGENTBRIDGE_INSTALL_ROOT:-"$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"}
+AGENTBRIDGE_VERSION=$(tr -d '\r\n' < "$AGENTBRIDGE_INSTALL_ROOT/current")
+AGENTBRIDGE_LAUNCHER="$AGENTBRIDGE_INSTALL_ROOT/bin/agentbridge"
+AGENTBRIDGE_RUNTIME="$AGENTBRIDGE_INSTALL_ROOT/versions/$AGENTBRIDGE_VERSION/runtime/node"
+AGENTBRIDGE_APP="$AGENTBRIDGE_INSTALL_ROOT/versions/$AGENTBRIDGE_VERSION/app"
+export AGENTBRIDGE_INSTALL_ROOT AGENTBRIDGE_VERSION AGENTBRIDGE_LAUNCHER
+
+if [ ! -x "$AGENTBRIDGE_RUNTIME" ]; then
+  echo "AgentBridge runtime was not found for version $AGENTBRIDGE_VERSION." >&2
+  exit 1
+fi
+
+if [ "${1:-}" = "mcp" ]; then
+  shift
+  exec "$AGENTBRIDGE_RUNTIME" "$AGENTBRIDGE_APP/agentbridge-mcp.mjs" "$@"
+fi
+
+exec "$AGENTBRIDGE_RUNTIME" "$AGENTBRIDGE_APP/agentbridge-cli.mjs" "$@"

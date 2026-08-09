@@ -1,6 +1,6 @@
 import type { StoragePort } from '@agentbridge/storage';
 import { AuditService } from '@agentbridge/audit';
-import type { AgentConnector } from '@agentbridge/connectors';
+import type { AgentConnector, ProviderSessionKind } from '@agentbridge/connectors';
 import type {
   AgentType,
   Message,
@@ -11,7 +11,7 @@ import type {
   CancelDiscussionOutput,
   RetryDiscussionOutput,
 } from '@agentbridge/protocol';
-import { isTerminal } from '@agentbridge/protocol';
+import { isTerminal, resolveProjectPath } from '@agentbridge/protocol';
 
 export interface CollaborationConfig {
   maxTurns?: number;
@@ -64,7 +64,7 @@ export class CollaborationService {
     traceId: string;
     maxTurns?: number;
   }): Promise<AskPeerOutput> {
-    const projectPath = params.projectPath ?? process.cwd();
+    const projectPath = resolveProjectPath(params.projectPath);
     const maxTurns = params.maxTurns ?? this.maxTurns;
     assertParticipants(params.driver, params.peer);
     assertText(params.initialMessage, 'message');
@@ -108,7 +108,7 @@ export class CollaborationService {
 
     this.storage.updateDiscussionStatus(discussion.id, 'DISCUSSING');
 
-    const peerResponse = await this.dispatchToAgent(discussion.id, params.peer, params.initialMessage, [message]);
+    const peerResponse = await this.dispatchToAgent(discussion.id, params.peer, params.initialMessage, []);
     return {
       discussionId: discussion.id,
       peer: params.peer,
@@ -164,7 +164,8 @@ export class CollaborationService {
     });
 
     this.storage.updateDiscussionStatus(params.discussionId, 'DISCUSSING');
-    const peerResponse = await this.dispatchToAgent(params.discussionId, receiver, params.reply, [message]);
+    const previousMessages = this.storage.getMessages(params.discussionId).slice(0, -1);
+    const peerResponse = await this.dispatchToAgent(params.discussionId, receiver, params.reply, previousMessages);
     return {
       messageId: message.id,
       status: 'DISCUSSING',
@@ -194,10 +195,18 @@ export class CollaborationService {
     if (isTerminal(discussion.status)) {
       throw new Error(`Discussion ${params.discussionId} is already ${discussion.status}`);
     }
-    this.ensureWithinBudget(discussion);
     if (![discussion.driver, discussion.peer].includes(params.agent)) {
       throw new Error(`Agent ${params.agent} is not a participant in discussion ${params.discussionId}`);
     }
+
+    const otherAgent = params.agent === discussion.driver ? discussion.peer : discussion.driver;
+    const existingConclusion = this.storage.getMessages(params.discussionId).some((message) => (
+      message.sender === params.agent
+      && message.receiver === otherAgent
+      && message.role === 'conclusion'
+      && message.content === params.conclusion
+    ));
+    this.ensureWithinBudget(discussion, existingConclusion ? '' : params.conclusion);
 
     const agreement = this.storage.recordAgreement({
       discussionId: params.discussionId,
@@ -212,8 +221,43 @@ export class CollaborationService {
       metadata: { decisionHash: agreement.decisionHash },
     });
 
-    const otherAgent = params.agent === discussion.driver ? discussion.peer : discussion.driver;
-    if (agreement.agreedBy.length < 2) {
+    if (agreement.agreedBy.length >= 2) {
+      return this.completeDiscussion(discussion, params.conclusion, agreement.agreedBy);
+    }
+
+    if (!existingConclusion) {
+      this.storage.createMessage({
+        discussionId: params.discussionId,
+        sender: params.agent,
+        receiver: otherAgent,
+        role: 'conclusion',
+        content: params.conclusion,
+        projectPath: discussion.projectPath,
+      });
+    }
+
+    const messages = this.storage.getMessages(params.discussionId);
+    const agreementPrompt = buildAgreementPrompt(params.conclusion, agreement.decisionHash);
+    let peerResponse: Message | undefined;
+    try {
+      peerResponse = await this.dispatchToAgent(
+        params.discussionId,
+        otherAgent,
+        agreementPrompt,
+        messages,
+        { updateFailureStatus: false },
+      );
+    } catch (cause) {
+      this.audit.log({
+        traceId: discussion.traceId,
+        discussionId: params.discussionId,
+        action: 'agreement.notification_failed',
+        agent: otherAgent,
+        metadata: { error: cause instanceof Error ? cause.message : String(cause) },
+      });
+    }
+
+    if (!peerResponse) {
       return {
         discussionId: params.discussionId,
         status: 'DISCUSSING',
@@ -221,37 +265,38 @@ export class CollaborationService {
       };
     }
 
-    if (discussion.status !== 'AGREED') {
-      this.storage.updateDiscussionStatus(params.discussionId, 'AGREED');
+    const peerDecision = parseAgreementResponse(peerResponse.content, agreement.decisionHash);
+    if (!peerDecision.accepted) {
+      this.audit.log({
+        traceId: discussion.traceId,
+        discussionId: params.discussionId,
+        action: 'agreement.rejected',
+        agent: otherAgent,
+        metadata: { reason: peerDecision.reason ?? 'invalid_or_rejected_response' },
+      });
+      return {
+        discussionId: params.discussionId,
+        status: 'DISCUSSING',
+        waitingFor: [params.agent],
+        peerAccepted: false,
+        peerResponse,
+      };
     }
 
-    const decision = this.storage.getDecisionByDiscussion(params.discussionId) ?? this.storage.createDecision({
+    const peerAgreement = this.storage.recordAgreement({
       discussionId: params.discussionId,
+      agent: otherAgent,
       summary: params.conclusion,
-      changes: [],
-      agreedBy: agreement.agreedBy,
     });
     this.audit.log({
       traceId: discussion.traceId,
       discussionId: params.discussionId,
-      action: 'decision.created',
-      agent: 'system',
-      metadata: { decisionId: decision.id, decisionHash: decision.decisionHash },
+      action: `agreement.${otherAgent}`,
+      agent: otherAgent,
+      metadata: { decisionHash: peerAgreement.decisionHash, source: 'connector_confirmation' },
     });
-
-    this.storage.updateDiscussionStatus(params.discussionId, 'COMPLETED', {
-      conclusion: params.conclusion,
-      endedAt: new Date().toISOString(),
-    });
-    this.audit.log({
-      traceId: discussion.traceId,
-      discussionId: params.discussionId,
-      action: 'discussion.closed',
-      agent: 'system',
-      metadata: { decisionId: decision.id },
-    });
-
-    return { discussionId: params.discussionId, status: 'COMPLETED', decisionId: decision.id };
+    const completed = this.completeDiscussion(discussion, params.conclusion, peerAgreement.agreedBy);
+    return { ...completed, peerAccepted: true, peerResponse };
   }
 
   async cancelDiscussion(params: {
@@ -314,11 +359,12 @@ export class CollaborationService {
       agent: params.agent,
       metadata: { retryCount: discussion.retryCount, maxRetries: discussion.maxRetries },
     });
+    const previousMessages = messages.slice(0, -1);
     const peerResponse = await this.dispatchToAgent(
       params.discussionId,
       lastMessage.receiver,
       lastMessage.content,
-      [lastMessage],
+      previousMessages,
     );
     return {
       discussionId: discussion.id,
@@ -333,6 +379,7 @@ export class CollaborationService {
     receiver: AgentType,
     prompt: string,
     previousMessages: Message[],
+    options: { updateFailureStatus?: boolean } = {},
   ): Promise<Message | undefined> {
     const connector = this.connectors[receiver];
     if (!connector) return undefined;
@@ -353,17 +400,25 @@ export class CollaborationService {
         throw new Error(`${receiver} session is busy`);
       }
 
+      const persistedSession = this.storage.getSessionForDiscussion(
+        receiver,
+        discussionId,
+        discussion.projectPath,
+      );
+      const providerSessionKind = readProviderSessionKind(persistedSession?.metadata.sessionKind);
       const response = await withTimeout(
         connector.sendAndWait({
           projectPath: discussion.projectPath,
           prompt,
           discussionId,
           previousMessages,
+          providerSessionId: persistedSession?.sessionId,
+          providerSessionKind,
         }),
         this.timeoutMs,
       );
 
-      this.ensureWithinBudget(discussion, response.message.content);
+      this.ensureWithinBudget(discussion, response.content);
 
       if (response.availability) {
         this.audit.log({
@@ -375,7 +430,7 @@ export class CollaborationService {
         });
       }
 
-      const providerSessionId = response.providerSessionId ?? response.message.providerSessionId;
+      const providerSessionId = response.providerSessionId;
       if (providerSessionId) {
         this.storage.registerSession({
           provider: receiver,
@@ -385,6 +440,7 @@ export class CollaborationService {
           metadata: {
             discussionId,
             availability: response.availability ?? 'BACKGROUND',
+            sessionKind: response.providerSessionKind,
           },
         });
       }
@@ -394,7 +450,7 @@ export class CollaborationService {
         sender: receiver,
         receiver: receiver === discussion.driver ? discussion.peer : discussion.driver,
         role: 'response',
-        content: response.message.content,
+        content: response.content,
         projectPath: discussion.projectPath,
         providerSessionId,
       });
@@ -415,7 +471,7 @@ export class CollaborationService {
         metadata: { error: cause instanceof Error ? cause.message : String(cause) },
       });
       const current = this.storage.getDiscussion(discussionId);
-      if (current && !isTerminal(current.status)) {
+      if (options.updateFailureStatus !== false && current && !isTerminal(current.status)) {
         const nextStatus = classifyFailure(cause);
         if (nextStatus === 'PEER_BUSY') {
           this.audit.log({
@@ -469,6 +525,81 @@ export class CollaborationService {
       throw new Error(`Discussion ${discussion.id} exceeded message budget`);
     }
   }
+
+  private completeDiscussion(
+    discussion: { id: string; status: string; traceId: string },
+    conclusion: string,
+    agreedBy: AgentType[],
+  ): CloseDiscussionOutput {
+    if (discussion.status !== 'AGREED') {
+      this.storage.updateDiscussionStatus(discussion.id, 'AGREED');
+    }
+    const decision = this.storage.getDecisionByDiscussion(discussion.id) ?? this.storage.createDecision({
+      discussionId: discussion.id,
+      summary: conclusion,
+      changes: [],
+      agreedBy,
+    });
+    this.audit.log({
+      traceId: discussion.traceId,
+      discussionId: discussion.id,
+      action: 'decision.created',
+      agent: 'system',
+      metadata: { decisionId: decision.id, decisionHash: decision.decisionHash },
+    });
+    this.storage.updateDiscussionStatus(discussion.id, 'COMPLETED', {
+      conclusion,
+      endedAt: new Date().toISOString(),
+    });
+    this.storage.releaseSessionLease('claude', this.storage.getDiscussion(discussion.id)!.projectPath, discussion.id);
+    this.storage.releaseSessionLease('codex', this.storage.getDiscussion(discussion.id)!.projectPath, discussion.id);
+    this.audit.log({
+      traceId: discussion.traceId,
+      discussionId: discussion.id,
+      action: 'discussion.closed',
+      agent: 'system',
+      metadata: { decisionId: decision.id },
+    });
+    return { discussionId: discussion.id, status: 'COMPLETED', decisionId: decision.id };
+  }
+}
+
+function buildAgreementPrompt(conclusion: string, decisionHash: string): string {
+  return [
+    'AgentBridge agreement confirmation request.',
+    'Review the canonical conclusion below against the discussion context.',
+    'Do not call AgentBridge tools. Return exactly one JSON object and no markdown.',
+    `Use {"agentbridgeDecision":"accept","decisionHash":"${decisionHash}"} only if you accept it unchanged.`,
+    `Otherwise use {"agentbridgeDecision":"reject","decisionHash":"${decisionHash}","reason":"brief reason"}.`,
+    'Canonical conclusion:',
+    conclusion,
+  ].join('\n\n');
+}
+
+function parseAgreementResponse(
+  content: string,
+  expectedHash: string,
+): { accepted: boolean; reason?: string } {
+  const start = content.indexOf('{');
+  const end = content.lastIndexOf('}');
+  if (start < 0 || end <= start) return { accepted: false, reason: 'missing_json_confirmation' };
+  try {
+    const value = JSON.parse(content.slice(start, end + 1)) as Record<string, unknown>;
+    if (value.decisionHash !== expectedHash) return { accepted: false, reason: 'decision_hash_mismatch' };
+    if (value.agentbridgeDecision === 'accept') return { accepted: true };
+    return {
+      accepted: false,
+      reason: typeof value.reason === 'string' ? value.reason : 'peer_rejected',
+    };
+  } catch {
+    return { accepted: false, reason: 'invalid_json_confirmation' };
+  }
+}
+
+function readProviderSessionKind(value: unknown): ProviderSessionKind | undefined {
+  return value === 'claude-cli' || value === 'codex-cli' || value === 'codex-app-server'
+    ? value
+    : undefined;
 }
 
 function assertParticipants(driver: AgentType, peer: AgentType): void {

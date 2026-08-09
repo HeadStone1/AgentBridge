@@ -5,6 +5,7 @@ export interface McpServerCommand {
   command: string;
   args?: string[];
   env?: Record<string, string>;
+  cwd?: string;
 }
 
 export interface ConfigUpdateResult {
@@ -14,28 +15,61 @@ export interface ConfigUpdateResult {
   backupPath?: string;
 }
 
-export function configureClaudeJson(path: string, server: McpServerCommand): ConfigUpdateResult {
+export function configureClaudeJson(path: string, server: McpServerCommand, projectPath: string): ConfigUpdateResult {
   const existing = readJsonObject(path);
-  const servers = isRecord(existing.mcpServers) ? { ...existing.mcpServers } : {};
+  const projects = isRecord(existing.projects) ? { ...existing.projects } : {};
+  const projectKey = claudeProjectKey(projectPath);
+  const legacyProjectKey = projectKey !== projectPath && isRecord(projects[projectPath]);
+  const projectSource = isRecord(projects[projectKey]) ? projects[projectKey] : projects[projectPath];
+  const project = isRecord(projectSource) ? { ...projectSource } : {};
+  const servers = isRecord(project.mcpServers) ? { ...project.mcpServers } : {};
   const nextServer = { command: server.command, args: server.args ?? [], env: server.env ?? {} };
-  const changed = JSON.stringify(servers.agentbridge) !== JSON.stringify(nextServer);
+  const topLevelServers = isRecord(existing.mcpServers) ? { ...existing.mcpServers } : undefined;
+  const hadLegacyTopLevel = Boolean(topLevelServers && Object.prototype.hasOwnProperty.call(topLevelServers, 'agentbridge'));
+  const changed = hadLegacyTopLevel || legacyProjectKey || JSON.stringify(servers.agentbridge) !== JSON.stringify(nextServer);
   if (!changed) return { provider: 'claude', path, changed: false };
 
   servers.agentbridge = nextServer;
+  project.mcpServers = servers;
+  projects[projectKey] = project;
+  if (legacyProjectKey) delete projects[projectPath];
+  const next: Record<string, any> = { ...existing, projects };
+  if (topLevelServers) {
+    delete topLevelServers.agentbridge;
+    if (Object.keys(topLevelServers).length > 0) next.mcpServers = topLevelServers;
+    else delete next.mcpServers;
+  }
   const backupPath = backupExisting(path);
-  writeJsonAtomic(path, { ...existing, mcpServers: servers });
+  writeJsonAtomic(path, next);
   return { provider: 'claude', path, changed: true, backupPath };
 }
 
-export function removeClaudeJson(path: string): ConfigUpdateResult {
+export function removeClaudeJson(path: string, projectPath: string): ConfigUpdateResult {
   const existing = readJsonObject(path);
-  const servers = isRecord(existing.mcpServers) ? { ...existing.mcpServers } : {};
-  if (!Object.prototype.hasOwnProperty.call(servers, 'agentbridge')) {
+  const projects = isRecord(existing.projects) ? { ...existing.projects } : {};
+  const projectKey = claudeProjectKey(projectPath);
+  const normalizedProject = isRecord(projects[projectKey]) ? { ...projects[projectKey] } : {};
+  const legacyProject = projectKey !== projectPath && isRecord(projects[projectPath]) ? { ...projects[projectPath] } : {};
+  const project = Object.keys(normalizedProject).length > 0 ? normalizedProject : legacyProject;
+  const servers = isRecord(project.mcpServers) ? { ...project.mcpServers } : {};
+  const topLevelServers = isRecord(existing.mcpServers) ? { ...existing.mcpServers } : undefined;
+  const hasScoped = Object.prototype.hasOwnProperty.call(servers, 'agentbridge');
+  const hasLegacy = Boolean(topLevelServers && Object.prototype.hasOwnProperty.call(topLevelServers, 'agentbridge'));
+  if (!hasScoped && !hasLegacy) {
     return { provider: 'claude', path, changed: false };
   }
   delete servers.agentbridge;
+  project.mcpServers = servers;
+  projects[projectKey] = project;
+  if (projectKey !== projectPath) delete projects[projectPath];
+  const next: Record<string, any> = { ...existing, projects };
+  if (topLevelServers) {
+    delete topLevelServers.agentbridge;
+    if (Object.keys(topLevelServers).length > 0) next.mcpServers = topLevelServers;
+    else delete next.mcpServers;
+  }
   const backupPath = backupExisting(path);
-  writeJsonAtomic(path, { ...existing, mcpServers: servers });
+  writeJsonAtomic(path, next);
   return { provider: 'claude', path, changed: true, backupPath };
 }
 
@@ -45,6 +79,7 @@ export function configureCodexToml(path: string, server: McpServerCommand): Conf
     '[mcp_servers.agentbridge]',
     `command = '${tomlString(server.command)}'`,
     `args = [${(server.args ?? []).map((arg) => `'${tomlString(arg)}'`).join(', ')}]`,
+    ...(server.cwd ? [`cwd = '${tomlString(server.cwd)}'`] : []),
     ...Object.entries(server.env ?? {}).map(([key, value]) => `env.${key} = '${tomlString(value)}'`),
     '',
   ].join('\n');
@@ -119,6 +154,10 @@ function writeTextAtomic(path: string, value: string): void {
 
 function tomlString(value: string): string {
   return value.replace(/'/g, "''");
+}
+
+export function claudeProjectKey(projectPath: string): string {
+  return projectPath.replace(/\\/g, '/');
 }
 
 function isRecord(value: unknown): value is Record<string, any> {

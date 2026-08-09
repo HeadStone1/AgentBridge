@@ -75,4 +75,9 @@ export interface StoragePort {
     status?: SessionStatus;
     metadata?: Record<string, unknown>;
   }): AgentSession;
+  getSessionForDiscussion(
+    provider: AgentType,
+    discussionId: string,
+    projectPath: string,
+  ): AgentSession | null;
 }

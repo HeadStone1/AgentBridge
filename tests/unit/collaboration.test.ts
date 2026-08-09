@@ -6,6 +6,9 @@ import { ClaudeConnector } from '../../packages/connectors/src/claude';
 import { CodexConnector } from '../../packages/connectors/src/codex';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const claudeFixture = resolve(fileURLToPath(new URL('../fixtures/fake-claude.mjs', import.meta.url)));
 const codexFixture = resolve(fileURLToPath(new URL('../fixtures/fake-codex.mjs', import.meta.url)));
@@ -47,6 +50,50 @@ describe('CollaborationService', () => {
     const result = await collaboration.getDiscussion(started.discussionId);
     expect(result.discussion.status).toBe('COMPLETED');
     expect(result.decision?.agreedBy).toEqual(['claude', 'codex']);
+  });
+
+  it('automatically asks the peer to confirm and completes a matching conclusion', async () => {
+    const agreementStorage = new Storage(':memory:');
+    const agreementCollaboration = new CollaborationService(
+      agreementStorage,
+      new AuditService(agreementStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async (context) => {
+            const hash = context.prompt.match(/"decisionHash":"([a-f0-9]+)"/)?.[1];
+            return {
+              content: JSON.stringify({ agentbridgeDecision: 'accept', decisionHash: hash }),
+              duration: 1,
+              providerSessionId: 'codex-agreement-session',
+              providerSessionKind: 'codex-cli',
+            };
+          },
+        },
+      },
+    );
+    const started = await agreementCollaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'automatic agreement',
+      initialMessage: 'Review the conclusion',
+      traceId: 'tr_auto_agreement',
+    });
+
+    const closed = await agreementCollaboration.closeDiscussion({
+      discussionId: started.discussionId,
+      conclusion: 'Ship the reviewed implementation',
+      agent: 'claude',
+    });
+
+    expect(closed.status).toBe('COMPLETED');
+    expect(closed.peerAccepted).toBe(true);
+    expect((await agreementCollaboration.getDiscussion(started.discussionId)).decision?.agreedBy)
+      .toEqual(['claude', 'codex']);
+    agreementStorage.close();
   });
 
   it('rejects a changed conclusion after the first acceptance', async () => {
@@ -223,17 +270,7 @@ describe('CollaborationService', () => {
             attempts += 1;
             if (attempts === 1) throw new Error('simulated connector failure');
             return {
-              message: {
-                id: 'msg_retry_response',
-                discussionId: context.discussionId,
-                sender: 'codex',
-                receiver: 'claude',
-                role: 'response',
-                content: 'retry succeeded',
-                createdAt: new Date().toISOString(),
-                parentMessageId: null,
-                correlationId: 'cor_retry_response',
-              },
+              content: 'retry succeeded',
               duration: 1,
             };
           },
@@ -260,5 +297,47 @@ describe('CollaborationService', () => {
     expect(attempts).toBe(2);
     expect(retryStorage.getMessages(discussionId)).toHaveLength(2);
     retryStorage.close();
+  });
+
+  it('restores a provider session from SQLite after the collaboration process restarts', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'agentbridge-session-restart-'));
+    const dbPath = join(directory, 'agentbridge.sqlite');
+    try {
+      const firstStorage = new Storage(dbPath);
+      const firstCollaboration = new CollaborationService(
+        firstStorage,
+        new AuditService(firstStorage),
+        { timeoutMs: 5_000 },
+        { codex: new CodexConnector({ command: process.execPath, extraArgs: [codexFixture], timeoutMs: 5_000 }) },
+      );
+      const started = await firstCollaboration.initiateDiscussion({
+        driver: 'claude',
+        peer: 'codex',
+        topic: 'restart recovery',
+        initialMessage: 'first round',
+        projectPath: directory,
+        traceId: 'tr_restart',
+      });
+      firstStorage.close();
+
+      const secondStorage = new Storage(dbPath);
+      const secondCollaboration = new CollaborationService(
+        secondStorage,
+        new AuditService(secondStorage),
+        { timeoutMs: 5_000 },
+        { codex: new CodexConnector({ command: process.execPath, extraArgs: [codexFixture], timeoutMs: 5_000 }) },
+      );
+      const continued = await secondCollaboration.replyToDiscussion({
+        discussionId: started.discussionId,
+        sender: 'claude',
+        reply: 'second round',
+      });
+      expect(continued.peerResponse?.content).toBe('resumed codex response');
+      expect(secondStorage.getSessionForDiscussion('codex', started.discussionId, directory)?.sessionId)
+        .toBe('thread_fake_codex');
+      secondStorage.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

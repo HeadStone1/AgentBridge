@@ -24,10 +24,12 @@ describe('CodexAppServerConnector', () => {
         projectPath: process.cwd(),
         prompt: 'second',
         discussionId: 'dsc_app_server_test',
+        providerSessionId: first.providerSessionId,
+        providerSessionKind: first.providerSessionKind,
       });
 
-      expect(first.message.content).toBe('app response 1');
-      expect(second.message.content).toBe('app response 2');
+      expect(first.content).toBe('app response 1');
+      expect(second.content).toBe('app response 2');
       expect(second.providerSessionId).toBe(first.providerSessionId);
     } finally {
       await connector.cancel?.();
