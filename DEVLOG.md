@@ -1,5 +1,13 @@
 # AgentBridge 开发日志
 
+## 2026-08-10
+
+### v0.4.1 GitHub Release CI 修复
+
+- 修复首次 `v0.4.0` 标签构建中暴露的干净环境依赖：根脚本新增 `pretest` 构建步骤，使 `npm test` 在干净环境中也会先生成集成测试需要的 `packages/mcp/dist/cli.js`。
+- 将 Codex Desktop Windows 可执行文件发现测试改为注入模拟文件系统，不再在 Linux Runner 上混用 POSIX 临时路径与 Windows 路径规则。
+- 版本升级为 `0.4.1`；本地完整构建、67 项测试、便携包和 npm 包验证通过后使用新标签发布，保留失败的 `v0.4.0` 标签作为构建记录。
+
 ## 2026-08-09
 
 ### 已完成
