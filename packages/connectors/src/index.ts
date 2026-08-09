@@ -1,10 +1,13 @@
 import type { Message } from '@agentbridge/protocol';
 import type { AgentType, PeerAvailability } from '@agentbridge/protocol';
 
+export type ProviderSessionKind = 'claude-cli' | 'codex-cli' | 'codex-app-server';
+
 export interface PeerResponse {
-  message: Message;
+  content: string;
   duration: number; // ms
   providerSessionId?: string;
+  providerSessionKind?: ProviderSessionKind;
   availability?: PeerAvailability;
 }
 
@@ -36,6 +39,8 @@ export interface AgentConnector {
     prompt: string;
     discussionId: string;
     previousMessages?: Message[];
+    providerSessionId?: string;
+    providerSessionKind?: ProviderSessionKind;
   }): Promise<PeerResponse>;
 
   /**
@@ -50,3 +55,8 @@ export interface AgentConnector {
 export { ClaudeConnector } from './claude.js';
 export { CodexConnector } from './codex.js';
 export { CodexAppServerConnector } from './codexAppServer.js';
+export { CodexAutoConnector } from './codexAuto.js';
+export { discoverCodexCommands } from './codexDiscovery.js';
+export { buildPeerPrompt } from './prompt.js';
+export type { CodexBackendSelection, CodexAutoConnectorOptions } from './codexAuto.js';
+export type { CodexBackendMode, CodexCommandCandidate, CodexDiscoveryOptions } from './codexDiscovery.js';

@@ -1,0 +1,117 @@
+name: Build GitHub Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13.0'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+  package:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13.0'
+          cache: npm
+      - run: npm ci
+      - run: npm run release:package
+
+      - name: Create Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $package = Get-ChildItem artifacts -Directory | Select-Object -First 1
+          Compress-Archive -LiteralPath $package.FullName -DestinationPath "artifacts/$($package.Name).zip"
+
+      - name: Create Unix archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          package="$(find artifacts -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          name="$(basename "$package")"
+          tar -C artifacts -czf "artifacts/$name.tar.gz" "$name"
+
+      - name: Upload platform archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            artifacts/*.zip
+            artifacts/*.tar.gz
+          if-no-files-found: error
+
+  publish-npm:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13.0'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+      - run: npm ci
+      - run: npm install --global npm@11
+      - run: npm run release:npm
+      - name: Publish npm package with provenance
+        shell: bash
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if npm view "@headstone/agentbridge@$version" version >/dev/null 2>&1; then
+            echo "@headstone/agentbridge@$version is already published; skipping."
+          else
+            npm publish ./artifacts/npm --access public --provenance
+          fi
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          test "$GITHUB_REF_NAME" = "$expected" || { echo "Tag $GITHUB_REF_NAME does not match $expected"; exit 1; }
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum *.zip *.tar.gz > SHA256SUMS.txt
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          prerelease=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "AgentBridge $GITHUB_REF_NAME" "${prerelease[@]}"

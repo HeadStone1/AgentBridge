@@ -20,13 +20,15 @@ describe('ClaudeConnector', () => {
       prompt: 'first',
       discussionId: 'dsc_test',
     });
-    expect(first.message.content).toBe('initial response');
+    expect(first.content).toBe('initial response');
 
     const second = await connector.sendAndWait({
       projectPath: process.cwd(),
       prompt: 'second',
       discussionId: 'dsc_test',
+      providerSessionId: first.providerSessionId,
+      providerSessionKind: first.providerSessionKind,
     });
-    expect(second.message.content).toBe('resumed response');
+    expect(second.content).toBe('resumed response');
   });
 });

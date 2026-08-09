@@ -1,4 +1,16 @@
 // Core types for AgentBridge protocol
+import { resolve } from 'node:path';
+
+/** Resolve the stable project root shared by MCP hosts and direct CLI use. */
+export function resolveProjectPath(
+  explicit?: string,
+  env: Record<string, string | undefined> = process.env,
+  cwd = process.cwd(),
+): string {
+  const candidate = [explicit, env.AGENTBRIDGE_PROJECT_PATH, env.CLAUDE_PROJECT_DIR, cwd]
+    .find((value) => typeof value === 'string' && value.trim().length > 0);
+  return resolve(candidate ?? cwd);
+}
 
 export type AgentType = 'claude' | 'codex';
 export type SessionStatus = 'IDLE' | 'BUSY' | 'BRIDGE_OWNED' | 'UNKNOWN';
@@ -130,6 +142,8 @@ export interface CloseDiscussionOutput {
   status: DiscussionStatus;
   decisionId?: string;
   waitingFor?: AgentType[];
+  peerAccepted?: boolean;
+  peerResponse?: Message;
 }
 
 export interface CancelDiscussionOutput {

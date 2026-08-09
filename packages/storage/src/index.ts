@@ -13,7 +13,7 @@ import type {
   AgentSession,
   SessionStatus,
 } from '@agentbridge/protocol';
-import { canTransition } from '@agentbridge/protocol';
+import { canTransition, resolveProjectPath } from '@agentbridge/protocol';
 
 export type { StoragePort } from './port.js';
 
@@ -23,7 +23,6 @@ const MAX_TEXT_LENGTH = 100_000;
 const SQLITE_STARTUP_TIMEOUT_MS = 5_000;
 const SQLITE_RETRY_DELAY_MS = 25;
 const SQLITE_RETRY_BUFFER = new Int32Array(new SharedArrayBuffer(4));
-const DEFAULT_DB_PATH = process.env.AGENTBRIDGE_DB_PATH ?? join(process.cwd(), '.agentbridge', 'agentbridge.sqlite');
 
 type SqliteStatement = {
   all(...values: any[]): any[];
@@ -143,14 +142,20 @@ CREATE INDEX IF NOT EXISTS idx_discussions_project_path ON discussions(project_p
 export class Storage {
   private db: SqliteDatabase;
 
-  constructor(dbPath = DEFAULT_DB_PATH) {
+  constructor(dbPath = process.env.AGENTBRIDGE_DB_PATH ?? join(resolveProjectPath(), '.agentbridge', 'agentbridge.sqlite')) {
     if (dbPath !== ':memory:' && !dbPath.startsWith('file:')) {
       mkdirSync(dirname(dbPath), { recursive: true });
     }
     this.db = new DatabaseSync(dbPath);
     try {
-      // Configure lock waiting before journal_mode or schema setup: both can
-      // require a write lock when two stdio MCP processes start together.
+      // Wait for an existing writer with a write-lock probe before attempting
+      // journal_mode. Keep SQLite's own busy handler disabled for this probe:
+      // waiting inside BEGIN IMMEDIATE can retain a shared lock and prevent the
+      // existing writer from committing on newer SQLite builds.
+      this.db.exec('PRAGMA busy_timeout = 0;');
+      retrySqliteBusy(() => this.db.exec('BEGIN IMMEDIATE; ROLLBACK;'));
+      // Normal operations can use SQLite's native busy handler once startup
+      // ownership is established.
       this.db.exec(`PRAGMA busy_timeout = ${SQLITE_STARTUP_TIMEOUT_MS};`);
       this.db.exec('PRAGMA foreign_keys = ON;');
       retrySqliteBusy(() => this.db.exec('PRAGMA journal_mode = WAL;'));
@@ -224,7 +229,7 @@ export class Storage {
         `INSERT INTO discussions (id, topic, status, driver, peer, current_turn, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id)
          VALUES (?, ?, 'CREATED', ?, ?, 0, ?, 0, ?, ?, ?, ?, ?)`,
       )
-      .run(id, data.topic, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? process.cwd(), data.traceId);
+      .run(id, data.topic, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId);
 
     return this.getDiscussion(id)!;
   }
@@ -459,8 +464,8 @@ export class Storage {
       throw new Error('Agreement changed; both agents must accept the same decision hash');
     }
     const otherAgreement = this.db
-      .prepare('SELECT decision_hash FROM agreements WHERE discussion_id = ? LIMIT 1')
-      .get(data.discussionId) as { decision_hash: string } | undefined;
+      .prepare('SELECT decision_hash FROM agreements WHERE discussion_id = ? AND agent <> ? LIMIT 1')
+      .get(data.discussionId, data.agent) as { decision_hash: string } | undefined;
     if (otherAgreement && otherAgreement.decision_hash !== hash) {
       throw new Error('Agreement changed; both agents must accept the same decision hash');
     }
@@ -558,6 +563,43 @@ export class Storage {
     return row ? rowToAgentSession(row) : null;
   }
 
+  getSessionForDiscussion(
+    provider: AgentType,
+    discussionId: string,
+    projectPath: string,
+  ): AgentSession | null {
+    const row = this.db
+      .prepare(
+        `SELECT sessions.* FROM messages
+         JOIN agent_sessions AS sessions
+           ON sessions.provider = messages.sender
+          AND sessions.session_id = messages.provider_session_id
+         WHERE messages.discussion_id = ?
+           AND messages.sender = ?
+           AND sessions.project_path = ?
+           AND messages.provider_session_id IS NOT NULL
+         ORDER BY messages.rowid DESC
+         LIMIT 1`,
+      )
+      .get(discussionId, provider, projectPath) as Record<string, unknown> | undefined;
+    if (row) return rowToAgentSession(row);
+
+    // Compatibility fallback for sessions registered by hooks or older
+    // versions before provider_session_id was attached to messages.
+    const legacyRows = this.db
+      .prepare(
+        `SELECT * FROM agent_sessions
+         WHERE provider = ? AND project_path = ?
+         ORDER BY last_seen_at DESC`,
+      )
+      .all(provider, projectPath) as Record<string, unknown>[];
+    for (const legacyRow of legacyRows) {
+      const session = rowToAgentSession(legacyRow);
+      if (session.metadata.discussionId === discussionId) return session;
+    }
+    return null;
+  }
+
   listSessions(projectPath?: string): AgentSession[] {
     const rows = projectPath
       ? this.db.prepare('SELECT * FROM agent_sessions WHERE project_path = ? ORDER BY last_seen_at DESC').all(projectPath)
@@ -626,7 +668,7 @@ function rowToDiscussion(row: Record<string, unknown>): Discussion {
     updatedAt: row.updated_at as string,
     endedAt: (row.ended_at as string | null) ?? null,
     conclusion: (row.conclusion as string | null) ?? null,
-    projectPath: (row.project_path as string | undefined) ?? process.cwd(),
+    projectPath: (row.project_path as string | undefined) ?? resolveProjectPath(),
     traceId: row.trace_id as string,
   };
 }
@@ -714,13 +756,15 @@ function assertRetries(value: number): void {
 
 function retrySqliteBusy(action: () => void, timeoutMs = SQLITE_STARTUP_TIMEOUT_MS): void {
   const deadline = Date.now() + timeoutMs;
+  let delayMs = SQLITE_RETRY_DELAY_MS;
   while (true) {
     try {
       action();
       return;
     } catch (error) {
       if (!isSqliteBusy(error) || Date.now() >= deadline) throw error;
-      Atomics.wait(SQLITE_RETRY_BUFFER, 0, 0, Math.min(SQLITE_RETRY_DELAY_MS, deadline - Date.now()));
+      Atomics.wait(SQLITE_RETRY_BUFFER, 0, 0, Math.min(delayMs, deadline - Date.now()));
+      delayMs = Math.min(delayMs * 2, 250);
     }
   }
 }

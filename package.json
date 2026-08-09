@@ -1,6 +1,6 @@
 {
   "name": "agentbridge",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "private": true,
   "engines": {
     "node": ">=22.13"
@@ -21,6 +21,8 @@
     "start:mcp": "npm run build:mcp && npm run start -w @agentbridge/mcp",
     "baseline": "node scripts/resource-baseline.mjs",
     "release": "npm run build && node scripts/build-release.mjs",
+    "release:package": "npm run release && node scripts/package-release.mjs",
+    "release:npm": "npm run release && node scripts/build-npm-package.mjs",
     "test": "npm run unit -w @agentbridge/tests",
     "typecheck": "npm run build"
   },

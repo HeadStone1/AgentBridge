@@ -282,3 +282,49 @@ npm view @anthropic-ai/claude-code
 - 新增 App Server fixture、配置卸载回归测试；全量编译通过，新增定向测试 4/4 通过，双 stdio 持久化测试 1/1 通过。
 
 当前仍不能把真实 Provider 账户调用、桌面 App 私有通道附着、签名 EXE、云端部署和自动更新称为已验收；这些需要目标机器/账户或发布基础设施配合。
+
+### 2026-08-09 官方 MCP 兼容性复核与多项目修复
+
+- 按 Claude Code、OpenAI Codex 与 MCP 官方文档复核 stdio、工具协议和配置作用域。
+- 修复开发构建的 MCP 入口计算：`packages/cli/dist/index.js` 现在正确解析到 `packages/mcp/dist/cli.js`，release bundle 仍解析到同目录的 `agentbridge-mcp.mjs`。
+- Claude MCP 配置改为 `~/.claude.json` 的 `projects[绝对项目路径].mcpServers.agentbridge`，并迁移移除旧版顶层 `mcpServers.agentbridge`。
+- Codex MCP 默认配置改为项目级 `<项目>/.codex/config.toml`，同时写入 `cwd`。
+- `setup` 同时写入 `AGENTBRIDGE_PROJECT_PATH` 和项目数据库绝对路径；运行时项目路径优先级为显式参数、`AGENTBRIDGE_PROJECT_PATH`、`CLAUDE_PROJECT_DIR`、进程 cwd。
+- 使用两个临时项目连续执行 `setup`，验证两份 Claude 项目条目和两份 Codex 项目配置同时存在，且生成的 MCP 入口均可访问。
+- Streamable HTTP、网络鉴权和云端 Hub 仍属于后续部署能力，不影响当前本地 stdio 兼容范围。
+
+### 2026-08-09 讨论闭环、会话恢复与上下文修复
+
+- 修复 `close_discussion` 首次接受后只能被动等待的问题：现在会创建结论消息，主动调用对端 connector，并要求对端返回包含相同 decision hash 的结构化接受或拒绝结果。
+- 对端接受时自动记录第二份 agreement、创建 Decision 并进入 `COMPLETED`；对端拒绝、不可用或回复无效时保持 `DISCUSSING`，继续兼容原有手工双签流程。
+- 调整 agreement 更新规则：同一代理可在对端尚未接受时修订自己的结论；仍禁止两个代理接受不同的 decision hash。
+- 移除 Claude CLI、Codex CLI、Codex App Server connector 内的 `discussionId -> sessionId` 内存 Map。协作层现在从 SQLite `agent_sessions` 与最新 provider 消息恢复会话 ID，并显式传给 connector。
+- provider 原生 session/thread 失效时，connector 自动创建新会话，并从 SQLite 完整消息记录重建上下文；Codex 自动后端切换时通过 `providerSessionKind` 避免把 CLI/App Server 会话 ID 交给错误后端。
+- connector 的 `PeerResponse` 不再返回带硬编码 sender/receiver 的临时 Message，只返回内容、时长、可用性和 provider session 信息；消息方向统一由 CollaborationService 根据实际 receiver 生成。
+- 新增统一的有界上下文构建器：保留首条提案和预算内的最新消息，默认历史字符预算 48,000，单条历史消息最多注入 12,000 字符，不再依赖固定 `slice(-12)`。
+- 新增自动结论确认、SQLite 跨 Collaboration 实例 session resume、provider session 按讨论查询和上下文预算测试。
+- 最终验收：全量 build 和 release bundle 构建通过；15 个测试文件、61 个测试全部通过；`AgentBridge-v0.3-node.zip` 已使用最新 CLI/MCP bundle 与 README 重建。
+- 当前边界：已经发出的 provider 请求仍不能在 MCP 进程崩溃后原地接管；恢复发生在下一次工具调用时。
+
+### 2026-08-09 v0.4.0 GitHub Release 安装与更新
+
+- 发布主渠道确定为 GitHub Releases，本地继续使用 Claude Code 与 Codex 官方支持的 stdio MCP，不改成无法直接访问本机项目和 provider 登录状态的纯云端服务。
+- 新增 `npm run release:package`：在当前平台生成包含 CLI/MCP bundle、Node.js 运行时、固定 launcher、安装脚本、版本元数据、README 和 LICENSE 的便携目录。
+- Windows launcher 固定为 `%USERPROFILE%\.agentbridge\bin\agentbridge.cmd`，Linux/macOS 固定为 `~/.agentbridge/bin/agentbridge`；MCP 配置指向固定入口并使用 `mcp` 参数，因此后续版本升级不需要重写 Claude/Codex 配置。
+- 程序安装到 `~/.agentbridge/versions/<版本>/`，`current` 文件选择活动版本；项目配置和 SQLite 数据仍保存在项目目录，不随程序升级覆盖。
+- `setup` 能识别 Release launcher，自动给 Claude 和 Codex 写入固定启动命令；源码构建仍使用 Node 绝对路径和 MCP bundle 入口，兼容原有开发流程。
+- 新增 `version`、`update`、`update --install` 和 `rollback`：默认更新命令只检查；显式安装时从 GitHub Release 下载平台包及 `SHA256SUMS.txt`，校验成功后才调用安装脚本；回滚只切换到已经安装的上一版本。
+- 新增 `.github/workflows/release.yml`：标签触发后先在 Linux 验证构建和测试，再在 Windows、Linux、macOS 打包对应运行时，合并产物、生成 SHA-256 校验文件并创建 GitHub Release；标签必须与根 `package.json` 版本一致，SemVer 预发布标签自动标记 prerelease。
+- README 顶部新增普通用户使用方法，优先说明 Release 下载、Windows/Linux/macOS 安装、诊断、首次工具调用、检查更新、安装更新和回滚；源码开发与标签发布流程保留在后续章节。
+- 新增 Release 版本比较、平台资源命名、GitHub 元数据检查和版本指针回滚测试；稳定版 `releases/latest` 尚不存在而返回 404 时按“暂无稳定 Release”处理，不再把首次发布前的正常状态误报为故障。
+- 本地验收：全量 TypeScript build 通过；16 个测试文件、67 个测试全部通过；Windows 便携目录生成成功；使用临时安装根目录完成安装、`version`、`setup` 和 MCP 生命周期烟测，生成的 Claude/Codex MCP 配置均指向固定 launcher；真实 GitHub 更新检查在尚无稳定 Release 时正确返回空通道。
+- 当前边界：Release 包携带 Node 运行时但不是代码签名的原生 EXE；真实 GitHub tag 发布、三个 GitHub-hosted runner 产物和目标用户机器上的在线更新仍需在推送标签后完成外部 CI/E2E 验证。
+
+### 2026-08-09 npm 开发者分发
+
+- npm 公共包名确定为 `@headstone/agentbridge`；GitHub Release 仍是免 Node 的普通用户主渠道，npm 用于已安装 Node.js `22.13+` 的开发者。
+- 保持 monorepo 根包 `private: true`，新增 `scripts/build-npm-package.mjs` 和 `npm run release:npm`，在 `artifacts/npm/` 生成最小发布目录，避免把源码、测试、workspace 配置和临时文件误发到 npm。
+- npm 包仅包含 CLI/MCP 编译 bundle、README、LICENSE 和最小 `package.json`，提供 `agentbridge` 与 `agentbridge-mcp` 两个 bin 入口。
+- README 顶部新增全局安装、配置和升级说明；不建议使用一次性 `npx setup`，因为 MCP 配置需要稳定的程序路径。
+- GitHub Release 工作流新增 `publish-npm` job，使用 npm Trusted Publishing/OIDC 和 provenance；相同版本已存在时自动跳过，兼容首次手工创建包后再推送同版本 Git 标签的流程。
+- 首次 npm 发布仍需 `headstone` 包所有者在自己的终端完成 `npm login` 和发布，随后在 npm 包设置中绑定 `HeadStone1/AgentBridge` 的 `release.yml` Trusted Publisher；不存储或接收用户 npm 密码、Token、OTP。

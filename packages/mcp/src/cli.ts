@@ -3,7 +3,7 @@ import { CollaborationService } from '@agentbridge/collaboration';
 import { Storage } from '@agentbridge/storage';
 import { runServer } from './server.js';
 import type { AgentType } from '@agentbridge/protocol';
-import { ClaudeConnector, CodexAppServerConnector, CodexConnector } from '@agentbridge/connectors';
+import { ClaudeConnector, CodexAutoConnector } from '@agentbridge/connectors';
 
 const agentType: AgentType = process.env.AGENTBRIDGE_AGENT === 'codex' ? 'codex' : 'claude';
 const storage = new Storage();
@@ -22,12 +22,9 @@ for (const discussion of recovered) {
     metadata: { status: discussion.status, reason: 'stale_process_recovery' },
   });
 }
-const codexConnector = process.env.AGENTBRIDGE_CODEX_APP_COMMAND
-  ? new CodexAppServerConnector({ command: process.env.AGENTBRIDGE_CODEX_APP_COMMAND })
-  : new CodexConnector({
-      command: process.env.AGENTBRIDGE_CODEX_COMMAND ?? process.env.CODEX_CLI_PATH,
-      model: process.env.AGENTBRIDGE_CODEX_MODEL,
-    });
+const codexConnector = new CodexAutoConnector({
+  model: process.env.AGENTBRIDGE_CODEX_MODEL,
+});
 const collaboration = new CollaborationService(
   storage,
   audit,

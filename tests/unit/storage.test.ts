@@ -262,12 +262,14 @@ describe('Storage', () => {
         sessionId: 'claude-session-1',
         projectPath: '/project',
         status: 'IDLE',
-        metadata: { source: 'hook' },
+        metadata: { source: 'hook', discussionId: 'dsc_session' },
       });
 
       expect(session.status).toBe('IDLE');
-      expect(session.metadata).toEqual({ source: 'hook' });
+      expect(session.metadata).toEqual({ source: 'hook', discussionId: 'dsc_session' });
       expect(storage.listSessions('/project')).toHaveLength(1);
+      expect(storage.getSessionForDiscussion('claude', 'dsc_session', '/project')?.sessionId)
+        .toBe('claude-session-1');
 
       const updated = storage.updateSessionStatus('claude', 'claude-session-1', 'BUSY');
       expect(updated.status).toBe('BUSY');
