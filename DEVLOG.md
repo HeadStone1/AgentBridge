@@ -319,3 +319,12 @@ npm view @anthropic-ai/claude-code
 - 新增 Release 版本比较、平台资源命名、GitHub 元数据检查和版本指针回滚测试；稳定版 `releases/latest` 尚不存在而返回 404 时按“暂无稳定 Release”处理，不再把首次发布前的正常状态误报为故障。
 - 本地验收：全量 TypeScript build 通过；16 个测试文件、67 个测试全部通过；Windows 便携目录生成成功；使用临时安装根目录完成安装、`version`、`setup` 和 MCP 生命周期烟测，生成的 Claude/Codex MCP 配置均指向固定 launcher；真实 GitHub 更新检查在尚无稳定 Release 时正确返回空通道。
 - 当前边界：Release 包携带 Node 运行时但不是代码签名的原生 EXE；真实 GitHub tag 发布、三个 GitHub-hosted runner 产物和目标用户机器上的在线更新仍需在推送标签后完成外部 CI/E2E 验证。
+
+### 2026-08-09 npm 开发者分发
+
+- npm 公共包名确定为 `@headstone/agentbridge`；GitHub Release 仍是免 Node 的普通用户主渠道，npm 用于已安装 Node.js `22.13+` 的开发者。
+- 保持 monorepo 根包 `private: true`，新增 `scripts/build-npm-package.mjs` 和 `npm run release:npm`，在 `artifacts/npm/` 生成最小发布目录，避免把源码、测试、workspace 配置和临时文件误发到 npm。
+- npm 包仅包含 CLI/MCP 编译 bundle、README、LICENSE 和最小 `package.json`，提供 `agentbridge` 与 `agentbridge-mcp` 两个 bin 入口。
+- README 顶部新增全局安装、配置和升级说明；不建议使用一次性 `npx setup`，因为 MCP 配置需要稳定的程序路径。
+- GitHub Release 工作流新增 `publish-npm` job，使用 npm Trusted Publishing/OIDC 和 provenance；相同版本已存在时自动跳过，兼容首次手工创建包后再推送同版本 Git 标签的流程。
+- 首次 npm 发布仍需 `headstone` 包所有者在自己的终端完成 `npm login` 和发布，随后在 npm 包设置中绑定 `HeadStone1/AgentBridge` 的 `release.yml` Trusted Publisher；不存储或接收用户 npm 密码、Token、OTP。

@@ -78,6 +78,25 @@ Linux/macOS：
 
 `update` 只检查，不修改文件；只有 `update --install` 才会下载对应平台的 Release 包，校验 `SHA256SUMS.txt` 后安装。程序按版本保存在 `~/.agentbridge/versions/`，项目中的配置和 SQLite 数据不会被覆盖。`rollback` 只切换到已经安装的上一版本。
 
+### npm 安装（适合已经安装 Node.js 的开发者）
+
+npm 包名为 `@headstone/agentbridge`，要求 Node.js `22.13` 或更高版本。建议全局安装，不建议用一次性的 `npx` 执行 `setup`，因为 MCP 配置需要一个长期稳定的程序路径。
+
+```bash
+npm install --global @headstone/agentbridge
+agentbridge setup /absolute/path/to/your-project
+agentbridge doctor /absolute/path/to/your-project
+```
+
+升级 npm 安装版本：
+
+```bash
+npm install --global @headstone/agentbridge@latest
+agentbridge setup /absolute/path/to/your-project
+```
+
+升级后重新运行 `setup` 可以确认 Claude/Codex 配置仍指向当前全局安装位置。npm 安装不携带 Node 运行时；不想管理 Node/npm 的用户应使用上面的 GitHub Release 便携包。
+
 ## 目录
 
 - [它如何工作](#它如何工作)
@@ -835,6 +854,7 @@ npm run build
 npm run baseline
 npm run release
 npm run release:package
+npm run release:npm
 ```
 
 脚本说明：
@@ -844,6 +864,7 @@ npm run release:package
 - `npm run baseline`：测量 MCP 启动时间和内存基线。
 - `npm run release`：重新构建并生成 `release/agentbridge-mcp.mjs` 与 `release/agentbridge-cli.mjs`。
 - `npm run release:package`：为当前平台生成包含 Node 运行时、固定 launcher 和安装脚本的 `artifacts/AgentBridge-v版本-平台-架构/`。
+- `npm run release:npm`：生成只包含编译 bundle 和必要文档的 `artifacts/npm/`，包名为 `@headstone/agentbridge`。
 
 `release/*.mjs` 是需要 Node 的单文件 bundle；最终 GitHub Release 压缩包会同时携带 Node 运行时，因此普通用户不需要预装 Node/npm。它仍不是代码签名的原生 EXE。
 
@@ -869,6 +890,26 @@ git push origin v0.4.0
 标签推送后，[GitHub Actions Release 工作流](.github/workflows/release.yml) 会再次执行构建和测试，然后分别在 Windows、Linux、macOS runner 上打包自带运行时的压缩包，生成 `SHA256SUMS.txt`，最后创建 GitHub Release。标签与 `package.json` 版本不一致时工作流会拒绝发布。
 
 预发布版本使用标准 SemVer，例如把版本改为 `0.4.1-beta.1`，再推送 `v0.4.1-beta.1` 标签；工作流会把它标记为 GitHub prerelease，用户通过 `update --channel beta` 检查。
+
+### 首次发布 npm 包
+
+第一次创建 `@headstone/agentbridge` 时，需要包所有者在自己的终端完成 npm 登录和首次发布，不要把密码、Token 或一次性验证码提交到仓库或发送给其他人：
+
+```bash
+npm login
+npm run release:npm
+npm pack ./artifacts/npm --dry-run
+npm publish ./artifacts/npm --access public --provenance
+```
+
+首次发布成功后，在 npmjs.com 的 `@headstone/agentbridge` 包设置中添加 GitHub Actions Trusted Publisher：
+
+- GitHub owner：`HeadStone1`
+- Repository：`AgentBridge`
+- Workflow：`release.yml`
+- Environment：留空，除非以后专门创建 npm 发布 environment
+
+之后推送与 `package.json` 版本一致的 Git 标签时，Release 工作流会通过 GitHub OIDC 发布 npm 包并生成 provenance，不需要在 GitHub Secrets 中保存长期 npm Token。若相同版本已由首次手工发布，工作流会检测后跳过，避免重复版本导致失败。
 
 项目主要目录：
 

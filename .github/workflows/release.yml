@@ -61,6 +61,32 @@ jobs:
             artifacts/*.tar.gz
           if-no-files-found: error
 
+  publish-npm:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.13.0'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+      - run: npm ci
+      - run: npm install --global npm@11
+      - run: npm run release:npm
+      - name: Publish npm package with provenance
+        shell: bash
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if npm view "@headstone/agentbridge@$version" version >/dev/null 2>&1; then
+            echo "@headstone/agentbridge@$version is already published; skipping."
+          else
+            npm publish ./artifacts/npm --access public --provenance
+          fi
+
   publish:
     needs: package
     runs-on: ubuntu-latest
