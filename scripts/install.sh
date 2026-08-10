@@ -15,6 +15,11 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ "$RUN_SETUP" -eq 1 ]; then
+  [ -d "$PROJECT_PATH" ] || { echo "Project directory does not exist: $PROJECT_PATH" >&2; exit 1; }
+  PROJECT_PATH=$(CDPATH= cd -- "$PROJECT_PATH" && pwd)
+fi
+
 VERSION=$(tr -d '\r\n' < "$PACKAGE_ROOT/VERSION")
 [ -n "$VERSION" ] || { echo 'VERSION is empty.' >&2; exit 1; }
 
@@ -29,8 +34,10 @@ printf '%s\n' "$VERSION" > "$INSTALL_ROOT/current"
 
 if [ "$RUN_SETUP" -eq 1 ]; then
   "$INSTALL_ROOT/bin/agentbridge" setup "$PROJECT_PATH"
+  "$INSTALL_ROOT/bin/agentbridge" doctor "$PROJECT_PATH"
 fi
 
 printf 'AgentBridge %s installed in %s\n' "$VERSION" "$INSTALL_ROOT"
 printf 'Launcher: %s\n' "$INSTALL_ROOT/bin/agentbridge"
+printf "Full uninstall: '%s' uninstall-all --yes --remove-program\n" "$INSTALL_ROOT/bin/agentbridge"
 printf 'Restart Claude Code and Codex after setup.\n'

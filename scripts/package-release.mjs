@@ -18,10 +18,21 @@ const runtime = valueAfter('--node-runtime') ?? process.execPath;
 const packageName = `AgentBridge-v${packageJson.version}-${targetPlatform}-${targetArch}`;
 const artifacts = join(root, 'artifacts');
 const output = join(artifacts, packageName);
+const documentationFiles = [
+  'README.md',
+  'README.en.md',
+  'README.es.md',
+  'README.ai.md',
+  'LICENSE',
+  'NOTICE',
+  'LICENSE_HISTORY.md',
+  'COMMERCIAL_LICENSE.md',
+];
 
 for (const required of [
   join(root, 'release', 'agentbridge-cli.mjs'),
   join(root, 'release', 'agentbridge-mcp.mjs'),
+  ...documentationFiles.map((file) => join(root, file)),
   runtime,
 ]) {
   if (!existsSync(required)) throw new Error(`Required release input not found: ${required}`);
@@ -34,8 +45,9 @@ mkdirSync(join(output, 'bin'), { recursive: true });
 
 copyFileSync(join(root, 'release', 'agentbridge-cli.mjs'), join(output, 'app', 'agentbridge-cli.mjs'));
 copyFileSync(join(root, 'release', 'agentbridge-mcp.mjs'), join(output, 'app', 'agentbridge-mcp.mjs'));
-copyFileSync(join(root, 'README.md'), join(output, 'README.md'));
-copyFileSync(join(root, 'LICENSE'), join(output, 'LICENSE'));
+for (const file of documentationFiles) {
+  copyFileSync(join(root, file), join(output, file));
+}
 copyFileSync(join(root, 'scripts', 'install.ps1'), join(output, 'install.ps1'));
 copyFileSync(join(root, 'scripts', 'install.sh'), join(output, 'install.sh'));
 

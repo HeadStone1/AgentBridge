@@ -8,6 +8,7 @@ $ErrorActionPreference = 'Stop'
 $PackageRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Version = (Get-Content -LiteralPath (Join-Path $PackageRoot 'VERSION') -Raw).Trim()
 if (-not $Version) { throw 'VERSION is empty.' }
+if (-not $NoSetup) { $ResolvedProject = (Resolve-Path -LiteralPath $ProjectPath).Path }
 
 $VersionRoot = Join-Path $InstallRoot (Join-Path 'versions' $Version)
 $BinRoot = Join-Path $InstallRoot 'bin'
@@ -23,10 +24,13 @@ Set-Content -LiteralPath (Join-Path $InstallRoot 'current') -Value $Version -Enc
 $Launcher = Join-Path $BinRoot 'agentbridge.cmd'
 
 if (-not $NoSetup) {
-  & $Launcher setup (Resolve-Path -LiteralPath $ProjectPath).Path
+  & $Launcher setup $ResolvedProject
   if ($LASTEXITCODE -ne 0) { throw "AgentBridge setup failed with exit code $LASTEXITCODE." }
+  & $Launcher doctor $ResolvedProject
+  if ($LASTEXITCODE -ne 0) { throw "AgentBridge doctor failed to run with exit code $LASTEXITCODE." }
 }
 
 Write-Host "AgentBridge $Version installed in $InstallRoot"
 Write-Host "Launcher: $Launcher"
+Write-Host ('Full uninstall: & "{0}" uninstall-all --yes --remove-program' -f $Launcher)
 Write-Host 'Restart Claude Code and Codex after setup.'

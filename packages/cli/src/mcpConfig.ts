@@ -73,6 +73,17 @@ export function removeClaudeJson(path: string, projectPath: string): ConfigUpdat
   return { provider: 'claude', path, changed: true, backupPath };
 }
 
+export function listClaudeAgentBridgeProjects(path: string): string[] {
+  if (!existsSync(path)) return [];
+  const existing = readJsonObject(path);
+  const projects = isRecord(existing.projects) ? existing.projects : {};
+  return Object.entries(projects)
+    .filter(([, value]) => isRecord(value)
+      && isRecord(value.mcpServers)
+      && Object.prototype.hasOwnProperty.call(value.mcpServers, 'agentbridge'))
+    .map(([projectPath]) => projectPath);
+}
+
 export function configureCodexToml(path: string, server: McpServerCommand): ConfigUpdateResult {
   const existing = existsSync(path) ? readFileSync(path, 'utf8') : '';
   const section = [

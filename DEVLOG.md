@@ -2,6 +2,24 @@
 
 ## 2026-08-10
 
+### 多语言与 AI Agent 部署文档、非商业许可
+
+- 保留完整中文 `README.md`，新增英文 `README.en.md`、西班牙语 `README.es.md`，并在各文件顶部提供语言导航。
+- 新增面向自动部署代理的 `README.ai.md`，把同机/同虚拟机边界、安装方式选择、逐项目 setup、Codex App 与 Codex CLI 后端判定、四层验收、更新、卸载和常见踩坑写成可执行检查清单。
+- AI 部署手册要求以 `doctor.providers.codexSelectedBackend` 为准：Codex App 应为 `mode=app-server`、`source=desktop`；独立 Codex CLI 应为 `mode=cli`，不能把 GUI 进程存在等同于 App Server 可用。
+- v0.5.0 起从 Apache-2.0 切换为 SPDX 标识 `PolyForm-Noncommercial-1.0.0`，新增 `NOTICE`、`LICENSE_HISTORY.md` 和 `COMMERCIAL_LICENSE.md`；明确公开许可不授予第三方商业使用权，商业授权由 HeadStone1 另行书面授予。
+- 记录 v0.4.2 及更早已发布版本继续受其 Apache-2.0 许可约束，新的许可不追溯撤销既有授权；第三方组件继续使用各自许可证。
+- 新增 `CONTRIBUTING.md`，避免外部贡献与后续商业再许可权不清；发布包和 npm 包现在同时携带多语言、AI 部署与许可文件。
+
+### 安装与验收文档补全
+
+- README 顶部增加 Release、npm、源码三种安装方式的选择表，并明确 Claude Code、Codex App/CLI 必须与 AgentBridge 位于同一台机器或虚拟机且提前完成登录。
+- 明确 Codex App 用户不需要单独安装 Codex CLI，并给出 `codexSelectedBackend.mode=app-server`、`source=desktop` 的诊断标准。
+- 补充 Windows SHA-256 校验、预期安装输出和权限/路径故障处理；补充 Linux/macOS 包名选择、校验及 `chmod +x install.sh` 处理。
+- 明确每个项目都要单独执行 `setup`，并把验收拆分为 doctor、配置文件、客户端 MCP 工具列表、真实双向调用四层。
+- 明确 `uninstall` 只删除项目状态和 MCP 条目，程序级删除需要在逐项目卸载后另行执行。
+- 删除仓库根目录的旧 `AgentBridge-v0.3-node.zip`，避免它被误认为当前 v0.4.2 便携安装包。
+
 ### v0.4.2 跨平台发布打包修复
 
 - 修复 `build-release.mjs` 在 Linux/macOS Runner 上把原生 `esbuild` 二进制文件交给 Node.js 解释执行的问题，改用 esbuild JavaScript API 统一生成 CLI/MCP bundle。
@@ -341,3 +359,15 @@ npm view @anthropic-ai/claude-code
 - README 顶部新增全局安装、配置和升级说明；不建议使用一次性 `npx setup`，因为 MCP 配置需要稳定的程序路径。
 - GitHub Release 工作流新增 `publish-npm` job，使用 npm Trusted Publishing/OIDC 和 provenance；相同版本已存在时自动跳过，兼容首次手工创建包后再推送同版本 Git 标签的流程。
 - 首次 npm 发布仍需 `headstone` 包所有者在自己的终端完成 `npm login` 和发布，随后在 npm 包设置中绑定 `HeadStone1/AgentBridge` 的 `release.yml` Trusted Publisher；不存储或接收用户 npm 密码、Token、OTP。
+
+### 2026-08-10 v0.5.0 系统安装、完整卸载与 doctor 增强
+
+- `setup` 现在将每个项目及其 Claude/Codex 配置路径登记到用户级 `~/.agentbridge/projects.json`；多项目仍各自保存数据库和 Codex 项目配置，程序更新不会覆盖项目数据。
+- 新增 `uninstall-all --yes`，可一次清理全部已登记项目；同时会从 `~/.claude.json` 发现旧版本项目，兼容升级前没有登记文件的安装。
+- 新增 `uninstall-all --yes --remove-program`：Release 安装在 CLI/launcher/MCP 进程退出后安全删除版本目录，npm 安装调用全局包卸载；任一项目清理失败时保留程序，避免失去重试入口。
+- 完整卸载不作为 MCP 工具暴露，必须由用户明确授权编码代理执行 CLI；源码模式只清理项目数据和配置，不自动删除 Git 仓库。
+- 修复旧 `uninstall` 路径安全判断只适用于 Windows 分隔符、导致 Unix 卸载被拒绝的问题；同时保护用户主目录项目与默认 Release 安装根目录重合的特殊情况，避免误删整个程序目录。
+- `doctor` 改为结构化、分项且不中断的诊断：覆盖操作系统/架构、Node、安装模式、项目元数据、数据库读写、项目登记、Claude/Codex 配置、启动命令和 provider 探测，并返回汇总与可执行修复建议。
+- `doctor` 对不存在或未初始化的项目保持只读，不再自动创建数据库；provider 命令失败、配置缺失或 Codex 模式无效时仍返回完整 JSON。
+- 新增跨平台安装登记、Release 识别、doctor 只读失败、多项目 setup/完整卸载回归测试；Release 工作流的测试阶段扩展为 Windows、Ubuntu、macOS 三平台矩阵，版本提升为 `0.5.0`。
+- 本地最终回归为 17 个测试文件、71 个测试全部通过；隔离 Windows Release 的安装、setup、doctor、配置校验和 `uninstall-all` 烟测通过。托管执行环境会回收脱离任务的后台进程，因此 `--remove-program` 的进程退出后自删除仍由目标终端及三平台 CI/Release 验证覆盖。
