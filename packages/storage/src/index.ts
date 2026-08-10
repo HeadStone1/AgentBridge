@@ -16,6 +16,15 @@ import type {
 import { canTransition, resolveProjectPath } from '@agentbridge/protocol';
 
 export type { StoragePort } from './port.js';
+export {
+  ensureProjectMetadata,
+  readProjectRegistry,
+  registerProject,
+  registryPath,
+  registryRoot,
+  unregisterProject,
+} from './registry.js';
+export type { RegisteredProject } from './registry.js';
 
 const DEFAULT_MAX_TURNS = 6;
 const MAX_ALLOWED_TURNS = 50;

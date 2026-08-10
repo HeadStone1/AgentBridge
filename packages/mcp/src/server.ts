@@ -17,6 +17,17 @@ export interface MCPServerOptions {
   exitAfterToolCalls?: number;
 }
 
+export interface MCPRuntime {
+  storage: Storage;
+  collaboration: CollaborationService;
+  projectPath?: string;
+}
+
+export type MCPRuntimeResolver = (
+  requestedProjectPath: string | undefined,
+  server: Server,
+) => Promise<MCPRuntime>;
+
 const text = z.string().trim().min(1).max(100_000);
 const id = z.string().trim().min(1).max(256);
 
@@ -113,6 +124,18 @@ export function createMCPServer(
   collaboration: CollaborationService,
   options: MCPServerOptions = {},
 ) {
+  return createServer(async () => ({ storage, collaboration }), options);
+}
+
+/** Create a server that binds to its project lazily after MCP initialization. */
+export function createDynamicMCPServer(
+  resolveRuntime: MCPRuntimeResolver,
+  options: MCPServerOptions = {},
+) {
+  return createServer(resolveRuntime, options);
+}
+
+function createServer(resolveRuntime: MCPRuntimeResolver, options: MCPServerOptions) {
   const agentType = options.agentType ?? 'claude';
   let toolCallCount = 0;
   const schemas = {
@@ -149,19 +172,21 @@ export function createMCPServer(
       switch (name) {
         case 'ask_peer': {
           const input = parse(schemas.ask, args);
-          const result = await collaboration.initiateDiscussion({
+          const runtime = await resolveRuntime(input.projectPath, server);
+          const result = await runtime.collaboration.initiateDiscussion({
             driver: agentType,
             peer: input.peer,
             topic: input.message.slice(0, 100),
             initialMessage: input.message,
-            projectPath: input.projectPath,
+            projectPath: runtime.projectPath ?? input.projectPath,
             traceId: `tr_${randomUUID()}`,
           });
           return ok(result);
         }
         case 'reply_peer': {
           const input = parse(schemas.reply, args);
-          return ok(await collaboration.replyToDiscussion({
+          const runtime = await resolveRuntime(undefined, server);
+          return ok(await runtime.collaboration.replyToDiscussion({
             discussionId: input.discussionId,
             reply: input.message,
             sender: agentType,
@@ -169,15 +194,18 @@ export function createMCPServer(
         }
         case 'get_discussion': {
           const input = parse(schemas.get, args);
-          return ok(await collaboration.getDiscussion(input.discussionId));
+          const runtime = await resolveRuntime(undefined, server);
+          return ok(await runtime.collaboration.getDiscussion(input.discussionId));
         }
         case 'list_discussions': {
           const input = parse(schemas.list, args);
-          return ok({ discussions: storage.listDiscussions(input.projectPath) });
+          const runtime = await resolveRuntime(input.projectPath, server);
+          return ok({ discussions: runtime.storage.listDiscussions(runtime.projectPath ?? input.projectPath) });
         }
         case 'close_discussion': {
           const input = parse(schemas.close, args);
-          return ok(await collaboration.closeDiscussion({
+          const runtime = await resolveRuntime(undefined, server);
+          return ok(await runtime.collaboration.closeDiscussion({
             discussionId: input.discussionId,
             conclusion: input.conclusion,
             agent: agentType,
@@ -185,14 +213,16 @@ export function createMCPServer(
         }
         case 'cancel_discussion': {
           const input = parse(schemas.cancel, args);
-          return ok(await collaboration.cancelDiscussion({
+          const runtime = await resolveRuntime(undefined, server);
+          return ok(await runtime.collaboration.cancelDiscussion({
             discussionId: input.discussionId,
             agent: agentType,
           }));
         }
         case 'retry_discussion': {
           const input = parse(schemas.retry, args);
-          return ok(await collaboration.retryDiscussion({
+          const runtime = await resolveRuntime(undefined, server);
+          return ok(await runtime.collaboration.retryDiscussion({
             discussionId: input.discussionId,
             agent: agentType,
           }));
@@ -214,6 +244,14 @@ export async function runServer(
   options: MCPServerOptions = {},
 ) {
   const server = createMCPServer(storage, collaboration, options);
+  await server.connect(new StdioServerTransport());
+}
+
+export async function runDynamicServer(
+  resolveRuntime: MCPRuntimeResolver,
+  options: MCPServerOptions = {},
+) {
+  const server = createDynamicMCPServer(resolveRuntime, options);
   await server.connect(new StdioServerTransport());
 }
 

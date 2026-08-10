@@ -4,7 +4,7 @@
 
 AgentBridge is a local-first MCP collaboration bridge that lets Claude Code and OpenAI Codex ask each other questions, reply, retry, reach agreement, and persist discussion state in a project-local SQLite database.
 
-> Current development version: v0.5.0. The recommended GitHub Release packages include a Node.js runtime and install into the user's home directory. They do not depend on the downloaded archive or source repository after installation.
+> Current development version: v0.6.0. AgentBridge is registered globally once; each client session then detects the active project and keeps its SQLite data inside that project.
 
 ## Install first, read details second
 
@@ -30,28 +30,26 @@ Do not mix Release, npm, and source commands. Download ordinary user builds from
 
 Download the package matching your platform plus `SHA256SUMS.txt`:
 
-- Windows x64: `AgentBridge-v0.5.0-win32-x64.zip`
-- Linux x64: `AgentBridge-v0.5.0-linux-x64.tar.gz`
-- macOS Apple Silicon: `AgentBridge-v0.5.0-darwin-arm64.tar.gz`
+- Windows x64: `AgentBridge-v0.6.0-win32-x64.zip`
+- Linux x64: `AgentBridge-v0.6.0-linux-x64.tar.gz`
+- macOS Apple Silicon: `AgentBridge-v0.6.0-darwin-arm64.tar.gz`
 
 Linux ARM64 and Intel macOS currently require npm or source installation.
 
 Windows PowerShell, after verifying the archive against `SHA256SUMS.txt` and extracting it:
 
 ```powershell
-$project = 'C:\absolute\path\to\project'
-if (-not (Test-Path -LiteralPath $project -PathType Container)) { throw 'Project path does not exist' }
 Unblock-File -LiteralPath '.\install.ps1'
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -ProjectPath $project
-& "$env:USERPROFILE\.agentbridge\bin\agentbridge.cmd" doctor $project
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+& "$env:USERPROFILE\.agentbridge\bin\agentbridge.cmd" doctor
 ```
 
 Linux/macOS, after verifying and extracting the archive:
 
 ```bash
 chmod +x install.sh
-./install.sh /absolute/path/to/project
-~/.agentbridge/bin/agentbridge doctor /absolute/path/to/project
+./install.sh
+~/.agentbridge/bin/agentbridge doctor
 ```
 
 The installer runs setup and doctor, then prints the permanent launcher and full-uninstall command.
@@ -64,8 +62,8 @@ The npm package is [`@headstone/agentbridge`](https://www.npmjs.com/package/@hea
 node --version
 npm install --global @headstone/agentbridge
 agentbridge --version
-agentbridge setup /absolute/path/to/project
-agentbridge doctor /absolute/path/to/project
+agentbridge setup
+agentbridge doctor
 ```
 
 Use Node.js 22.13 or newer. Avoid one-shot `npx` setup because MCP configuration needs a stable program path.
@@ -77,8 +75,8 @@ git clone https://github.com/HeadStone1/AgentBridge.git
 cd AgentBridge
 npm ci
 npm test
-node packages/cli/dist/index.js setup /absolute/path/to/project
-node packages/cli/dist/index.js doctor /absolute/path/to/project
+node packages/cli/dist/index.js setup
+node packages/cli/dist/index.js doctor
 ```
 
 Source mode is for development. Prefer a Release package for a source-independent user installation.
@@ -107,23 +105,18 @@ Standalone Codex CLI should report:
 
 `codexAppDetected` only indicates whether the GUI process was observed. It does not prove App Server availability. When App mode is intended, `codexAppServer` must be true and the selected backend must be `app-server` from `desktop`.
 
-## Configure every project
+## Register once, use every project
 
-Each project gets its own configuration and SQLite database. Run setup once per project:
+Run `agentbridge setup` only once. It writes one user-scoped server to `~/.claude.json` and one global server to `~/.codex/config.toml`; it does not pin a project path, database path, or Codex `cwd`.
 
-```bash
-agentbridge setup /absolute/project-a
-agentbridge setup /absolute/project-b
-```
-
-Setup writes the project-specific Codex MCP entry to `<project>/.codex/config.toml`, the Claude entry to that absolute project's scope in `~/.claude.json`, and data to `<project>/.agentbridge`. Fully quit and reopen Claude Code and Codex after changes.
+After restarting both clients, open any project normally. The first AgentBridge tool call binds that MCP process to the active project using Claude's project environment, MCP roots, or the client's working directory. It then creates `<project>/.agentbridge/agentbridge.sqlite`. Different projects remain isolated without another setup command. If the host supplies no safe project context, pass the absolute `projectPath` to the first `ask_peer` or `list_discussions` call.
 
 ## Verify the complete connection
 
 Doctor is necessary, but it cannot prove that an already running client reloaded MCP. Complete all four checks.
 
 1. Run `agentbridge doctor /absolute/project`. Require top-level `ok: true`, valid installation/project/database/configuration checks, `providers.claudeCli: true`, and the intended Codex backend.
-2. Inspect `~/.claude.json` and `<project>/.codex/config.toml`. Claude must use `AGENTBRIDGE_AGENT=claude`; Codex must use `AGENTBRIDGE_AGENT=codex`; both must point to the same absolute `AGENTBRIDGE_DB_PATH`.
+2. Inspect `~/.claude.json` and `~/.codex/config.toml`. Claude must use `AGENTBRIDGE_AGENT=claude`; Codex must use `AGENTBRIDGE_AGENT=codex`; neither global entry should pin `AGENTBRIDGE_PROJECT_PATH`, `AGENTBRIDGE_DB_PATH`, or Codex `cwd`.
 3. Restart both clients and confirm the `agentbridge` MCP server exposes seven tools: `ask_peer`, `reply_peer`, `get_discussion`, `list_discussions`, `close_discussion`, `cancel_discussion`, and `retry_discussion`.
 4. Perform a real Claude-to-Codex `ask_peer` call and a real Codex-to-Claude call, then verify them with `agentbridge status /absolute/project`.
 
@@ -131,14 +124,14 @@ Doctor is necessary, but it cannot prove that an already running client reloaded
 
 | Command | Purpose |
 |---|---|
-| `setup [path]` | Initialize a project and configure both MCP clients |
+| `setup [path]` | Configure both MCP clients globally; an optional path only pre-initializes one project |
 | `doctor [path]` | Diagnose installation, project, DB, configs, launchers, and providers |
 | `status [path]` | Show sessions, discussions, and metrics |
 | `version` | Show AgentBridge version |
 | `update` | Check stable GitHub Releases without modifying files |
 | `update --install` | Download, verify, and install the latest compatible Release |
 | `rollback` | Select the previously installed Release version |
-| `uninstall [path] --yes` | Remove one project's MCP entries and data |
+| `uninstall [path] --yes` | Remove one project's data while keeping global MCP registration |
 | `uninstall-all --yes --remove-program` | Remove all registered projects and the Release/npm program |
 
 Windows Release users call `%USERPROFILE%\.agentbridge\bin\agentbridge.cmd`; Unix Release users call `~/.agentbridge/bin/agentbridge`.
@@ -150,16 +143,16 @@ Release users:
 ```bash
 agentbridge update
 agentbridge update --install
-agentbridge setup /absolute/project
-agentbridge doctor /absolute/project
+agentbridge setup
+agentbridge doctor
 ```
 
 npm users:
 
 ```bash
 npm install --global @headstone/agentbridge@latest
-agentbridge setup /absolute/project
-agentbridge doctor /absolute/project
+agentbridge setup
+agentbridge doctor
 ```
 
 Restart both clients after updating. Release updates keep versioned program files and support `agentbridge rollback`.

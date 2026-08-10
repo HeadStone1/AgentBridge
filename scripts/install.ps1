@@ -1,5 +1,5 @@
 param(
-  [string]$ProjectPath = (Get-Location).Path,
+  [string]$ProjectPath,
   [string]$InstallRoot = (Join-Path $env:USERPROFILE '.agentbridge'),
   [switch]$NoSetup
 )
@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 $PackageRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Version = (Get-Content -LiteralPath (Join-Path $PackageRoot 'VERSION') -Raw).Trim()
 if (-not $Version) { throw 'VERSION is empty.' }
-if (-not $NoSetup) { $ResolvedProject = (Resolve-Path -LiteralPath $ProjectPath).Path }
+if (-not $NoSetup -and $ProjectPath) { $ResolvedProject = (Resolve-Path -LiteralPath $ProjectPath).Path }
 
 $VersionRoot = Join-Path $InstallRoot (Join-Path 'versions' $Version)
 $BinRoot = Join-Path $InstallRoot 'bin'
@@ -24,13 +24,17 @@ Set-Content -LiteralPath (Join-Path $InstallRoot 'current') -Value $Version -Enc
 $Launcher = Join-Path $BinRoot 'agentbridge.cmd'
 
 if (-not $NoSetup) {
-  & $Launcher setup $ResolvedProject
+  $SetupArgs = @('setup')
+  if ($ResolvedProject) { $SetupArgs += $ResolvedProject }
+  & $Launcher @SetupArgs
   if ($LASTEXITCODE -ne 0) { throw "AgentBridge setup failed with exit code $LASTEXITCODE." }
-  & $Launcher doctor $ResolvedProject
+  $DoctorArgs = @('doctor')
+  if ($ResolvedProject) { $DoctorArgs += $ResolvedProject }
+  & $Launcher @DoctorArgs
   if ($LASTEXITCODE -ne 0) { throw "AgentBridge doctor failed to run with exit code $LASTEXITCODE." }
 }
 
 Write-Host "AgentBridge $Version installed in $InstallRoot"
 Write-Host "Launcher: $Launcher"
 Write-Host ('Full uninstall: & "{0}" uninstall-all --yes --remove-program' -f $Launcher)
-Write-Host 'Restart Claude Code and Codex after setup.'
+Write-Host 'AgentBridge is registered globally. Restart Claude Code and Codex, then open any project.'

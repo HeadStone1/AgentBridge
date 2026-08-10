@@ -2,6 +2,17 @@
 
 ## 2026-08-10
 
+### v0.6.0 全局 MCP 注册与动态项目隔离
+
+- 将默认部署从“每个项目执行 setup”改为“一次全局 setup”：Claude 写入用户级 `~/.claude.json`，Codex App/CLI/IDE 写入共享的 `~/.codex/config.toml`；全局条目不再固定项目路径、数据库路径或 Codex `cwd`。
+- MCP 服务改为延迟创建运行时。首次工具调用依次从显式兼容路径、`CLAUDE_PROJECT_DIR`、客户端声明的 MCP roots、进程 cwd 识别项目；只有客户端声明 roots 能力时才发送 `roots/list`，兼容不支持 roots 的 MCP 客户端。
+- 每个 stdio MCP 进程只绑定一个项目，项目数据仍保存到 `<project>/.agentbridge/agentbridge.sqlite`。若只能解析到用户主目录、文件系统根或安装目录等不安全位置，服务明确报错且不创建数据库；首个 `ask_peer`/`list_discussions` 可用绝对 `projectPath` 兜底。
+- 首次使用项目时自动创建项目元数据并写入清理登记；登记写入增加跨进程锁、过期锁恢复和原子替换，避免 Claude/Codex 同时启动导致 `projects.json` 丢记录。
+- 新版 `setup` 自动清理已登记的 v0.5.x 项目级 Codex 条目和 Claude scoped 条目，并把登记迁移为 global scope；单项目 `uninstall` 只删除该项目数据，全局 MCP 配置由 `uninstall-all` 统一删除。
+- `doctor` 改为验证全局配置、动态路由和可自动初始化状态，不再把“当前目录尚未调用过 AgentBridge、没有数据库”误判成安装失败。
+- Windows、Linux、macOS 安装脚本改为无项目参数即可完成全局 setup/doctor；三语 README 与 AI 部署手册已更新升级、验证、项目识别和常见故障说明。
+- 完整 TypeScript 构建通过，17 个测试文件、73 项测试全部通过，包括无参数全局 setup、旧/新配置共存卸载保护，以及两个独立 stdio MCP 进程共享同一项目 SQLite 的集成测试。
+
 ### 多语言与 AI Agent 部署文档、非商业许可
 
 - 保留完整中文 `README.md`，新增英文 `README.en.md`、西班牙语 `README.es.md`，并在各文件顶部提供语言导航。

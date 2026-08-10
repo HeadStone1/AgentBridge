@@ -5,8 +5,7 @@ import { spawn } from 'node:child_process';
 import process from 'node:process';
 import { ClaudeConnector, CodexAutoConnector, CodexConnector, discoverCodexCommands, type CodexBackendMode } from '@agentbridge/connectors';
 import { Storage } from '@agentbridge/storage';
-import { claudeProjectKey } from './mcpConfig.js';
-import { defaultCodexConfig } from './paths.js';
+import { defaultGlobalCodexConfig } from './paths.js';
 import { detectInstallation, readProjectRegistry, registryPath } from './installation.js';
 
 export interface DoctorOptions {
@@ -27,23 +26,23 @@ export async function runDoctor(
   const projectFile = join(stateDir, 'project.json');
   const dbPath = resolve(env.AGENTBRIDGE_DB_PATH ?? join(stateDir, 'agentbridge.sqlite'));
   const claudeConfig = String(options['claude-config'] ?? join(homedir(), '.claude.json'));
-  const codexConfig = String(options['codex-config'] ?? defaultCodexConfig(projectPath));
+  const codexConfig = String(options['codex-config'] ?? defaultGlobalCodexConfig());
   const recommendations: string[] = [];
 
   const project = inspectProject(projectPath, projectFile);
   if (!project.exists) recommendations.push(`Create the project directory first: ${projectPath}`);
-  else if (!project.initialized) recommendations.push(`Run agentbridge setup "${projectPath}"`);
+  else if (!project.initialized) recommendations.push('No project state exists yet; it will be created automatically on the first AgentBridge tool call.');
 
   const installation = detectInstallation(env);
   if (!installation.valid) recommendations.push(...installation.issues.map((issue) => `Repair the AgentBridge installation: ${issue}`));
   if (!installation.sourceIndependent) recommendations.push('For a source-independent installation, use the GitHub Release package or global npm package.');
 
   const database = inspectDatabase(project.initialized, stateDir, dbPath);
-  if (!database.ok && project.initialized) recommendations.push(`Check read/write permissions for ${stateDir}`);
+  if (!database.ok) recommendations.push(`Check read/write permissions for ${projectPath}`);
 
   const configuration = {
-    claude: inspectClaudeConfig(claudeConfig, projectPath, dbPath),
-    codex: inspectCodexConfig(codexConfig, projectPath, dbPath),
+    claude: inspectClaudeConfig(claudeConfig),
+    codex: inspectCodexConfig(codexConfig),
   };
   if (!configuration.claude.ok) recommendations.push(`Run setup again to repair Claude MCP configuration: ${claudeConfig}`);
   if (!configuration.codex.ok) recommendations.push(`Run setup again to repair Codex MCP configuration: ${codexConfig}`);
@@ -61,16 +60,13 @@ export async function runDoctor(
   if (!node.ok) recommendations.push('Use Node.js 22.13 or newer, or install the self-contained GitHub Release package.');
 
   const registry = inspectRegistry(projectPath, env);
-  if (project.initialized && !registry.registered) recommendations.push(`Run setup again so the project is included in full uninstall: ${projectPath}`);
+  if (project.initialized && !registry.registered) recommendations.push('Use an AgentBridge MCP tool once to add this existing project to automatic cleanup tracking.');
 
   const requiredChecks = [
     node.ok,
     project.exists,
-    project.initialized,
-    project.metadataValid,
     database.ok,
     installation.valid,
-    registry.registered,
     registry.valid,
     configuration.claude.ok,
     configuration.codex.ok,
@@ -93,7 +89,7 @@ export async function runDoctor(
       passed: requiredChecks.filter(Boolean).length,
       failed: requiredChecks.filter((value) => !value).length,
       message: ok
-        ? 'AgentBridge local checks passed. Restart both clients and verify the MCP tools in each client.'
+        ? 'AgentBridge global checks passed. Restart both clients, open a project, and verify the MCP tools in each client.'
         : 'One or more local checks failed. Follow recommendations in order, then run doctor again.',
     },
     recommendations: [...new Set(recommendations)],
@@ -119,7 +115,14 @@ function inspectProject(projectPath: string, projectFile: string): Record<string
 }
 
 function inspectDatabase(initialized: boolean, stateDir: string, dbPath: string): Record<string, unknown> & { ok: boolean } {
-  if (!initialized) return { ok: false, path: dbPath, exists: existsSync(dbPath), tested: false, error: 'project is not initialized' };
+  if (!initialized) {
+    try {
+      accessSync(resolve(stateDir, '..'), constants.R_OK | constants.W_OK);
+      return { ok: true, path: dbPath, exists: false, tested: false, autoInitialize: true };
+    } catch (cause) {
+      return { ok: false, path: dbPath, exists: false, tested: false, autoInitialize: true, error: errorMessage(cause) };
+    }
+  }
   try {
     accessSync(stateDir, constants.R_OK | constants.W_OK);
     const existed = existsSync(dbPath);
@@ -135,23 +138,20 @@ function inspectDatabase(initialized: boolean, stateDir: string, dbPath: string)
   }
 }
 
-function inspectClaudeConfig(path: string, projectPath: string, dbPath: string): Record<string, unknown> & { ok: boolean } {
+function inspectClaudeConfig(path: string): Record<string, unknown> & { ok: boolean } {
   if (!existsSync(path)) return { ok: false, path, exists: false, configured: false, error: 'configuration file is missing' };
   try {
     const root = JSON.parse(readFileSync(path, 'utf8')) as Record<string, any>;
-    const server = root.projects?.[claudeProjectKey(projectPath)]?.mcpServers?.agentbridge;
+    const server = root.mcpServers?.agentbridge;
     if (!server || typeof server.command !== 'string') {
-      return { ok: false, path, exists: true, configured: false, error: 'project-scoped agentbridge server is missing' };
+      return { ok: false, path, exists: true, configured: false, error: 'global agentbridge server is missing' };
     }
-    const environmentMatches = typeof server.env?.AGENTBRIDGE_PROJECT_PATH === 'string'
-      && samePath(server.env.AGENTBRIDGE_PROJECT_PATH, projectPath)
-      && typeof server.env?.AGENTBRIDGE_DB_PATH === 'string'
-      && samePath(server.env.AGENTBRIDGE_DB_PATH, dbPath)
-      && server.env?.AGENTBRIDGE_AGENT === 'claude';
+    const environmentMatches = server.env?.AGENTBRIDGE_AGENT === 'claude';
+    const dynamicRouting = !server.env?.AGENTBRIDGE_PROJECT_PATH && !server.env?.AGENTBRIDGE_DB_PATH;
     const commandAvailable = isCommandAvailable(server.command);
     const entryAvailable = areEntryArgumentsAvailable(server.args);
     return {
-      ok: environmentMatches && commandAvailable && entryAvailable,
+      ok: environmentMatches && dynamicRouting && commandAvailable && entryAvailable,
       path,
       exists: true,
       configured: true,
@@ -159,13 +159,15 @@ function inspectClaudeConfig(path: string, projectPath: string, dbPath: string):
       commandAvailable,
       entryAvailable,
       environmentMatches,
+      dynamicRouting,
+      scope: 'global',
     };
   } catch (cause) {
     return { ok: false, path, exists: true, configured: false, error: errorMessage(cause) };
   }
 }
 
-function inspectCodexConfig(path: string, projectPath: string, dbPath: string): Record<string, unknown> & { ok: boolean } {
+function inspectCodexConfig(path: string): Record<string, unknown> & { ok: boolean } {
   if (!existsSync(path)) return { ok: false, path, exists: false, configured: false, error: 'configuration file is missing' };
   try {
     const source = readFileSync(path, 'utf8');
@@ -173,14 +175,14 @@ function inspectCodexConfig(path: string, projectPath: string, dbPath: string): 
     if (!section) return { ok: false, path, exists: true, configured: false, error: 'agentbridge section is missing' };
     const command = tomlValue(section, 'command');
     const args = tomlArray(section, 'args');
-    const environmentMatches = section.includes(`env.AGENTBRIDGE_AGENT = 'codex'`)
-      && section.includes(`env.AGENTBRIDGE_PROJECT_PATH = '${tomlString(projectPath)}'`)
-      && section.includes(`env.AGENTBRIDGE_DB_PATH = '${tomlString(dbPath)}'`);
-    const cwdMatches = section.includes(`cwd = '${tomlString(projectPath)}'`);
+    const environmentMatches = section.includes(`env.AGENTBRIDGE_AGENT = 'codex'`);
+    const dynamicRouting = !section.includes('env.AGENTBRIDGE_PROJECT_PATH')
+      && !section.includes('env.AGENTBRIDGE_DB_PATH')
+      && !/^\s*cwd\s*=/m.test(section);
     const commandAvailable = command ? isCommandAvailable(command) : false;
     const entryAvailable = areEntryArgumentsAvailable(args);
     return {
-      ok: environmentMatches && cwdMatches && commandAvailable && entryAvailable,
+      ok: environmentMatches && dynamicRouting && commandAvailable && entryAvailable,
       path,
       exists: true,
       configured: true,
@@ -188,7 +190,8 @@ function inspectCodexConfig(path: string, projectPath: string, dbPath: string): 
       commandAvailable,
       entryAvailable,
       environmentMatches,
-      cwdMatches,
+      dynamicRouting,
+      scope: 'global',
     };
   } catch (cause) {
     return { ok: false, path, exists: true, configured: false, error: errorMessage(cause) };

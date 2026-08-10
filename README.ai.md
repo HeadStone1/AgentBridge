@@ -15,8 +15,8 @@ The following conditions are mandatory:
 3. Codex must be either:
    - an installed and authenticated Codex App; a separate Codex CLI installation is not required, or
    - an installed and authenticated standalone Codex CLI.
-4. Run `setup` separately for every project. One global installation can serve many projects, but configuration and SQLite state are project-scoped.
-5. Use absolute project paths. Do not assume the MCP process working directory identifies the project.
+4. Run `setup` once to create user-scoped/global MCP entries. Do not repeat setup for every project.
+5. Runtime data remains project-scoped. AgentBridge resolves the active root from an explicit/legacy project environment, `CLAUDE_PROJECT_DIR`, MCP `roots/list`, or the MCP process working directory. `ask_peer.projectPath` is the explicit fallback.
 6. Choose exactly one installation method: GitHub Release, npm, or source. Do not mix launchers from different methods.
 7. Do not delete a source checkout, project database, configuration, or system installation without explicit user approval.
 
@@ -30,7 +30,7 @@ Collect these facts. Prefer read-only discovery over asking the user when the an
 - Whether Claude Code is installed and authenticated.
 - Whether the intended Codex provider is Codex App or standalone Codex CLI.
 - Whether Codex App and AgentBridge are inside the same VM or machine.
-- Whether the project already contains `.agentbridge` or `.codex/config.toml`.
+- Whether the project already contains `.agentbridge` or a legacy project-local `.codex/config.toml` entry.
 - Whether `~/.claude.json` already contains unrelated MCP servers that must be preserved.
 
 Never copy authentication tokens into project files or chat output. AgentBridge uses the providers' existing local authentication.
@@ -75,10 +75,8 @@ Expand-Archive -LiteralPath ".\$asset" -DestinationPath '.\agentbridge-release'
 Enter the extracted package directory, then run:
 
 ```powershell
-$project = 'C:\absolute\path\to\project'
-if (-not (Test-Path -LiteralPath $project -PathType Container)) { throw 'Project does not exist' }
 Unblock-File -LiteralPath '.\install.ps1'
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -ProjectPath $project
+powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 Expected final messages include the installed version, a launcher under `%USERPROFILE%\.agentbridge\bin\agentbridge.cmd`, a full-uninstall command, and a reminder to restart both clients.
@@ -91,8 +89,8 @@ grep "  $asset$" SHA256SUMS.txt | sha256sum -c -
 tar -xzf "$asset"
 cd "${asset%.tar.gz}"
 chmod +x install.sh
-./install.sh /absolute/path/to/project
-~/.agentbridge/bin/agentbridge doctor /absolute/path/to/project
+./install.sh
+~/.agentbridge/bin/agentbridge doctor
 ```
 
 ### macOS Apple Silicon Release
@@ -105,8 +103,8 @@ test -n "$expected" && test "$actual" = "$expected" || exit 1
 tar -xzf "$asset"
 cd "${asset%.tar.gz}"
 chmod +x install.sh
-./install.sh /absolute/path/to/project
-~/.agentbridge/bin/agentbridge doctor /absolute/path/to/project
+./install.sh
+~/.agentbridge/bin/agentbridge doctor
 ```
 
 If macOS quarantines a verified GitHub Release, show the user the exact Gatekeeper message and ask before changing quarantine attributes or security policy.
@@ -119,8 +117,8 @@ Use this only when a stable Node.js 22.13+ installation is available:
 node --version
 npm install --global @headstone/agentbridge
 agentbridge --version
-agentbridge setup /absolute/path/to/project
-agentbridge doctor /absolute/path/to/project
+agentbridge setup
+agentbridge doctor
 ```
 
 Do not use a one-shot `npx` command for persistent setup: the generated MCP configuration needs a stable executable path.
@@ -134,33 +132,21 @@ git clone https://github.com/HeadStone1/AgentBridge.git
 cd AgentBridge
 npm ci
 npm test
-node packages/cli/dist/index.js setup /absolute/path/to/project
-node packages/cli/dist/index.js doctor /absolute/path/to/project
+node packages/cli/dist/index.js setup
+node packages/cli/dist/index.js doctor
 ```
 
 Do not configure a normal user's clients to point at a temporary checkout if a source-independent Release install is intended.
 
-## Configure every project
+## Global registration and automatic project isolation
 
-For each additional project, run the launcher belonging to the chosen installation method:
+`setup` writes exactly one user-scoped AgentBridge entry to `~/.claude.json` and one global entry to `~/.codex/config.toml`. These entries contain the provider identity and launcher only; they must not pin `AGENTBRIDGE_PROJECT_PATH`, `AGENTBRIDGE_DB_PATH`, or Codex `cwd`.
 
-```powershell
-& "$env:USERPROFILE\.agentbridge\bin\agentbridge.cmd" setup 'D:\absolute\project-b'
-```
+After setup, fully quit and reopen Claude Code and Codex, then open any writable project normally. On the first AgentBridge tool call in that client session, AgentBridge binds the stdio process to one project, creates `<project>/.agentbridge/project.json` and `<project>/.agentbridge/agentbridge.sqlite`, and adds the project to `~/.agentbridge/projects.json` for later cleanup. Another project receives another database.
 
-```bash
-~/.agentbridge/bin/agentbridge setup /absolute/project-b
-```
+Claude normally supplies `CLAUDE_PROJECT_DIR` and may support MCP roots. Codex normally launches global stdio MCP servers in the active workspace and may support MCP roots. If neither source identifies a safe project—for example, the process starts in the user's home directory—AgentBridge returns an error and creates no database. Retry `ask_peer` or `list_discussions` with an absolute `projectPath`; later calls in that MCP session reuse that binding.
 
-`setup` should preserve unrelated configuration while creating or updating:
-
-- `<project>/.agentbridge/project.json`
-- `<project>/.agentbridge/agentbridge.sqlite`
-- `<project>/.codex/config.toml`
-- the project's `mcpServers.agentbridge` entry in `~/.claude.json`
-- `~/.agentbridge/projects.json`
-
-After setup, fully quit and reopen Claude Code and Codex. Closing only a project window may not reload MCP configuration.
+When upgrading from v0.5.x, run the new `agentbridge setup` once. It migrates known project-scoped Claude/Codex entries to global entries while preserving unrelated MCP configuration and all project databases.
 
 ## Determine whether Codex App or Codex CLI is actually selected
 
@@ -230,24 +216,23 @@ For Release and npm installations, `installation.sourceIndependent` should be tr
 
 ### Gate 2: configuration files
 
-Verify that both clients point to the same absolute database and project path.
+Verify the two global entries and confirm that neither pins a project/database path.
 
 Windows:
 
 ```powershell
-$project = (Resolve-Path -LiteralPath 'C:\absolute\project').Path
 Select-String -LiteralPath "$env:USERPROFILE\.claude.json" -Pattern 'agentbridge'
-Select-String -LiteralPath "$project\.codex\config.toml" -Pattern 'mcp_servers.agentbridge|AGENTBRIDGE_AGENT|AGENTBRIDGE_PROJECT_PATH|AGENTBRIDGE_DB_PATH'
+Select-String -LiteralPath "$env:USERPROFILE\.codex\config.toml" -Pattern 'mcp_servers.agentbridge|AGENTBRIDGE_AGENT|AGENTBRIDGE_PROJECT_PATH|AGENTBRIDGE_DB_PATH|cwd'
 ```
 
 Unix:
 
 ```bash
 grep -n 'agentbridge' ~/.claude.json
-grep -nE 'mcp_servers.agentbridge|AGENTBRIDGE_AGENT|AGENTBRIDGE_PROJECT_PATH|AGENTBRIDGE_DB_PATH' /absolute/project/.codex/config.toml
+grep -nE 'mcp_servers.agentbridge|AGENTBRIDGE_AGENT|AGENTBRIDGE_PROJECT_PATH|AGENTBRIDGE_DB_PATH|cwd' ~/.codex/config.toml
 ```
 
-Claude must use `AGENTBRIDGE_AGENT=claude`; Codex must use `AGENTBRIDGE_AGENT=codex`. Both must use the same `AGENTBRIDGE_DB_PATH`.
+Claude must use `AGENTBRIDGE_AGENT=claude`; Codex must use `AGENTBRIDGE_AGENT=codex`. Neither entry should contain `AGENTBRIDGE_PROJECT_PATH`, `AGENTBRIDGE_DB_PATH`, or Codex `cwd`. The project database is selected dynamically and appears at `<project>/.agentbridge/agentbridge.sqlite` after the first tool call.
 
 ### Gate 3: client MCP tool lists
 
@@ -289,9 +274,10 @@ Only report end-to-end success after both directions work and the discussions ap
 | App requested but `mode=cli` | Auto-discovery selected system CLI | Verify App is local to this machine/VM or constrain the intended mode, then rerun doctor |
 | CLI requested but `mode=app-server` | Auto mode preferred Desktop | Set the intended configuration deliberately and rerun setup/doctor |
 | Config exists but tools are absent | Client has not reloaded MCP or launch command fails | Fully quit/restart client and inspect its MCP startup logs |
-| Claude and Codex see different discussions | Different project/database paths | Compare both `AGENTBRIDGE_DB_PATH` values and rerun setup for the correct project |
+| Claude and Codex see different discussions | The two client sessions resolved different roots | Open the same project in both clients; if auto-detection failed, retry the first call with the same absolute `projectPath` |
 | Wrong peer identity | Missing or reversed `AGENTBRIDGE_AGENT` | Claude must be `claude`; Codex must be `codex` |
-| Second project replaced the first | Old global-only configuration or wrong setup | Upgrade, run setup for every project, verify Claude project scope and project-local Codex config |
+| A second project reuses the first database | One long-lived MCP session was reused across workspace switching | Start a new client task/window for the new project; each MCP process intentionally binds once |
+| Project cannot be determined safely | Host supplied neither project env nor MCP roots and started in a home/install directory | Open the workspace normally or pass absolute `projectPath` on `ask_peer`/`list_discussions`; no database is created on this error |
 | `database is locked` | Long-running writer, copied live WAL database, or network filesystem | Stop clients, keep DB local, retry; back up the whole `.agentbridge` directory only when idle |
 | `PEER_BUSY` or peer unavailable | Provider is busy, unauthenticated, or backend failed | Complete provider login, inspect doctor, wait for active work to finish, then use `retry_discussion` |
 | Codex returns no agent message | Provider/App Server protocol or authentication error | Re-run doctor, test the selected provider directly, inspect client logs, then retry |
@@ -311,14 +297,14 @@ agentbridge update --install
 agentbridge rollback
 ```
 
-`update` is read-only. `update --install` downloads the matching Release, verifies `SHA256SUMS.txt`, installs a version under `~/.agentbridge/versions`, and switches the current launcher. It preserves project configuration and SQLite data. Rerun `setup` for registered projects and restart both clients after updating.
+`update` is read-only. `update --install` downloads the matching Release, verifies `SHA256SUMS.txt`, installs a version under `~/.agentbridge/versions`, and switches the current launcher. It preserves project data. Run `agentbridge setup` once after an upgrade that changes MCP registration, then restart both clients.
 
 npm installation:
 
 ```bash
 npm install --global @headstone/agentbridge@latest
-agentbridge setup /absolute/project
-agentbridge doctor /absolute/project
+agentbridge setup
+agentbridge doctor
 ```
 
 Source installation:
@@ -328,7 +314,7 @@ git status
 git pull --ff-only origin main
 npm ci
 npm test
-node packages/cli/dist/index.js setup /absolute/project
+node packages/cli/dist/index.js setup
 ```
 
 Never use a destructive Git reset to hide unknown local changes.
@@ -343,7 +329,7 @@ Remove one project only:
 agentbridge uninstall /absolute/project --yes
 ```
 
-This removes that project's AgentBridge MCP entries and `.agentbridge` data, but keeps the installed program and other projects.
+This removes only that project's `.agentbridge` data and cleanup-registry record. It intentionally keeps the global MCP entries, installed program, and other projects working.
 
 Remove every registered project and the Release/npm program:
 
@@ -351,7 +337,7 @@ Remove every registered project and the Release/npm program:
 agentbridge uninstall-all --yes --remove-program
 ```
 
-The full uninstall intentionally requires both confirmation flags. Source mode does not delete the Git checkout. If cleanup fails for any project, the program is retained so the failure can be repaired and retried.
+Full uninstall removes the global MCP entries, every tracked project's local data, and then the installed program. It intentionally requires both confirmation flags. Source mode does not delete the Git checkout. If cleanup fails for any project, the program is retained so the failure can be repaired and retried.
 
 ## Required completion report
 

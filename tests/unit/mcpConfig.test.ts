@@ -4,30 +4,33 @@ import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import {
   claudeProjectKey,
+  configureClaudeGlobal,
   configureClaudeJson,
   configureCodexToml,
+  removeClaudeGlobal,
   removeClaudeJson,
   removeCodexToml,
 } from '../../packages/cli/src/mcpConfig.js';
 
 describe('MCP configuration management', () => {
-  it('updates Claude JSON incrementally and creates a backup', () => {
+  it('configures Claude globally, preserves unrelated entries, and migrates scoped copies', () => {
     const directory = mkdtempSync(join(tmpdir(), 'agentbridge-config-'));
     const path = join(directory, 'claude.json');
     const projectPath = join(directory, 'project-a');
     const otherProjectPath = join(directory, 'project-b');
     writeFileSync(path, JSON.stringify({ mcpServers: { existing: { command: 'keep-me' } }, other: true }));
     try {
-      const result = configureClaudeJson(path, { command: 'node', args: ['mcp-a.js'] }, projectPath);
-      configureClaudeJson(path, { command: 'node', args: ['mcp-b.js'] }, otherProjectPath);
+      configureClaudeJson(path, { command: 'old-node', args: ['mcp-a.js'] }, projectPath);
+      configureClaudeJson(path, { command: 'old-node', args: ['mcp-b.js'] }, otherProjectPath);
+      const result = configureClaudeGlobal(path, { command: 'node', args: ['mcp.js'], env: { AGENTBRIDGE_AGENT: 'claude' } });
       const value = JSON.parse(readFileSync(path, 'utf8')) as Record<string, any>;
       expect(result.changed).toBe(true);
       expect(result.backupPath).toBe(`${path}.agentbridge.bak`);
       expect(value.other).toBe(true);
       expect(value.mcpServers.existing.command).toBe('keep-me');
-      expect(value.mcpServers.agentbridge).toBeUndefined();
-      expect(value.projects[claudeProjectKey(projectPath)].mcpServers.agentbridge.args).toEqual(['mcp-a.js']);
-      expect(value.projects[claudeProjectKey(otherProjectPath)].mcpServers.agentbridge.args).toEqual(['mcp-b.js']);
+      expect(value.mcpServers.agentbridge.args).toEqual(['mcp.js']);
+      expect(value.projects[claudeProjectKey(projectPath)].mcpServers.agentbridge).toBeUndefined();
+      expect(value.projects[claudeProjectKey(otherProjectPath)].mcpServers.agentbridge).toBeUndefined();
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -60,7 +63,7 @@ describe('MCP configuration management', () => {
     }));
     writeFileSync(codexPath, '[mcp_servers.agentbridge]\ncommand = \'node\'\n\n[profiles.default]\nmodel = \'keep\'\n');
     try {
-      expect(removeClaudeJson(claudePath, projectPath).changed).toBe(true);
+      expect(removeClaudeGlobal(claudePath).changed).toBe(true);
       expect(removeCodexToml(codexPath).changed).toBe(true);
       const claude = JSON.parse(readFileSync(claudePath, 'utf8')) as Record<string, any>;
       const codex = readFileSync(codexPath, 'utf8');
@@ -70,6 +73,28 @@ describe('MCP configuration management', () => {
       expect(claude.projects[claudeProjectKey(projectPath)].mcpServers.scoped.command).toBe('keep-scoped');
       expect(codex).not.toContain('[mcp_servers.agentbridge]');
       expect(codex).toContain('[profiles.default]');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('removing a legacy project entry never removes the global Claude server', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'agentbridge-config-'));
+    const path = join(directory, 'claude.json');
+    const projectPath = join(directory, 'project');
+    writeFileSync(path, JSON.stringify({
+      mcpServers: { agentbridge: { command: 'global' }, keep: { command: 'keep' } },
+      projects: {
+        [claudeProjectKey(projectPath)]: {
+          mcpServers: { agentbridge: { command: 'legacy-project' } },
+        },
+      },
+    }));
+    try {
+      expect(removeClaudeJson(path, projectPath).changed).toBe(true);
+      const value = JSON.parse(readFileSync(path, 'utf8')) as Record<string, any>;
+      expect(value.mcpServers.agentbridge.command).toBe('global');
+      expect(value.projects[claudeProjectKey(projectPath)].mcpServers.agentbridge).toBeUndefined();
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

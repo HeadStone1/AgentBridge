@@ -1,3 +1,4 @@
+import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 
 /** Resolve the MCP entry beside either the workspace CLI build or release bundle. */
@@ -12,4 +13,9 @@ export function resolveMcpEntry(invoked: string | undefined): string {
 
 export function defaultCodexConfig(projectPath: string): string {
   return join(resolve(projectPath), '.codex', 'config.toml');
+}
+
+/** Codex Desktop, CLI and IDE share this user-level MCP configuration. */
+export function defaultGlobalCodexConfig(): string {
+  return join(homedir(), '.codex', 'config.toml');
 }
