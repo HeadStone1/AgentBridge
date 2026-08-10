@@ -15,6 +15,30 @@ afterEach(() => {
 });
 
 describe('system installation and diagnostics', () => {
+  it('registers both MCP hosts globally without creating project state', () => {
+    const root = temporaryDirectory();
+    const claudeConfig = join(root, 'claude.json');
+    const codexConfig = join(root, 'codex', 'config.toml');
+    const env = { AGENTBRIDGE_INSTALL_ROOT: join(root, 'registry') };
+    const result = runCli([
+      'setup',
+      '--claude-config', claudeConfig,
+      '--codex-config', codexConfig,
+    ], env, root);
+    expect(result).toMatchObject({ registrationMode: 'global', project: null, registeredProjects: 0 });
+    expect(existsSync(join(root, '.agentbridge', 'project.json'))).toBe(false);
+
+    const claude = JSON.parse(readFileSync(claudeConfig, 'utf8')) as Record<string, any>;
+    const codex = readFileSync(codexConfig, 'utf8');
+    expect(claude.mcpServers.agentbridge.env.AGENTBRIDGE_AGENT).toBe('claude');
+    expect(claude.mcpServers.agentbridge.env.AGENTBRIDGE_PROJECT_PATH).toBeUndefined();
+    expect(claude.mcpServers.agentbridge.env.AGENTBRIDGE_DB_PATH).toBeUndefined();
+    expect(codex).toContain("env.AGENTBRIDGE_AGENT = 'codex'");
+    expect(codex).not.toContain('AGENTBRIDGE_PROJECT_PATH');
+    expect(codex).not.toContain('AGENTBRIDGE_DB_PATH');
+    expect(codex).not.toMatch(/^\s*cwd\s*=/m);
+  });
+
   it('maintains a cross-platform project registry without duplicate paths', () => {
     const root = temporaryDirectory();
     const env = { ...process.env, AGENTBRIDGE_INSTALL_ROOT: join(root, 'install') };
@@ -57,11 +81,12 @@ describe('system installation and diagnostics', () => {
     expect(existsSync(missingProject)).toBe(false);
   });
 
-  it('setup registers multiple projects and uninstall-all cleans their state and MCP entries', () => {
+  it('setup registers MCP globally while keeping multiple project states isolated', () => {
     const root = temporaryDirectory();
     const installRoot = join(root, 'install');
     const launcher = join(installRoot, 'bin', process.platform === 'win32' ? 'agentbridge.cmd' : 'agentbridge');
     const claudeConfig = join(root, 'claude.json');
+    const codexConfig = join(root, 'codex', 'config.toml');
     mkdirSync(join(installRoot, 'versions'), { recursive: true });
     mkdirSync(join(installRoot, 'bin'), { recursive: true });
     writeFileSync(join(installRoot, 'current'), '0.4.2\n');
@@ -74,15 +99,17 @@ describe('system installation and diagnostics', () => {
       runCli([
         'setup', project,
         '--claude-config', claudeConfig,
-        '--codex-config', join(project, '.codex', 'config.toml'),
+        '--codex-config', codexConfig,
       ], env);
     }
-    expect(readProjectRegistry({ ...process.env, ...env })).toHaveLength(2);
+    const registrations = readProjectRegistry({ ...process.env, ...env });
+    expect(registrations).toHaveLength(2);
+    expect(registrations.every((item) => item.scope === 'global' && item.codexConfig === resolve(codexConfig))).toBe(true);
 
     const doctor = runCli([
       'doctor', join(root, 'project-a'),
       '--claude-config', claudeConfig,
-      '--codex-config', join(root, 'project-a', '.codex', 'config.toml'),
+      '--codex-config', codexConfig,
     ], env);
     expect(doctor.project).toMatchObject({ exists: true, initialized: true, metadataValid: true });
     expect(doctor.database).toMatchObject({ ok: true, tested: true });
@@ -90,15 +117,15 @@ describe('system installation and diagnostics', () => {
     expect(doctor.configuration.claude.ok).toBe(true);
     expect(doctor.configuration.codex.ok).toBe(true);
 
-    const result = runCli(['uninstall-all', '--yes', '--claude-config', claudeConfig], env);
+    const result = runCli(['uninstall-all', '--yes', '--claude-config', claudeConfig, '--codex-config', codexConfig], env);
     expect(result).toMatchObject({ removedProjects: 2, complete: true, program: null });
     for (const name of ['project-a', 'project-b']) {
       expect(existsSync(join(root, name, '.agentbridge'))).toBe(false);
-      const codex = readFileSync(join(root, name, '.codex', 'config.toml'), 'utf8');
-      expect(codex).not.toContain('[mcp_servers.agentbridge]');
     }
-    const claude = JSON.parse(readFileSync(claudeConfig, 'utf8')) as { projects: Record<string, { mcpServers?: Record<string, unknown> }> };
-    expect(Object.values(claude.projects).every((project) => !project.mcpServers?.agentbridge)).toBe(true);
+    const codex = readFileSync(codexConfig, 'utf8');
+    expect(codex).not.toContain('[mcp_servers.agentbridge]');
+    const claude = JSON.parse(readFileSync(claudeConfig, 'utf8')) as { mcpServers?: Record<string, unknown> };
+    expect(claude.mcpServers?.agentbridge).toBeUndefined();
     expect(readProjectRegistry({ ...process.env, ...env })).toEqual([]);
   });
 });
@@ -109,10 +136,10 @@ function temporaryDirectory(): string {
   return directory;
 }
 
-function runCli(args: string[], extraEnv: Record<string, string> = {}): any {
+function runCli(args: string[], extraEnv: Record<string, string> = {}, cwd = repositoryRoot): any {
   const cli = join(repositoryRoot, 'packages', 'cli', 'dist', 'index.js');
   const output = execFileSync(process.execPath, [cli, ...args], {
-    cwd: repositoryRoot,
+    cwd,
     encoding: 'utf8',
     env: { ...process.env, ...extraEnv },
     timeout: 30_000,

@@ -1,30 +1,28 @@
 import {
   existsSync,
-  mkdirSync,
-  readFileSync,
   readdirSync,
-  renameSync,
   realpathSync,
   rmSync,
   statSync,
-  writeFileSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, parse, relative, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import process from 'node:process';
-
-export interface RegisteredProject {
-  projectPath: string;
-  claudeConfig: string;
-  codexConfig: string;
-  setupAt: string;
-}
-
-interface ProjectRegistry {
-  version: 1;
-  projects: RegisteredProject[];
-}
+import {
+  readProjectRegistry,
+  registerProject,
+  registryPath,
+  registryRoot,
+  unregisterProject,
+} from '@agentbridge/storage';
+export {
+  readProjectRegistry,
+  registerProject,
+  registryPath,
+  registryRoot,
+  unregisterProject,
+} from '@agentbridge/storage';
+export type { RegisteredProject } from '@agentbridge/storage';
 
 export type InstallationMode = 'release' | 'npm' | 'source';
 
@@ -43,57 +41,6 @@ export interface ProgramRemovalResult {
   scheduled: true;
   target: string;
   message: string;
-}
-
-export function registryRoot(env: NodeJS.ProcessEnv = process.env): string {
-  return resolve(env.AGENTBRIDGE_INSTALL_ROOT ?? join(homedir(), '.agentbridge'));
-}
-
-export function registryPath(env: NodeJS.ProcessEnv = process.env): string {
-  return join(registryRoot(env), 'projects.json');
-}
-
-export function readProjectRegistry(env: NodeJS.ProcessEnv = process.env): RegisteredProject[] {
-  const path = registryPath(env);
-  if (!existsSync(path)) return [];
-  try {
-    const value = JSON.parse(readFileSync(path, 'utf8')) as Partial<ProjectRegistry>;
-    if (value.version !== 1 || !Array.isArray(value.projects)) return [];
-    return value.projects
-      .filter((item): item is RegisteredProject => Boolean(
-        item
-        && typeof item.projectPath === 'string'
-        && typeof item.claudeConfig === 'string'
-        && typeof item.codexConfig === 'string',
-      ))
-      .map((item) => ({ ...item, projectPath: resolve(item.projectPath) }));
-  } catch {
-    return [];
-  }
-}
-
-export function registerProject(
-  registration: Omit<RegisteredProject, 'projectPath' | 'setupAt'> & { projectPath: string },
-  env: NodeJS.ProcessEnv = process.env,
-): RegisteredProject[] {
-  const projectPath = resolve(registration.projectPath);
-  const projects = readProjectRegistry(env).filter((item) => !samePath(item.projectPath, projectPath));
-  projects.push({
-    ...registration,
-    projectPath,
-    setupAt: new Date().toISOString(),
-  });
-  projects.sort((left, right) => left.projectPath.localeCompare(right.projectPath));
-  writeRegistry(projects, env);
-  return projects;
-}
-
-export function unregisterProject(projectPath: string, env: NodeJS.ProcessEnv = process.env): RegisteredProject[] {
-  const target = resolve(projectPath);
-  const projects = readProjectRegistry(env).filter((item) => !samePath(item.projectPath, target));
-  if (projects.length > 0) writeRegistry(projects, env);
-  else if (existsSync(registryPath(env))) rmSync(registryPath(env), { force: true });
-  return projects;
 }
 
 export function detectInstallation(
@@ -175,15 +122,6 @@ export function cleanupEmptyRegistryRoot(env: NodeJS.ProcessEnv = process.env): 
   if (readdirSync(root).length === 0) rmSync(root, { recursive: false });
 }
 
-function writeRegistry(projects: RegisteredProject[], env: NodeJS.ProcessEnv): void {
-  const path = registryPath(env);
-  mkdirSync(dirname(path), { recursive: true });
-  const tempPath = `${path}.tmp-${process.pid}`;
-  const value: ProjectRegistry = { version: 1, projects };
-  writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-  renameSync(tempPath, path);
-}
-
 function validateReleaseRemovalTarget(installation: InstallationInfo): string {
   const root = resolve(installation.installRoot ?? '');
   if (!installation.installRoot || root === parse(root).root) {
@@ -252,10 +190,4 @@ function removalEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
     AB_REMOVE_PPID: String(process.ppid),
     ...extra,
   };
-}
-
-function samePath(left: string, right: string): boolean {
-  const a = resolve(left);
-  const b = resolve(right);
-  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
 }

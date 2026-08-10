@@ -15,6 +15,42 @@ export interface ConfigUpdateResult {
   backupPath?: string;
 }
 
+/** Configure one user-scoped Claude MCP server and remove obsolete project-scoped copies. */
+export function configureClaudeGlobal(path: string, server: McpServerCommand): ConfigUpdateResult {
+  const existing = readJsonObject(path);
+  const nextServer = { command: server.command, args: server.args ?? [], env: server.env ?? {} };
+  const servers = isRecord(existing.mcpServers) ? { ...existing.mcpServers } : {};
+  const projects = isRecord(existing.projects) ? removeClaudeFromProjects(existing.projects) : undefined;
+  const hadScoped = isRecord(existing.projects) && hasClaudeProjectEntries(existing.projects);
+  const changed = hadScoped || JSON.stringify(servers.agentbridge) !== JSON.stringify(nextServer);
+  if (!changed) return { provider: 'claude', path, changed: false };
+
+  servers.agentbridge = nextServer;
+  const next: Record<string, unknown> = { ...existing, mcpServers: servers };
+  if (projects) next.projects = projects;
+  const backupPath = backupExisting(path);
+  writeJsonAtomic(path, next);
+  return { provider: 'claude', path, changed: true, backupPath };
+}
+
+/** Remove global and legacy project-scoped AgentBridge entries without touching other MCP servers. */
+export function removeClaudeGlobal(path: string): ConfigUpdateResult {
+  const existing = readJsonObject(path);
+  const servers = isRecord(existing.mcpServers) ? { ...existing.mcpServers } : {};
+  const hadGlobal = Object.prototype.hasOwnProperty.call(servers, 'agentbridge');
+  const hadScoped = isRecord(existing.projects) && hasClaudeProjectEntries(existing.projects);
+  if (!hadGlobal && !hadScoped) return { provider: 'claude', path, changed: false };
+
+  delete servers.agentbridge;
+  const next: Record<string, unknown> = { ...existing };
+  if (Object.keys(servers).length > 0) next.mcpServers = servers;
+  else delete next.mcpServers;
+  if (isRecord(existing.projects)) next.projects = removeClaudeFromProjects(existing.projects);
+  const backupPath = backupExisting(path);
+  writeJsonAtomic(path, next);
+  return { provider: 'claude', path, changed: true, backupPath };
+}
+
 export function configureClaudeJson(path: string, server: McpServerCommand, projectPath: string): ConfigUpdateResult {
   const existing = readJsonObject(path);
   const projects = isRecord(existing.projects) ? { ...existing.projects } : {};
@@ -52,10 +88,8 @@ export function removeClaudeJson(path: string, projectPath: string): ConfigUpdat
   const legacyProject = projectKey !== projectPath && isRecord(projects[projectPath]) ? { ...projects[projectPath] } : {};
   const project = Object.keys(normalizedProject).length > 0 ? normalizedProject : legacyProject;
   const servers = isRecord(project.mcpServers) ? { ...project.mcpServers } : {};
-  const topLevelServers = isRecord(existing.mcpServers) ? { ...existing.mcpServers } : undefined;
   const hasScoped = Object.prototype.hasOwnProperty.call(servers, 'agentbridge');
-  const hasLegacy = Boolean(topLevelServers && Object.prototype.hasOwnProperty.call(topLevelServers, 'agentbridge'));
-  if (!hasScoped && !hasLegacy) {
+  if (!hasScoped) {
     return { provider: 'claude', path, changed: false };
   }
   delete servers.agentbridge;
@@ -63,11 +97,6 @@ export function removeClaudeJson(path: string, projectPath: string): ConfigUpdat
   projects[projectKey] = project;
   if (projectKey !== projectPath) delete projects[projectPath];
   const next: Record<string, any> = { ...existing, projects };
-  if (topLevelServers) {
-    delete topLevelServers.agentbridge;
-    if (Object.keys(topLevelServers).length > 0) next.mcpServers = topLevelServers;
-    else delete next.mcpServers;
-  }
   const backupPath = backupExisting(path);
   writeJsonAtomic(path, next);
   return { provider: 'claude', path, changed: true, backupPath };
@@ -82,6 +111,26 @@ export function listClaudeAgentBridgeProjects(path: string): string[] {
       && isRecord(value.mcpServers)
       && Object.prototype.hasOwnProperty.call(value.mcpServers, 'agentbridge'))
     .map(([projectPath]) => projectPath);
+}
+
+function hasClaudeProjectEntries(projects: Record<string, any>): boolean {
+  return Object.values(projects).some((value) => isRecord(value)
+    && isRecord(value.mcpServers)
+    && Object.prototype.hasOwnProperty.call(value.mcpServers, 'agentbridge'));
+}
+
+function removeClaudeFromProjects(projects: Record<string, any>): Record<string, any> {
+  const next: Record<string, any> = { ...projects };
+  for (const [projectPath, value] of Object.entries(next)) {
+    if (!isRecord(value) || !isRecord(value.mcpServers)
+      || !Object.prototype.hasOwnProperty.call(value.mcpServers, 'agentbridge')) continue;
+    const project = { ...value };
+    const servers = { ...project.mcpServers };
+    delete servers.agentbridge;
+    project.mcpServers = servers;
+    next[projectPath] = project;
+  }
+  return next;
 }
 
 export function configureCodexToml(path: string, server: McpServerCommand): ConfigUpdateResult {

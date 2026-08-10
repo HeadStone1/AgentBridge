@@ -1,23 +1,24 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, join, parse, resolve } from 'node:path';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { join, parse, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { randomUUID } from 'node:crypto';
 import process from 'node:process';
 import {
   type CodexBackendMode,
 } from '@agentbridge/connectors';
 import { AuditService } from '@agentbridge/audit';
-import { Storage } from '@agentbridge/storage';
+import { ensureProjectMetadata, Storage } from '@agentbridge/storage';
 import type { AgentType, SessionStatus } from '@agentbridge/protocol';
 import {
+  configureClaudeGlobal,
   configureClaudeJson,
   configureCodexToml,
   listClaudeAgentBridgeProjects,
+  removeClaudeGlobal,
   removeClaudeJson,
   removeCodexToml,
 } from './mcpConfig.js';
-import { defaultCodexConfig, resolveMcpEntry } from './paths.js';
+import { defaultCodexConfig, defaultGlobalCodexConfig, resolveMcpEntry } from './paths.js';
 import { runDoctor } from './diagnostics.js';
 import {
   cleanupEmptyRegistryRoot,
@@ -41,7 +42,8 @@ type Options = Record<string, string | boolean>;
 async function main(argv: string[]): Promise<void> {
   const command = argv[0] ?? 'help';
   const { options, positional } = parseArgs(argv.slice(1));
-  const projectPath = resolve(String(options['project-path'] ?? positional[0] ?? process.cwd()));
+  const projectArgument = options['project-path'] ?? positional[0];
+  const projectPath = resolve(String(projectArgument ?? process.cwd()));
 
   switch (command) {
     case 'help':
@@ -51,7 +53,7 @@ async function main(argv: string[]): Promise<void> {
       console.log(JSON.stringify(initProject(projectPath), null, 2));
       return;
     case 'setup':
-      console.log(JSON.stringify(setupProject(projectPath, options), null, 2));
+      console.log(JSON.stringify(setupGlobal(projectArgument ? projectPath : undefined, options), null, 2));
       return;
     case 'register-session':
       console.log(JSON.stringify(registerSession(options, projectPath), null, 2));
@@ -85,35 +87,26 @@ async function main(argv: string[]): Promise<void> {
 }
 
 function initProject(projectPath: string): Record<string, unknown> {
-  const stateDir = join(projectPath, '.agentbridge');
-  const projectFile = join(stateDir, 'project.json');
-  mkdirSync(stateDir, { recursive: true });
-  if (!existsSync(projectFile)) {
-    writeFileSync(projectFile, JSON.stringify({
-      projectId: `prj_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
-      name: basename(projectPath),
-      rootPath: projectPath,
-      createdAt: new Date().toISOString(),
-    }, null, 2) + '\n', { encoding: 'utf8', flag: 'wx' });
-  }
-  return JSON.parse(readFileSync(projectFile, 'utf8')) as Record<string, unknown>;
+  return ensureProjectMetadata(projectPath);
 }
 
-function setupProject(projectPath: string, options: Options): Record<string, unknown> {
-  const project = initProject(projectPath);
+function setupGlobal(projectPath: string | undefined, options: Options): Record<string, unknown> {
+  const project = projectPath ? initProject(projectPath) : null;
   const claudeConfig = String(options['claude-config'] ?? join(homedir(), '.claude.json'));
-  const codexConfig = String(options['codex-config'] ?? defaultCodexConfig(projectPath));
+  const codexConfig = String(options['codex-config'] ?? defaultGlobalCodexConfig());
   if (options['no-config'] === true) {
-    const projects = registerProject({ projectPath, claudeConfig, codexConfig });
-    return { project, configured: [], registeredProjects: projects.length };
+    const projects = projectPath
+      ? registerProject({ projectPath, claudeConfig, codexConfig, scope: 'global' })
+      : readProjectRegistry();
+    return { registrationMode: 'global', project, configured: [], registeredProjects: projects.length };
   }
 
   const releaseLauncher = process.env.AGENTBRIDGE_LAUNCHER;
   const mcpCommand = String(options['mcp-command'] ?? releaseLauncher ?? process.execPath);
   const mcpEntry = String(options['mcp-entry'] ?? defaultMcpEntry());
   const sharedEnv: Record<string, string> = {
-    AGENTBRIDGE_DB_PATH: join(projectPath, '.agentbridge', 'agentbridge.sqlite'),
-    AGENTBRIDGE_PROJECT_PATH: projectPath,
+    AGENTBRIDGE_CLAUDE_CONFIG: claudeConfig,
+    AGENTBRIDGE_CODEX_CONFIG: codexConfig,
   };
   if (typeof options['codex-app-command'] === 'string') {
     sharedEnv.AGENTBRIDGE_CODEX_APP_COMMAND = options['codex-app-command'];
@@ -136,14 +129,27 @@ function setupProject(projectPath: string, options: Options): Record<string, unk
     command: mcpCommand,
     args,
     env: { ...sharedEnv, AGENTBRIDGE_AGENT: 'codex' },
-    cwd: projectPath,
   };
+  const legacyRegistrations = readProjectRegistry();
   const configured = [
-    configureClaudeJson(claudeConfig, claudeServer, projectPath),
+    configureClaudeGlobal(claudeConfig, claudeServer),
     configureCodexToml(codexConfig, codexServer),
   ];
-  const projects = registerProject({ projectPath, claudeConfig, codexConfig });
+  const migratedCodexConfigs = legacyRegistrations
+    .filter((item) => item.scope !== 'global' && resolve(item.codexConfig) !== resolve(codexConfig))
+    .map((item) => removeCodexToml(item.codexConfig));
+  let projects = legacyRegistrations;
+  for (const registration of legacyRegistrations) {
+    projects = registerProject({
+      projectPath: registration.projectPath,
+      claudeConfig,
+      codexConfig,
+      scope: 'global',
+    });
+  }
+  if (projectPath) projects = registerProject({ projectPath, claudeConfig, codexConfig, scope: 'global' });
   return {
+    registrationMode: 'global',
     project,
     codexBackend: {
       strategy: sharedEnv.AGENTBRIDGE_CODEX_MODE ?? 'auto',
@@ -151,6 +157,7 @@ function setupProject(projectPath: string, options: Options): Record<string, unk
       automaticDesktopDiscovery: !sharedEnv.AGENTBRIDGE_CODEX_APP_COMMAND && !sharedEnv.AGENTBRIDGE_CODEX_COMMAND,
     },
     configured,
+    migratedCodexConfigs,
     registeredProjects: projects.length,
   };
 }
@@ -207,8 +214,9 @@ async function update(options: Options): Promise<unknown> {
 function uninstallProject(projectPath: string, confirmed: boolean, options: Options): Record<string, unknown> {
   if (!confirmed) throw new Error('Refusing to remove local state without --yes');
   const claudeConfig = String(options['claude-config'] ?? join(homedir(), '.claude.json'));
-  const codexConfig = String(options['codex-config'] ?? defaultCodexConfig(projectPath));
-  return removeProject({ projectPath, claudeConfig, codexConfig }, true);
+  const registration = readProjectRegistry().find((item) => projectPathKey(item.projectPath) === projectPathKey(projectPath));
+  const codexConfig = String(options['codex-config'] ?? registration?.codexConfig ?? defaultGlobalCodexConfig());
+  return removeProject(registration ?? { projectPath, claudeConfig, codexConfig, scope: 'global' }, true);
 }
 
 function uninstallAll(confirmed: boolean, options: Options): Record<string, unknown> {
@@ -220,6 +228,7 @@ function uninstallAll(confirmed: boolean, options: Options): Record<string, unkn
   }
 
   const defaultClaudeConfig = String(options['claude-config'] ?? join(homedir(), '.claude.json'));
+  const defaultCodexGlobalConfig = String(options['codex-config'] ?? defaultGlobalCodexConfig());
   const registrations = readProjectRegistry();
   const byPath = new Map<string, RegisteredProject>();
   for (const registration of registrations) byPath.set(projectPathKey(registration.projectPath), registration);
@@ -232,6 +241,7 @@ function uninstallAll(confirmed: boolean, options: Options): Record<string, unkn
         claudeConfig: defaultClaudeConfig,
         codexConfig: defaultCodexConfig(projectPath),
         setupAt: 'discovered-from-claude-config',
+        scope: 'project',
       });
     }
   }
@@ -249,6 +259,18 @@ function uninstallAll(confirmed: boolean, options: Options): Record<string, unkn
       });
     }
   }
+  const globalConfigTargets = new Map<string, { claudeConfig: string; codexConfig: string }>();
+  globalConfigTargets.set(`${resolve(defaultClaudeConfig)}\0${resolve(defaultCodexGlobalConfig)}`, {
+    claudeConfig: defaultClaudeConfig,
+    codexConfig: defaultCodexGlobalConfig,
+  });
+  for (const registration of registrations.filter((item) => item.scope === 'global')) {
+    globalConfigTargets.set(`${resolve(registration.claudeConfig)}\0${resolve(registration.codexConfig)}`, registration);
+  }
+  const globalConfigs = [...globalConfigTargets.values()].flatMap((target) => [
+    removeClaudeGlobal(target.claudeConfig),
+    removeCodexToml(target.codexConfig),
+  ]);
   let program: unknown = null;
   if (removeProgram && errors.length === 0) {
     if (installation.mode === 'npm') cleanupEmptyRegistryRoot();
@@ -259,6 +281,7 @@ function uninstallAll(confirmed: boolean, options: Options): Record<string, unkn
   return {
     removedProjects: projects.length,
     projects,
+    globalConfigs,
     errors,
     program,
     complete: errors.length === 0,
@@ -267,7 +290,7 @@ function uninstallAll(confirmed: boolean, options: Options): Record<string, unkn
 }
 
 function removeProject(
-  registration: Pick<RegisteredProject, 'projectPath' | 'claudeConfig' | 'codexConfig'>,
+  registration: Pick<RegisteredProject, 'projectPath' | 'claudeConfig' | 'codexConfig' | 'scope'>,
   updateRegistry: boolean,
 ): Record<string, unknown> {
   const projectPath = resolve(registration.projectPath);
@@ -275,7 +298,7 @@ function removeProject(
   if (stateDir === parse(stateDir).root || stateDir === projectPath) {
     throw new Error(`Refusing to remove an unsafe state path: ${stateDir}`);
   }
-  const configs = [
+  const configs = registration.scope === 'global' ? [] : [
     removeClaudeJson(registration.claudeConfig, projectPath),
     removeCodexToml(registration.codexConfig),
   ];
@@ -294,7 +317,7 @@ function removeProject(
     removed.push(stateDir);
   }
   if (updateRegistry) unregisterProject(projectPath);
-  return { projectPath, removed, configs, sharedInstallRoot };
+  return { projectPath, removed, configs, sharedInstallRoot, registrationMode: registration.scope ?? 'project' };
 }
 
 function parseCodexMode(value: string): CodexBackendMode {
@@ -346,15 +369,15 @@ function printHelp(): void {
     '',
     'Commands:',
     '  init [path]                 Create .agentbridge/project.json',
-    '  setup [path]                Initialize local state and MCP config',
+    '  setup [path]                Register MCP globally once; optional path initializes one project',
     '  register-session             Register a provider-native session',
     '  status [path]               Show sessions, discussions, and metrics',
     '  doctor [path]               Diagnose install, config, database, and providers',
     '  version                     Show the installed AgentBridge version',
     '  update [--install]          Check GitHub Releases; install only with --install',
     '  rollback                    Switch to the previous locally installed version',
-    '  uninstall [path] --yes      Remove local state and AgentBridge MCP entries',
-    '  uninstall-all --yes         Remove every registered project configuration',
+    '  uninstall [path] --yes      Remove one project\'s local AgentBridge state',
+    '  uninstall-all --yes         Remove all project state and global MCP registration',
     '  uninstall-all --yes --remove-program',
     '                              Also remove the Release/npm installation',
     '',

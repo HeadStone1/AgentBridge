@@ -2,7 +2,7 @@
 set -eu
 
 PACKAGE_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-PROJECT_PATH=$(pwd)
+PROJECT_PATH=
 INSTALL_ROOT=${AGENTBRIDGE_INSTALL_ROOT:-"$HOME/.agentbridge"}
 RUN_SETUP=1
 
@@ -15,7 +15,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if [ "$RUN_SETUP" -eq 1 ]; then
+if [ "$RUN_SETUP" -eq 1 ] && [ -n "$PROJECT_PATH" ]; then
   [ -d "$PROJECT_PATH" ] || { echo "Project directory does not exist: $PROJECT_PATH" >&2; exit 1; }
   PROJECT_PATH=$(CDPATH= cd -- "$PROJECT_PATH" && pwd)
 fi
@@ -33,11 +33,16 @@ chmod +x "$VERSION_ROOT/runtime/node" "$INSTALL_ROOT/bin/agentbridge"
 printf '%s\n' "$VERSION" > "$INSTALL_ROOT/current"
 
 if [ "$RUN_SETUP" -eq 1 ]; then
-  "$INSTALL_ROOT/bin/agentbridge" setup "$PROJECT_PATH"
-  "$INSTALL_ROOT/bin/agentbridge" doctor "$PROJECT_PATH"
+  if [ -n "$PROJECT_PATH" ]; then
+    "$INSTALL_ROOT/bin/agentbridge" setup "$PROJECT_PATH"
+    "$INSTALL_ROOT/bin/agentbridge" doctor "$PROJECT_PATH"
+  else
+    "$INSTALL_ROOT/bin/agentbridge" setup
+    "$INSTALL_ROOT/bin/agentbridge" doctor
+  fi
 fi
 
 printf 'AgentBridge %s installed in %s\n' "$VERSION" "$INSTALL_ROOT"
 printf 'Launcher: %s\n' "$INSTALL_ROOT/bin/agentbridge"
 printf "Full uninstall: '%s' uninstall-all --yes --remove-program\n" "$INSTALL_ROOT/bin/agentbridge"
-printf 'Restart Claude Code and Codex after setup.\n'
+printf 'AgentBridge is registered globally. Restart Claude Code and Codex, then open any project.\n'
