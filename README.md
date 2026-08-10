@@ -2,60 +2,286 @@
 
 AgentBridge 是一个本地优先的 MCP 协作核心，让 Claude Code 和 Codex 能在同一个项目中互相提问、回复、重试、达成一致，并把讨论状态保存在项目本地的 SQLite 数据库中。
 
-> 当前版本：v0.4.2。本项目以 GitHub Release 分发本地 stdio MCP；便携包自带 Node.js 运行时，不要求用户另外安装 Node 或 npm。
+> 当前开发版本：v0.5.0。本项目以 GitHub Release 分发本地 stdio MCP；便携包自带 Node.js 运行时，不要求用户另外安装 Node 或 npm。Release 安装后程序独立位于用户目录，不依赖下载目录或源码仓库。
 
 ## 使用方法（先看这里）
 
-### Windows：安装并配置当前项目
+### 1. 先选择安装方式
 
-1. 打开 [GitHub Releases](https://github.com/HeadStone1/AgentBridge/releases)，下载 `AgentBridge-v版本-win32-x64.zip`。
-2. 解压 ZIP，进入解压后的目录。
-3. 在 PowerShell 中执行：
+| 你的情况 | 应选择 | 是否需要 Node.js |
+|---|---|---|
+| 普通用户、Codex App 用户、希望开箱即用 | **GitHub Release 便携包（推荐）** | 不需要，包内自带运行时 |
+| 已经使用 Node.js `22.13+` 的开发者 | npm 全局安装 | 需要 |
+| 要修改 AgentBridge 源码或参与开发 | 源码安装 | 需要 Node.js、npm 和 Git |
+
+三种方式只需选择一种。不要把 Release、npm 和源码命令混用。普通用户直接从 [AgentBridge Releases](https://github.com/HeadStone1/AgentBridge/releases/latest) 下载即可。
+
+### 2. 安装前必须满足
+
+- Claude Code 和 Codex 必须与 AgentBridge 安装在**同一台机器或同一个虚拟机**中，并且都能访问目标项目目录。宿主机安装的 Codex App 不能直接为虚拟机内的 AgentBridge 提供本地 App Server。
+- 先安装并登录 Claude Code。AgentBridge 当前对接的是 Claude Code，不是只有聊天界面的 Claude Desktop。
+- Codex 只需满足下面任意一种：
+  - 已安装并登录 **Codex App**；**不要求另外安装 Codex CLI**。
+  - 已安装并登录 Codex CLI，供没有 Codex App 的服务器或虚拟机使用。
+- 使用 Codex App 时，建议先正常打开并完成一次登录。AgentBridge 会发现 App 自带的 Codex 可执行文件并启动受控的 `app-server` 子进程，不会接管已经打开的 GUI 进程。
+- 每个要使用 AgentBridge 的项目都必须拥有本地读写权限。项目路径必须真实存在，建议始终使用绝对路径。
+
+### 3. GitHub Release 安装（推荐）
+
+#### Windows 10/11 x64
+
+1. 从 [最新 Release](https://github.com/HeadStone1/AgentBridge/releases/latest) 下载以下两个文件：
+
+   - `AgentBridge-v0.5.0-win32-x64.zip`
+   - `SHA256SUMS.txt`
+
+2. 在下载目录校验压缩包。下面命令在哈希不一致时会直接报错：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -ProjectPath "C:\你的项目目录"
+$asset = 'AgentBridge-v0.5.0-win32-x64.zip'
+$line = Get-Content -LiteralPath '.\SHA256SUMS.txt' |
+  Where-Object { $_ -match "\s+$([regex]::Escape($asset))$" }
+if (-not $line) { throw "SHA256SUMS.txt 中找不到 $asset" }
+$expected = (($line -split '\s+')[0]).ToLowerInvariant()
+$actual = (Get-FileHash -LiteralPath ".\$asset" -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "SHA-256 校验失败，禁止安装" }
+"SHA-256 verified: $asset"
 ```
 
-安装脚本会把程序安装到 `%USERPROFILE%\.agentbridge`，并自动为指定项目配置 Claude Code 和 Codex。然后执行：
+3. 解压 ZIP，进入解压后的 `AgentBridge-v0.5.0-win32-x64` 目录，然后安装并配置第一个项目：
 
 ```powershell
-& "$env:USERPROFILE\.agentbridge\bin\agentbridge.cmd" doctor "C:\你的项目目录"
+$project = 'C:\你的项目目录'
+Test-Path -LiteralPath $project
+Unblock-File -LiteralPath '.\install.ps1'
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -ProjectPath $project
 ```
 
-最后完全退出并重新启动 Claude Code 和 Codex，使 MCP 配置重新加载。
+`Test-Path` 必须返回 `True`。安装完成时，最后应看到类似输出：
 
-### Linux / macOS：安装并配置当前项目
+```text
+AgentBridge 0.5.0 installed in C:\Users\<用户名>\.agentbridge
+Launcher: C:\Users\<用户名>\.agentbridge\bin\agentbridge.cmd
+Full uninstall: & "C:\Users\<用户名>\.agentbridge\bin\agentbridge.cmd" uninstall-all --yes --remove-program
+Restart Claude Code and Codex after setup.
+```
 
-下载与系统匹配的 `tar.gz`，解压后执行：
+在这些提示之前会依次输出 `setup` 和 `doctor` 的 JSON。`setup.configured` 应列出 Claude 和 Codex 两项配置结果；`changed: false` 只表示配置已经是最新状态，不是失败。`doctor.ok: false` 表示仍有环境或登录项要处理，按 `recommendations` 修复后重跑即可；只有 doctor 命令本身无法启动时安装脚本才会失败。
+
+4. 运行诊断：
+
+```powershell
+$ab = "$env:USERPROFILE\.agentbridge\bin\agentbridge.cmd"
+& $ab version
+& $ab doctor $project
+```
+
+常见 Windows 错误：
+
+- `Resolve-Path` 或“找不到路径”：项目目录不存在或路径写错；先让 `Test-Path` 返回 `True`。
+- 脚本被阻止：确认压缩包来自本项目 Release 且 SHA-256 已通过，然后运行上面的 `Unblock-File` 和 `-ExecutionPolicy Bypass`。
+- `Access denied`：默认安装到当前用户的 `%USERPROFILE%\.agentbridge`，通常不需要管理员权限；检查安全软件的“受控文件夹访问”以及当前用户是否能写入自己的用户目录。
+- 找不到 launcher：确认 `%USERPROFILE%\.agentbridge\current` 和 `%USERPROFILE%\.agentbridge\bin\agentbridge.cmd` 均存在，不要从解压目录直接移动安装后的内部文件。
+
+#### Linux x64 / macOS Apple Silicon
+
+先确认系统与架构：
 
 ```bash
+uname -s
+uname -m
+```
+
+| 输出 | 下载文件 |
+|---|---|
+| `Linux` + `x86_64` | `AgentBridge-v0.5.0-linux-x64.tar.gz` |
+| `Darwin` + `arm64` | `AgentBridge-v0.5.0-darwin-arm64.tar.gz` |
+
+当前 Release 不提供 Linux ARM64 或 Intel Mac x64 便携包；这些平台请使用 npm 或源码安装。
+
+下载对应压缩包和 `SHA256SUMS.txt` 后校验。Linux 示例：
+
+```bash
+asset='AgentBridge-v0.5.0-linux-x64.tar.gz'
+grep "  $asset$" SHA256SUMS.txt | sha256sum -c -
+```
+
+macOS 示例：
+
+```bash
+asset='AgentBridge-v0.5.0-darwin-arm64.tar.gz'
+expected=$(awk -v file="$asset" '$2 == file {print $1}' SHA256SUMS.txt)
+actual=$(shasum -a 256 "$asset" | awk '{print $1}')
+test -n "$expected" && test "$actual" = "$expected" || { echo 'SHA-256 校验失败，禁止安装' >&2; exit 1; }
+echo "SHA-256 verified: $asset"
+```
+
+解压、补充执行权限并安装：
+
+```bash
+tar -xzf "$asset"
+cd "${asset%.tar.gz}"
+chmod +x install.sh
 ./install.sh /absolute/path/to/your-project
+~/.agentbridge/bin/agentbridge version
 ~/.agentbridge/bin/agentbridge doctor /absolute/path/to/your-project
 ```
 
-安装完成后重新启动 Claude Code 和 Codex。
+压缩包通常已经保留执行权限；如果出现 `Permission denied`，重新执行 `chmod +x install.sh`。安装脚本会依次运行 `setup` 和 `doctor`；完成时应看到 `AgentBridge 0.5.0 installed in ...`、`Launcher: ...`、`Full uninstall: ...` 和重启提示。
 
-### 验证是否成功
+### 4. npm 安装（已有 Node.js 的开发者）
 
-在 Claude Code 或 Codex 中要求它使用 AgentBridge，例如：
-
-```text
-请使用 AgentBridge 的 ask_peer 工具询问另一个代理：检查当前项目 README，并概括项目用途。
-```
-
-如果能收到另一个代理的回答，并且下面的命令能看到讨论记录，说明基本联通成功：
-
-```powershell
-& "$env:USERPROFILE\.agentbridge\bin\agentbridge.cmd" status "C:\你的项目目录"
-```
-
-Linux/macOS 使用：
+npm 包名为 [`@headstone/agentbridge`](https://www.npmjs.com/package/@headstone/agentbridge)，要求 Node.js `22.13` 或更高版本。建议全局安装，不建议使用一次性的 `npx` 执行 `setup`，因为 MCP 配置需要稳定的程序路径。
 
 ```bash
-~/.agentbridge/bin/agentbridge status /absolute/path/to/your-project
+node --version
+npm install --global @headstone/agentbridge
+agentbridge --version
+agentbridge setup /absolute/path/to/your-project
+agentbridge doctor /absolute/path/to/your-project
 ```
 
-### 检查更新、安装更新和回滚
+升级 npm 安装版本：
+
+```bash
+npm install --global @headstone/agentbridge@latest
+agentbridge setup /absolute/path/to/your-project
+```
+
+npm 安装不携带 Node 运行时。不想自行管理 Node/npm 时使用 GitHub Release 便携包。
+
+### 5. 源码安装（仅用于开发）
+
+```bash
+git clone https://github.com/HeadStone1/AgentBridge.git
+cd AgentBridge
+npm ci
+npm test
+node packages/cli/dist/index.js setup /absolute/path/to/your-project
+node packages/cli/dist/index.js doctor /absolute/path/to/your-project
+```
+
+`npm test` 会先构建全部 workspace，再运行单元和集成测试。源码安装的详细开发流程见后文“开发与发布”。
+
+### 6. 只安装 Codex App、没有 Codex CLI
+
+这是受支持的正常用法，不需要为了 AgentBridge 再全局安装 Codex CLI。运行 `doctor` 后重点检查：
+
+```json
+{
+  "providers": {
+    "codexAppServer": true,
+    "codexSelectedBackend": {
+      "mode": "app-server",
+      "source": "desktop"
+    }
+  }
+}
+```
+
+- `mode: "app-server"` 表示实际选择了 App Server 协议。
+- `source: "desktop"` 表示发现的是 Codex App 自带运行文件。
+- `codexAppDetected` 只表示 GUI 进程是否正在运行，是诊断信息，不是可用性的判定条件。
+- 没有独立 PATH 安装的 Codex CLI 时，不能把 `codex --version` 是否成功当成唯一验收标准；以 `codexSelectedBackend` 和后面的真实 MCP 调用为准。
+- 如果显示 `source: "system"` 或 `mode: "cli"`，说明当前实际走的是系统 CLI，而不是 Codex App 后端。
+
+### 7. 每个项目都要单独执行一次 setup
+
+AgentBridge 的配置和数据库按项目隔离。安装程序只自动配置你传给它的第一个项目；以后新增项目时必须再次执行 `setup`。
+
+Windows Release 安装：
+
+```powershell
+$ab = "$env:USERPROFILE\.agentbridge\bin\agentbridge.cmd"
+& $ab setup 'D:\项目A'
+& $ab setup 'D:\项目B'
+```
+
+Linux/macOS Release 安装：
+
+```bash
+~/.agentbridge/bin/agentbridge setup /work/project-a
+~/.agentbridge/bin/agentbridge setup /work/project-b
+```
+
+npm 安装：
+
+```bash
+agentbridge setup /work/project-a
+agentbridge setup /work/project-b
+```
+
+每次 `setup` 会创建该项目自己的 `.agentbridge/agentbridge.sqlite` 和 `.codex/config.toml`，并在 `~/.claude.json` 中写入该项目的 Claude MCP 条目。配置后完全退出并重新启动 Claude Code 和 Codex App；仅关闭项目窗口不一定会重新加载 MCP。
+
+### 8. 分四层验证安装结果
+
+`doctor` 会检查安装模式、Node、项目元数据、项目登记、数据库读写、Claude/Codex MCP 配置、启动命令和 provider 后端。单项失败会写入 JSON 的 `recommendations`，不会因项目未初始化或 provider 不可用而中途崩溃，也不会为了检查而创建不存在的项目。它仍然**不能证明已经打开的 Claude Code 或 Codex App 已重新加载 MCP 配置**，因此请依次完成下面四层验证。
+
+#### 第一层：运行环境
+
+```powershell
+& "$env:USERPROFILE\.agentbridge\bin\agentbridge.cmd" doctor 'C:\你的项目目录'
+```
+
+Linux/macOS 或 npm 安装时使用对应的 `agentbridge doctor` 命令。重点检查：
+
+- 顶层 `ok` 为 `true`；若为 `false`，按 `recommendations` 从上到下处理后重跑。
+- `node.ok` 和 `installation.valid` 为 `true`；Release/npm 用户还应确认 `installation.sourceIndependent` 为 `true`，源码开发模式为 `false` 是预期结果。
+- `project.initialized`、`project.metadataValid` 和 `registry.registered` 为 `true`。
+- `database.ok`、`configuration.claude.ok`、`configuration.codex.ok` 为 `true`。
+- `providers.claudeCli` 为 `true`。
+- Codex App 用户检查 `codexSelectedBackend.mode=app-server`、`source=desktop`。
+- Codex CLI 用户检查 `codexSelectedBackend.mode=cli`，并确认选择的是预期命令。
+
+#### 第二层：配置文件确实写入
+
+Windows：
+
+```powershell
+$project = (Resolve-Path -LiteralPath 'C:\你的项目目录').Path
+Select-String -LiteralPath "$env:USERPROFILE\.claude.json" -Pattern 'agentbridge'
+Select-String -LiteralPath "$project\.codex\config.toml" -Pattern 'mcp_servers.agentbridge|AGENTBRIDGE_AGENT|AGENTBRIDGE_DB_PATH'
+```
+
+Linux/macOS：
+
+```bash
+grep -n 'agentbridge' ~/.claude.json
+grep -nE 'mcp_servers.agentbridge|AGENTBRIDGE_AGENT|AGENTBRIDGE_DB_PATH' /absolute/path/to/your-project/.codex/config.toml
+```
+
+Claude 条目应位于 `projects[项目绝对路径].mcpServers.agentbridge`；Codex 条目应位于项目文件的 `[mcp_servers.agentbridge]`。两边的 `AGENTBRIDGE_DB_PATH` 必须指向同一个项目数据库。
+
+#### 第三层：两个客户端已经加载 MCP
+
+1. 完全退出并重新打开 Claude Code 和 Codex App/CLI，然后打开执行过 `setup` 的同一个项目。
+2. 在各客户端的 MCP/工具列表中确认服务器名 `agentbridge` 已加载。客户端版本不同，入口可能显示为 MCP、Tools 或 Integrations。
+3. 应能看到七个工具：`ask_peer`、`reply_peer`、`get_discussion`、`list_discussions`、`close_discussion`、`cancel_discussion`、`retry_discussion`。
+4. 如果配置文件正确但工具没有出现，查看客户端自己的 MCP 启动错误；`doctor` 无法代替这一检查。
+
+#### 第四层：真实双向调用
+
+先在 Claude Code 中执行：
+
+```text
+请使用 AgentBridge 的 ask_peer 工具询问 Codex：检查当前项目 README，并概括项目用途。
+```
+
+再在 Codex 中执行相反方向的请求：
+
+```text
+请使用 AgentBridge 的 ask_peer 工具询问 Claude：检查当前项目 README，并指出一项可以改进的地方。
+```
+
+最后检查讨论是否已保存：
+
+```powershell
+& "$env:USERPROFILE\.agentbridge\bin\agentbridge.cmd" status 'C:\你的项目目录'
+```
+
+Linux/macOS 或 npm 安装使用 `agentbridge status /absolute/path/to/your-project`。只有两个方向的真实工具调用都成功，才能确认端到端联通。
+
+### 9. 检查更新、安装更新和回滚
 
 Windows：
 
@@ -78,31 +304,60 @@ Linux/macOS：
 
 `update` 只检查，不修改文件；只有 `update --install` 才会下载对应平台的 Release 包，校验 `SHA256SUMS.txt` 后安装。程序按版本保存在 `~/.agentbridge/versions/`，项目中的配置和 SQLite 数据不会被覆盖。`rollback` 只切换到已经安装的上一版本。
 
-### npm 安装（适合已经安装 Node.js 的开发者）
+升级后重新运行 `setup` 可以确认 Claude/Codex 配置仍指向当前安装位置。
 
-npm 包名为 `@headstone/agentbridge`，要求 Node.js `22.13` 或更高版本。建议全局安装，不建议用一次性的 `npx` 执行 `setup`，因为 MCP 配置需要一个长期稳定的程序路径。
+### 10. 项目卸载和一键完整卸载
 
-```bash
-npm install --global @headstone/agentbridge
-agentbridge setup /absolute/path/to/your-project
-agentbridge doctor /absolute/path/to/your-project
+先对每个已配置项目执行：
+
+```powershell
+& "$env:USERPROFILE\.agentbridge\bin\agentbridge.cmd" uninstall 'C:\你的项目目录' --yes
 ```
 
-升级 npm 安装版本：
+或 npm/Unix：
 
 ```bash
-npm install --global @headstone/agentbridge@latest
-agentbridge setup /absolute/path/to/your-project
+agentbridge uninstall /absolute/path/to/your-project --yes
 ```
 
-升级后重新运行 `setup` 可以确认 Claude/Codex 配置仍指向当前全局安装位置。npm 安装不携带 Node 运行时；不想管理 Node/npm 的用户应使用上面的 GitHub Release 便携包。
+该命令只会：
+
+- 删除当前项目的 `.agentbridge` 目录和讨论数据库。
+- 删除该项目的 Claude/Codex `agentbridge` MCP 条目。
+- 保留其他项目、其他 MCP 服务以及 AgentBridge 程序本身。
+
+它**不会删除** Release 安装目录 `%USERPROFILE%\.agentbridge` 或 `~/.agentbridge`，也不会卸载 npm 全局包。需要保留讨论记录时，先备份项目的 `.agentbridge` 目录。Windows、Linux、macOS 使用相同语义。
+
+要删除所有已登记项目的 AgentBridge 配置、讨论数据和程序本身，使用一键完整卸载。该命令需要两个明确确认参数，避免误操作。
+
+Windows Release 安装：
+
+```powershell
+& "$env:USERPROFILE\.agentbridge\bin\agentbridge.cmd" uninstall-all --yes --remove-program
+```
+
+Linux/macOS Release 安装：
+
+```bash
+~/.agentbridge/bin/agentbridge uninstall-all --yes --remove-program
+```
+
+npm 安装：
+
+```bash
+agentbridge uninstall-all --yes --remove-program
+```
+
+完整卸载会读取 `~/.agentbridge/projects.json`，并兼容发现旧版本已写入 `~/.claude.json` 的 AgentBridge 项目；先逐项删除 Claude/Codex MCP 条目和项目 `.agentbridge` 数据，再卸载程序。若任一项目清理失败，程序文件会保留，方便修复权限后重试。源码开发模式不会自动删除 Git 仓库；请先运行 `uninstall-all --yes` 清配置和数据，再自行决定是否删除源码目录。
+
+可以在 Claude Code 或 Codex 编码任务中要求代理运行上述命令，但它仍必须获得你的命令执行授权。AgentBridge 不提供可被普通 MCP 调用直接触发的自毁工具。Windows Release 完整卸载会在后台等待 AgentBridge 进程退出；执行命令后请完全退出 Claude Code 与 Codex，程序目录随后会被删除。Linux/macOS 可在当前命令退出后删除已打开的程序文件。
 
 ## 目录
 
 - [它如何工作](#它如何工作)
 - [使用方法（先看这里）](#使用方法先看这里)
 - [当前功能与边界](#当前功能与边界)
-- [虚拟机快速开始](#虚拟机快速开始)
+- [虚拟机源码开发快速开始](#虚拟机源码开发快速开始)
 - [配置 Claude 和 Codex](#配置-claude-和-codex)
 - [首次真实联通测试](#首次真实联通测试)
 - [MCP 工具说明](#mcp-工具说明)
@@ -142,7 +397,7 @@ AgentBridge 不会把代码或讨论上传到自己的云服务。实际模型�
 - 自动发现 Codex Desktop 自带的可执行程序，优先使用 App Server stdio 协议。
 - App Server 不可用时自动回退到 Codex CLI `exec --json` 和 `exec resume`。
 - 讨论轮数、重试次数、总消息长度和持续时间限制。
-- `init`、`setup`、`doctor`、`status`、`register-session`、`version`、`update`、`rollback` 和 `uninstall` 管理命令。
+- `init`、`setup`、`doctor`、`status`、`register-session`、`version`、`update`、`rollback`、项目 `uninstall` 和系统级 `uninstall-all` 管理命令。
 - 增量修改 Claude JSON 与 Codex TOML 配置，修改前生成备份。
 - 并发 SQLite 启动锁等待与双进程回归测试。
 
@@ -154,9 +409,9 @@ AgentBridge 不会把代码或讨论上传到自己的云服务。实际模型�
 - 正在执行中的 provider 请求仍无法在进程崩溃后原地恢复；代码签名、静默后台更新和云端部署仍是后续工作。
 - 是否能完成真实调用最终取决于本机 provider 版本、账号权限、网络和模型配额。
 
-## 虚拟机快速开始
+## 虚拟机源码开发快速开始
 
-以下命令以 Linux/bash 为主。PowerShell 可执行同样的 `git`、`npm` 和 `node` 命令，只需把路径换成 Windows 路径。
+本节只适用于需要从源码构建 AgentBridge 的开发者。只想在虚拟机中使用 AgentBridge 时，优先按 README 顶部选择 Release 或 npm 安装。以下命令以 Linux/bash 为主；PowerShell 可执行同样的 `git`、`npm` 和 `node` 命令，只需把路径换成 Windows 路径。
 
 ### 1. 检查必需软件
 
@@ -205,19 +460,18 @@ git log -1 --oneline
 ### 3. 安装依赖并构建
 
 ```bash
-npm install
+npm ci
 npm test
-npm run build
 ```
 
-测试成功时应看到所有测试通过。构建产物位于各 package 的 `dist/` 目录。
+`npm test` 会先完成构建，再运行全部测试。测试成功时应看到所有测试通过；构建产物位于各 package 的 `dist/` 目录。
 
 ### 4. 初始化项目
 
-在 AgentBridge 仓库目录运行：
+在 AgentBridge 仓库目录中，把参数替换成真正需要协作的目标项目绝对路径：
 
 ```bash
-node packages/cli/dist/index.js setup .
+node packages/cli/dist/index.js setup /absolute/path/to/your-project
 ```
 
 该命令会：
@@ -251,12 +505,13 @@ node packages/cli/dist/index.js status .
 
 重点检查 `doctor` 输出：
 
-- `node.supported` 应为 `true`。
+- `ok`、`node.ok`、`project.metadataValid`、`registry.registered` 应为 `true`。
 - `providers.claudeCli` 应在使用 Claude CLI 时为 `true`。
 - `providers.codexSelectedBackend.mode` 默认应优先显示 `app-server`。
 - `providers.codexSelectedBackend.source` 为 `desktop` 时，表示已自动找到 GUI 自带运行文件。
 - App Server 不可用而 CLI 可用时，`providers.codexSelectedBackend.mode` 会显示 `cli`。
-- `database.readable` 应为 `true`。
+- `database.ok`、`configuration.claude.ok`、`configuration.codex.ok` 应为 `true`。
+- 任一项失败时按 `recommendations` 修复；`doctor` 仍会返回其余检查结果。
 
 ## 配置 Claude 和 Codex
 
@@ -581,7 +836,7 @@ node packages/cli/dist/index.js <command> [path] [options]
 |---|---|
 | `init [path]` | 只创建 `.agentbridge/project.json` |
 | `setup [path]` | 初始化项目并配置 MCP |
-| `doctor [path]` | 检查 Node、数据库和 provider 可用性 |
+| `doctor [path]` | 分项检查安装、项目登记、配置、数据库、启动命令和 provider；返回修复建议 |
 | `status [path]` | 显示会话、讨论和审计指标 |
 | `register-session` | 手动登记 provider 原生会话 |
 | `version` | 显示当前程序版本 |
@@ -589,7 +844,9 @@ node packages/cli/dist/index.js <command> [path] [options]
 | `update --install` | 下载、校验并安装当前平台的最新稳定版 |
 | `update --channel beta` | 检查包含预发布版本的更新通道 |
 | `rollback` | 切换到本机已经安装的上一版本 |
-| `uninstall [path] --yes` | 删除本地状态并移除 AgentBridge MCP 条目 |
+| `uninstall [path] --yes` | 删除该项目状态和 MCP 条目；不删除 AgentBridge 程序目录 |
+| `uninstall-all --yes` | 删除所有已登记项目的状态和 MCP 条目；保留程序 |
+| `uninstall-all --yes --remove-program` | 完整卸载所有项目和 Release/npm 程序；源码仓库不会自动删除 |
 
 查看帮助：
 
@@ -727,6 +984,14 @@ node packages/cli/dist/index.js uninstall . --yes
 
 卸载会删除本地讨论数据；需要保留时先执行备份。
 
+这只是“项目卸载”：不会删除 Release 安装目录 `%USERPROFILE%\.agentbridge` / `~/.agentbridge`，也不会卸载 npm 全局包。完整卸载直接运行：
+
+```bash
+agentbridge uninstall-all --yes --remove-program
+```
+
+Release 安装用户使用固定 launcher 的完整路径运行同一命令；详见 README 顶部“项目卸载和一键完整卸载”。完整卸载失败时不会继续删除程序，修复输出中的权限或配置错误后可以重试。
+
 ## 常见问题
 
 ### `Cannot find module 'node:sqlite'` 或 SQLite 实验功能错误
@@ -744,16 +1009,21 @@ npm install
 npm run build
 ```
 
-### `claudeCli: false` 或 `codexCli: false`
+### Claude 或 Codex 后端诊断异常
 
-先分别执行：
+Claude Code 用户先执行：
 
 ```bash
 claude --version
+```
+
+Codex CLI 用户再执行：
+
+```bash
 codex --version
 ```
 
-如果只在某个 shell 中可用，请在 MCP 配置中把 `AGENTBRIDGE_CLAUDE_COMMAND` 或 `AGENTBRIDGE_CODEX_COMMAND` 设置为绝对路径。还要确认 provider 已在虚拟机内完成登录。
+只安装 Codex App 的用户不要求 PATH 中存在 `codex` 命令，应检查 `providers.codexSelectedBackend.mode` 是否为 `app-server`、`source` 是否为 `desktop`。如果 provider 只在某个 shell 中可用，请在 MCP 配置中把 `AGENTBRIDGE_CLAUDE_COMMAND` 或 `AGENTBRIDGE_CODEX_COMMAND` 设置为绝对路径。还要确认 provider 已在 AgentBridge 所在的同一台机器或虚拟机内完成登录。
 
 ### MCP 工具中出现了错误的 `peer`
 
@@ -794,7 +1064,7 @@ Claude 侧则应为：
 node packages/cli/dist/index.js doctor .
 ```
 
-确认对端 CLI 可运行、账号已登录、网络正常。问题解决后调用 `retry_discussion`，无需重新创建讨论。
+确认 Claude CLI 或 Codex 实际选中的 App Server/CLI 后端可运行、账号已登录、网络正常。问题解决后调用 `retry_discussion`，无需重新创建讨论。
 
 ### Codex 后端不可用或返回 `no agent message`
 
@@ -882,9 +1152,9 @@ npm run release:package
 3. 提交代码后创建与 `package.json` 完全一致的标签：
 
 ```bash
-git tag v0.4.2
+git tag v0.5.0
 git push origin main
-git push origin v0.4.2
+git push origin v0.5.0
 ```
 
 标签推送后，[GitHub Actions Release 工作流](.github/workflows/release.yml) 会再次执行构建和测试，然后分别在 Windows、Linux、macOS runner 上打包自带运行时的压缩包，生成 `SHA256SUMS.txt`，最后创建 GitHub Release。标签与 `package.json` 版本不一致时工作流会拒绝发布。

@@ -1,22 +1,34 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { basename, join, parse, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
 import process from 'node:process';
 import {
-  ClaudeConnector,
-  CodexAutoConnector,
-  CodexConnector,
-  discoverCodexCommands,
   type CodexBackendMode,
 } from '@agentbridge/connectors';
 import { AuditService } from '@agentbridge/audit';
 import { Storage } from '@agentbridge/storage';
 import type { AgentType, SessionStatus } from '@agentbridge/protocol';
-import { configureClaudeJson, configureCodexToml, removeClaudeJson, removeCodexToml } from './mcpConfig.js';
+import {
+  configureClaudeJson,
+  configureCodexToml,
+  listClaudeAgentBridgeProjects,
+  removeClaudeJson,
+  removeCodexToml,
+} from './mcpConfig.js';
 import { defaultCodexConfig, resolveMcpEntry } from './paths.js';
+import { runDoctor } from './diagnostics.js';
+import {
+  cleanupEmptyRegistryRoot,
+  detectInstallation,
+  readProjectRegistry,
+  registerProject,
+  registryRoot,
+  scheduleProgramRemoval,
+  unregisterProject,
+  type RegisteredProject,
+} from './installation.js';
 import {
   CURRENT_VERSION,
   checkForUpdate,
@@ -48,7 +60,7 @@ async function main(argv: string[]): Promise<void> {
       console.log(JSON.stringify(status(projectPath), null, 2));
       return;
     case 'doctor':
-      console.log(JSON.stringify(await doctor(projectPath, options), null, 2));
+      console.log(JSON.stringify(await runDoctor(projectPath, options), null, 2));
       return;
     case 'version':
     case '--version':
@@ -62,7 +74,10 @@ async function main(argv: string[]): Promise<void> {
       console.log(JSON.stringify(rollbackInstalledRelease(), null, 2));
       return;
     case 'uninstall':
-      console.log(JSON.stringify(uninstall(projectPath, options.yes === true, options), null, 2));
+      console.log(JSON.stringify(uninstallProject(projectPath, options.yes === true, options), null, 2));
+      return;
+    case 'uninstall-all':
+      console.log(JSON.stringify(uninstallAll(options.yes === true, options), null, 2));
       return;
     default:
       throw new Error(`Unknown command: ${command}. Run: agentbridge help`);
@@ -86,7 +101,12 @@ function initProject(projectPath: string): Record<string, unknown> {
 
 function setupProject(projectPath: string, options: Options): Record<string, unknown> {
   const project = initProject(projectPath);
-  if (options['no-config'] === true) return { project, configured: [] };
+  const claudeConfig = String(options['claude-config'] ?? join(homedir(), '.claude.json'));
+  const codexConfig = String(options['codex-config'] ?? defaultCodexConfig(projectPath));
+  if (options['no-config'] === true) {
+    const projects = registerProject({ projectPath, claudeConfig, codexConfig });
+    return { project, configured: [], registeredProjects: projects.length };
+  }
 
   const releaseLauncher = process.env.AGENTBRIDGE_LAUNCHER;
   const mcpCommand = String(options['mcp-command'] ?? releaseLauncher ?? process.execPath);
@@ -118,8 +138,11 @@ function setupProject(projectPath: string, options: Options): Record<string, unk
     env: { ...sharedEnv, AGENTBRIDGE_AGENT: 'codex' },
     cwd: projectPath,
   };
-  const claudeConfig = String(options['claude-config'] ?? join(homedir(), '.claude.json'));
-  const codexConfig = String(options['codex-config'] ?? defaultCodexConfig(projectPath));
+  const configured = [
+    configureClaudeJson(claudeConfig, claudeServer, projectPath),
+    configureCodexToml(codexConfig, codexServer),
+  ];
+  const projects = registerProject({ projectPath, claudeConfig, codexConfig });
   return {
     project,
     codexBackend: {
@@ -127,10 +150,8 @@ function setupProject(projectPath: string, options: Options): Record<string, unk
       appServerFirst: (sharedEnv.AGENTBRIDGE_CODEX_MODE ?? 'auto') !== 'cli',
       automaticDesktopDiscovery: !sharedEnv.AGENTBRIDGE_CODEX_APP_COMMAND && !sharedEnv.AGENTBRIDGE_CODEX_COMMAND,
     },
-    configured: [
-      configureClaudeJson(claudeConfig, claudeServer, projectPath),
-      configureCodexToml(codexConfig, codexServer),
-    ],
+    configured,
+    registeredProjects: projects.length,
   };
 }
 
@@ -173,51 +194,6 @@ function status(projectPath: string): Record<string, unknown> {
   }
 }
 
-async function doctor(projectPath: string, options: Options = {}): Promise<Record<string, unknown>> {
-  const checks: Record<string, unknown> = {
-    node: { version: process.versions.node, supported: isSupportedNode(process.versions.node) },
-    project: { path: projectPath, initialized: existsSync(join(projectPath, '.agentbridge', 'project.json')) },
-  };
-  const storage = openStorage(projectPath);
-  storage.recoverExpiredSessionLeases();
-  storage.close();
-  const codexMode = parseCodexMode(String(options['codex-mode'] ?? process.env.AGENTBRIDGE_CODEX_MODE ?? 'auto'));
-  const discoveryEnv = { ...process.env };
-  if (typeof options['codex-app-command'] === 'string') {
-    discoveryEnv.AGENTBRIDGE_CODEX_APP_COMMAND = options['codex-app-command'];
-  }
-  if (typeof options['codex-command'] === 'string') {
-    discoveryEnv.AGENTBRIDGE_CODEX_COMMAND = options['codex-command'];
-  }
-  const codexAuto = new CodexAutoConnector({
-    mode: codexMode,
-    candidates: discoverCodexCommands({ env: discoveryEnv }),
-  });
-  const [claude, codexSelection, codexAppDetected] = await Promise.all([
-    new ClaudeConnector({ command: process.env.AGENTBRIDGE_CLAUDE_COMMAND }).isAvailable(),
-    codexAuto.getSelection(),
-    isProcessRunning('codex'),
-  ]);
-  const codexCli = codexSelection
-    ? await new CodexConnector({ command: codexSelection.command }).isAvailable()
-    : false;
-  checks.providers = {
-    claudeCli: claude,
-    codexCli,
-    codexAppServer: codexSelection?.mode === 'app-server',
-    codexSelectedBackend: codexSelection ?? null,
-    codexCandidates: codexAuto.getCandidates().map(({ command, source, label, mode }) => ({ command, source, label, mode })),
-    codexAppDetected,
-    availability: {
-      claude: claude ? 'BACKGROUND' : 'UNAVAILABLE',
-      codex: codexSelection ? 'BACKGROUND' : 'UNAVAILABLE',
-    },
-    note: 'App Server is preferred. codexAppDetected is informational; AgentBridge only uses capability-probed executables and does not attach to an open GUI session.',
-  };
-  checks.database = { readable: true, path: process.env.AGENTBRIDGE_DB_PATH ?? join(projectPath, '.agentbridge', 'agentbridge.sqlite') };
-  return checks;
-}
-
 async function update(options: Options): Promise<unknown> {
   const channel = options.channel === 'beta' ? 'beta' : 'stable';
   if (options.channel && options.channel !== 'stable' && options.channel !== 'beta') {
@@ -228,47 +204,107 @@ async function update(options: Options): Promise<unknown> {
   return installUpdate(release, info);
 }
 
-function isProcessRunning(processName: string): Promise<boolean> {
-  const command = process.platform === 'win32' ? 'tasklist' : 'ps';
-  const args = process.platform === 'win32' ? ['/FO', 'CSV', '/NH'] : ['-A', '-o', 'comm='];
-  return new Promise((resolve) => {
-    const child = spawn(command, args, { windowsHide: true, shell: false });
-    let output = '';
-    const timer = setTimeout(() => {
-      child.kill();
-      resolve(false);
-    }, 2_000);
-    child.stdout?.on('data', (chunk: Buffer | string) => { output += chunk.toString(); });
-    child.once('error', () => {
-      clearTimeout(timer);
-      resolve(false);
-    });
-    child.once('close', (code) => {
-      clearTimeout(timer);
-      resolve(code === 0 && output.toLowerCase().includes(processName.toLowerCase()));
-    });
-  });
-}
-
-function uninstall(projectPath: string, confirmed: boolean, options: Options): Record<string, unknown> {
-  const stateDir = resolve(projectPath, '.agentbridge');
+function uninstallProject(projectPath: string, confirmed: boolean, options: Options): Record<string, unknown> {
   if (!confirmed) throw new Error('Refusing to remove local state without --yes');
-  if (resolve(stateDir).split('\\').length < 3) throw new Error('Refusing to remove an unsafe state path');
   const claudeConfig = String(options['claude-config'] ?? join(homedir(), '.claude.json'));
   const codexConfig = String(options['codex-config'] ?? defaultCodexConfig(projectPath));
-  const configResults = [removeClaudeJson(claudeConfig, projectPath), removeCodexToml(codexConfig)];
-  if (existsSync(stateDir)) rmSync(stateDir, { recursive: true, force: true });
-  return { projectPath, removed: stateDir, configs: configResults };
+  return removeProject({ projectPath, claudeConfig, codexConfig }, true);
 }
 
-function isSupportedNode(version: string): boolean {
-  const [major, minor] = version.split('.').map(Number);
-  return major > 22 || (major === 22 && minor >= 5);
+function uninstallAll(confirmed: boolean, options: Options): Record<string, unknown> {
+  if (!confirmed) throw new Error('Refusing to remove all AgentBridge projects without --yes');
+  const removeProgram = options['remove-program'] === true;
+  const installation = detectInstallation();
+  if (removeProgram && installation.mode === 'source') {
+    throw new Error('Cannot automatically remove a source checkout. Run uninstall-all --yes without --remove-program, then delete the repository yourself.');
+  }
+
+  const defaultClaudeConfig = String(options['claude-config'] ?? join(homedir(), '.claude.json'));
+  const registrations = readProjectRegistry();
+  const byPath = new Map<string, RegisteredProject>();
+  for (const registration of registrations) byPath.set(projectPathKey(registration.projectPath), registration);
+  for (const discoveredPath of listClaudeAgentBridgeProjects(defaultClaudeConfig)) {
+    const projectPath = resolve(discoveredPath);
+    const key = projectPathKey(projectPath);
+    if (!byPath.has(key)) {
+      byPath.set(key, {
+        projectPath,
+        claudeConfig: defaultClaudeConfig,
+        codexConfig: defaultCodexConfig(projectPath),
+        setupAt: 'discovered-from-claude-config',
+      });
+    }
+  }
+
+  const projects: Record<string, unknown>[] = [];
+  const errors: Array<{ projectPath: string; error: string }> = [];
+  for (const registration of byPath.values()) {
+    try {
+      projects.push(removeProject(registration, false));
+      unregisterProject(registration.projectPath);
+    } catch (cause) {
+      errors.push({
+        projectPath: registration.projectPath,
+        error: cause instanceof Error ? cause.message : String(cause),
+      });
+    }
+  }
+  let program: unknown = null;
+  if (removeProgram && errors.length === 0) {
+    if (installation.mode === 'npm') cleanupEmptyRegistryRoot();
+    program = scheduleProgramRemoval(installation);
+  }
+  else if (removeProgram) program = { scheduled: false, reason: 'Project cleanup failed; program files were kept so cleanup can be retried.' };
+  else cleanupEmptyRegistryRoot();
+  return {
+    removedProjects: projects.length,
+    projects,
+    errors,
+    program,
+    complete: errors.length === 0,
+    restartRequired: true,
+  };
+}
+
+function removeProject(
+  registration: Pick<RegisteredProject, 'projectPath' | 'claudeConfig' | 'codexConfig'>,
+  updateRegistry: boolean,
+): Record<string, unknown> {
+  const projectPath = resolve(registration.projectPath);
+  const stateDir = resolve(projectPath, '.agentbridge');
+  if (stateDir === parse(stateDir).root || stateDir === projectPath) {
+    throw new Error(`Refusing to remove an unsafe state path: ${stateDir}`);
+  }
+  const configs = [
+    removeClaudeJson(registration.claudeConfig, projectPath),
+    removeCodexToml(registration.codexConfig),
+  ];
+  const sharedInstallRoot = stateDir === registryRoot();
+  const removed: string[] = [];
+  if (sharedInstallRoot) {
+    for (const name of ['project.json', 'agentbridge.sqlite', 'agentbridge.sqlite-wal', 'agentbridge.sqlite-shm']) {
+      const path = join(stateDir, name);
+      if (existsSync(path)) {
+        rmSync(path, { force: true });
+        removed.push(path);
+      }
+    }
+  } else if (existsSync(stateDir)) {
+    rmSync(stateDir, { recursive: true, force: true });
+    removed.push(stateDir);
+  }
+  if (updateRegistry) unregisterProject(projectPath);
+  return { projectPath, removed, configs, sharedInstallRoot };
 }
 
 function parseCodexMode(value: string): CodexBackendMode {
   if (value === 'auto' || value === 'app-server' || value === 'cli') return value;
   throw new Error('--codex-mode must be auto, app-server, or cli');
+}
+
+function projectPathKey(value: string): string {
+  const path = resolve(value);
+  return process.platform === 'win32' ? path.toLowerCase() : path;
 }
 
 function openStorage(projectPath: string): Storage {
@@ -304,10 +340,6 @@ function parseArgs(args: string[]): { options: Options; positional: string[] } {
   return { options, positional };
 }
 
-function printHelpLegacy(): void {
-  console.log(`AgentBridge local management\n\nCommands:\n  init [path]                 Create .agentbridge/project.json\n  setup [path]                Initialize local state and MCP config\n  register-session             Register a provider-native session\n  status [path]               Show sessions, discussions, and metrics\n  doctor [path]               Check Node, database, and provider reachability\n  uninstall [path] --yes      Remove only the project's .agentbridge state\n\nOptions:\n  --provider claude|codex\n  --session-id ID\n  --status IDLE|BUSY|BRIDGE_OWNED|UNKNOWN\n  --metadata JSON\n  --project-path PATH\n  --no-config                 Do not modify Claude/Codex MCP config\n  --mcp-command PATH          MCP executable/command (default: current Node)\n  --mcp-entry PATH            MCP entry script for Node mode\n  --claude-config PATH\n  --codex-config PATH`);
-}
-
 function printHelp(): void {
   console.log([
     'AgentBridge local management',
@@ -317,11 +349,14 @@ function printHelp(): void {
     '  setup [path]                Initialize local state and MCP config',
     '  register-session             Register a provider-native session',
     '  status [path]               Show sessions, discussions, and metrics',
-    '  doctor [path]               Check Node, database, and provider reachability',
+    '  doctor [path]               Diagnose install, config, database, and providers',
     '  version                     Show the installed AgentBridge version',
     '  update [--install]          Check GitHub Releases; install only with --install',
     '  rollback                    Switch to the previous locally installed version',
     '  uninstall [path] --yes      Remove local state and AgentBridge MCP entries',
+    '  uninstall-all --yes         Remove every registered project configuration',
+    '  uninstall-all --yes --remove-program',
+    '                              Also remove the Release/npm installation',
     '',
     'Options:',
     '  --provider claude|codex',
@@ -336,6 +371,7 @@ function printHelp(): void {
     '  --codex-app-command PATH    Override Codex App Server executable',
     '  --codex-command PATH        Override Codex executable (auto/CLI)',
     '  --channel stable|beta       Select the update channel (default: stable)',
+    '  --remove-program            With uninstall-all, remove installed program files',
     '  --claude-config PATH',
     '  --codex-config PATH',
   ].join('\n'));
