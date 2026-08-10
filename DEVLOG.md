@@ -2,6 +2,15 @@
 
 ## 2026-08-10
 
+### 多语言与 AI Agent 部署文档、非商业许可
+
+- 保留完整中文 `README.md`，新增英文 `README.en.md`、西班牙语 `README.es.md`，并在各文件顶部提供语言导航。
+- 新增面向自动部署代理的 `README.ai.md`，把同机/同虚拟机边界、安装方式选择、逐项目 setup、Codex App 与 Codex CLI 后端判定、四层验收、更新、卸载和常见踩坑写成可执行检查清单。
+- AI 部署手册要求以 `doctor.providers.codexSelectedBackend` 为准：Codex App 应为 `mode=app-server`、`source=desktop`；独立 Codex CLI 应为 `mode=cli`，不能把 GUI 进程存在等同于 App Server 可用。
+- v0.5.0 起从 Apache-2.0 切换为 SPDX 标识 `PolyForm-Noncommercial-1.0.0`，新增 `NOTICE`、`LICENSE_HISTORY.md` 和 `COMMERCIAL_LICENSE.md`；明确公开许可不授予第三方商业使用权，商业授权由 HeadStone1 另行书面授予。
+- 记录 v0.4.2 及更早已发布版本继续受其 Apache-2.0 许可约束，新的许可不追溯撤销既有授权；第三方组件继续使用各自许可证。
+- 新增 `CONTRIBUTING.md`，避免外部贡献与后续商业再许可权不清；发布包和 npm 包现在同时携带多语言、AI 部署与许可文件。
+
 ### 安装与验收文档补全
 
 - README 顶部增加 Release、npm、源码三种安装方式的选择表，并明确 Claude Code、Codex App/CLI 必须与 AgentBridge 位于同一台机器或虚拟机且提前完成登录。

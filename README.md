@@ -1,8 +1,14 @@
 # AgentBridge
 
+[**简体中文**](README.md) | [English](README.en.md) | [Español](README.es.md) | [给 AI Agent 的部署手册](README.ai.md)
+
 AgentBridge 是一个本地优先的 MCP 协作核心，让 Claude Code 和 Codex 能在同一个项目中互相提问、回复、重试、达成一致，并把讨论状态保存在项目本地的 SQLite 数据库中。
 
 > 当前开发版本：v0.5.0。本项目以 GitHub Release 分发本地 stdio MCP；便携包自带 Node.js 运行时，不要求用户另外安装 Node 或 npm。Release 安装后程序独立位于用户目录，不依赖下载目录或源码仓库。
+
+> 如果你准备把本项目交给 Claude、Codex 或其他 AI Agent 自动部署，请优先让它完整阅读 [README.ai.md](README.ai.md)。该手册要求 Agent 明确判断当前连接的是 Codex App 的 App Server 还是独立 Codex CLI，并完成 doctor、配置文件、MCP 工具、真实双向调用四层验收。
+
+> 许可提醒：v0.5.0 起采用 `PolyForm-Noncommercial-1.0.0`，公开许可只允许非商业用途；商业使用需要 HeadStone1 的单独书面授权。v0.4.2 及更早已发布版本继续适用当时的 Apache-2.0，详见 [许可历史](LICENSE_HISTORY.md)。因此 v0.5.0 起应称为“源码可用（source-available）”，不应称为 OSI 开源软件。
 
 ## 使用方法（先看这里）
 
@@ -356,6 +362,9 @@ agentbridge uninstall-all --yes --remove-program
 
 - [它如何工作](#它如何工作)
 - [使用方法（先看这里）](#使用方法先看这里)
+- [给 AI Agent 的部署手册](README.ai.md)
+- [English README](README.en.md)
+- [README en español](README.es.md)
 - [当前功能与边界](#当前功能与边界)
 - [虚拟机源码开发快速开始](#虚拟机源码开发快速开始)
 - [配置 Claude 和 Codex](#配置-claude-和-codex)
@@ -1207,6 +1216,19 @@ scripts                 打包、安装与固定 launcher
 - `.agentbridge/agentbridge.sqlite` 包含讨论消息和审计信息，默认未加密；请按项目敏感级别保护文件权限和备份。
 - provider 配置备份可能包含其他 MCP 环境变量或凭据，不要上传到公共仓库。
 - AgentBridge 不会替代 Claude/Codex 自身的权限、沙箱、认证和网络安全策略。
+
+## 许可证与商业使用
+
+AgentBridge v0.5.0 及以后版本采用 [PolyForm Noncommercial License 1.0.0](LICENSE)：
+
+- 个人研究、实验、学习、业余项目等许可证列明的非商业用途可以使用。
+- 除版权持有人外，公开许可证不授予商业使用权；销售、付费托管、纳入商业产品或把 AgentBridge 作为付费交付的重要组成部分前，必须取得 HeadStone1 的单独书面商业授权。
+- 对用途是否属于商业用途存在疑问时，请先停止部署并联系作者确认，不要自行推定获准。
+- 第三方依赖和随包运行时继续适用各自的许可证。
+
+完整条款见 [LICENSE](LICENSE)，必需版权通知见 [NOTICE](NOTICE)，实际场景说明见 [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md)。这些说明不能追溯改变已经按 Apache-2.0 发布的 v0.4.2 及更早版本；版本边界见 [LICENSE_HISTORY.md](LICENSE_HISTORY.md)。
+
+由于禁止商业用途不符合 OSI 对开源许可证“不得限制使用领域”的定义，本项目从 v0.5.0 起是公开源代码的非商业软件，而不是 OSI 认可的开源软件。此处是项目许可说明，不是法律意见。
 
 ## 最小验收清单
 
