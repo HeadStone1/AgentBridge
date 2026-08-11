@@ -18,6 +18,7 @@ const agentType: AgentType = process.env.AGENTBRIDGE_AGENT === 'codex' ? 'codex'
 let runtimePromise: Promise<MCPRuntime> | null = null;
 let boundProjectPath: string | null = null;
 let activeStorage: Storage | null = null;
+let activeCollaboration: CollaborationService | null = null;
 
 async function resolveRuntime(requestedProjectPath: string | undefined, server: Server): Promise<MCPRuntime> {
   if (!requestedProjectPath && boundProjectPath && runtimePromise) return runtimePromise;
@@ -78,6 +79,7 @@ async function createRuntime(projectPath: string): Promise<MCPRuntime> {
       }),
     },
   );
+  activeCollaboration = collaboration;
   return { storage, collaboration, projectPath };
 }
 
@@ -150,11 +152,19 @@ function samePath(left: string, right: string): boolean {
 }
 
 let shuttingDown = false;
+let shutdownPromise: Promise<void> | null = null;
 const shutdown = () => {
   if (shuttingDown) return;
   shuttingDown = true;
-  activeStorage?.close();
-  process.exit(0);
+  shutdownPromise = (async () => {
+    try {
+      await activeCollaboration?.shutdown(5_000);
+    } finally {
+      activeStorage?.close();
+      process.exit(0);
+    }
+  })();
+  void shutdownPromise;
 };
 process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);

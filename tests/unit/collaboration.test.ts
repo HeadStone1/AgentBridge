@@ -526,7 +526,7 @@ describe('CollaborationService', () => {
       sessionId: 'thread_old_app_server',
       projectPath: process.cwd(),
       status: 'IDLE',
-      metadata: { sessionKind: 'codex-app-server' },
+      metadata: { sessionKind: 'codex-app-server', bridgeOwned: true },
     });
     const fallbackCollaboration = new CollaborationService(
       fallbackStorage,

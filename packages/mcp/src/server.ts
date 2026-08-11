@@ -40,7 +40,7 @@ function buildTools(agentType: AgentType): Tool[] {
   return [
     {
       name: 'ask_peer',
-      description: 'Start a discussion with the other coding agent. A configured connector dispatches the request and returns a peer response.',
+      description: 'Start a discussion with the other coding agent. The request may be queued asynchronously; inspect get_discussion for the peer response or final decision.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -53,7 +53,7 @@ function buildTools(agentType: AgentType): Tool[] {
     },
     {
       name: 'reply_peer',
-      description: 'Continue an existing discussion and optionally dispatch the reply to the other agent.',
+      description: 'Continue an existing discussion. The reply may be queued asynchronously; inspect get_discussion for the peer response.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -84,7 +84,7 @@ function buildTools(agentType: AgentType): Tool[] {
     },
     {
       name: 'close_discussion',
-      description: 'Record this agent\'s acceptance and ask the peer to confirm. The discussion completes only after both agents accept the same conclusion.',
+      description: 'Record this agent\'s acceptance and ask the peer to confirm. Confirmation may be queued asynchronously; inspect get_discussion for completion.',
       inputSchema: {
         type: 'object',
         properties: {

@@ -93,6 +93,15 @@ export function detectInstallation(
   };
 }
 
+export function assertUpdateSupported(installation: InstallationInfo): void {
+  if (installation.mode === 'npm') {
+    throw new Error('This AgentBridge installation is managed by npm. Run `npm install --global @headstone/agentbridge@latest` instead.');
+  }
+  if (installation.mode === 'source') {
+    throw new Error('This AgentBridge installation is a source checkout. Pull the desired commit and rebuild it instead of installing a release over the checkout.');
+  }
+}
+
 export function scheduleProgramRemoval(installation: InstallationInfo): ProgramRemovalResult {
   if (installation.mode === 'source') {
     throw new Error('Program removal is unavailable in source development mode; remove the source checkout manually after project cleanup');

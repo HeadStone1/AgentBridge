@@ -64,7 +64,17 @@ export interface StoragePort {
     ttlMs?: number;
   }): void;
   releaseSessionLease(provider: AgentType, projectPath: string, ownerId: string): void;
+  renewSessionLease(provider: AgentType, projectPath: string, ownerId: string, ttlMs?: number): boolean;
   hasSessionLease(provider: AgentType, projectPath: string, ownerId?: string): boolean;
+  acquireDiscussionLease(data: {
+    discussionId: string;
+    projectPath: string;
+    ownerId: string;
+    ttlMs?: number;
+  }): void;
+  releaseDiscussionLease(discussionId: string, ownerId: string): void;
+  renewDiscussionLease(discussionId: string, ownerId: string, ttlMs?: number): boolean;
+  hasDiscussionLease(discussionId: string, ownerId?: string): boolean;
   recoverExpiredSessionLeases(now?: Date): number;
   recoverStaleDiscussions(maxAgeMs?: number): Discussion[];
   pruneSessions(maxAgeMs?: number): number;

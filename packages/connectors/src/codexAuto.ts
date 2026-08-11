@@ -180,5 +180,7 @@ function readMode(value: string | undefined): CodexBackendMode {
 }
 
 function shouldFallback(error: unknown): boolean {
-  return !(isProviderError(error) && ['AUTH', 'RATE_LIMIT', 'CANCELLED'].includes(error.code));
+  return !(isProviderError(error) && (
+    error.ambiguous || ['AUTH', 'RATE_LIMIT', 'CANCELLED'].includes(error.code)
+  ));
 }

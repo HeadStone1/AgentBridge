@@ -36,6 +36,52 @@ describe('Storage', () => {
       expect(retrieved!.topic).toBe('Retrieve test');
     });
 
+    it('allows one agent to revise a one-sided agreement before peer acceptance', () => {
+      const discussion = storage.createDiscussion({
+        topic: 'Agreement revision',
+        driver: 'claude',
+        peer: 'codex',
+        traceId: 'tr_agreement_revision',
+      });
+
+      const first = storage.recordAgreement({
+        discussionId: discussion.id,
+        agent: 'claude',
+        summary: 'Plan A',
+      });
+      const revised = storage.recordAgreement({
+        discussionId: discussion.id,
+        agent: 'claude',
+        summary: 'Plan B',
+      });
+
+      expect(revised.decisionHash).not.toBe(first.decisionHash);
+      expect(revised.agreedBy).toEqual(['claude']);
+    });
+
+    it('locks a discussion operation across storage connections', () => {
+      const discussion = storage.createDiscussion({
+        topic: 'Discussion lock',
+        driver: 'claude',
+        peer: 'codex',
+        traceId: 'tr_discussion_lock',
+      });
+      storage.acquireDiscussionLease({
+        discussionId: discussion.id,
+        projectPath: discussion.projectPath,
+        ownerId: 'owner-a',
+      });
+      expect(storage.hasDiscussionLease(discussion.id)).toBe(true);
+      expect(() => storage.acquireDiscussionLease({
+        discussionId: discussion.id,
+        projectPath: discussion.projectPath,
+        ownerId: 'owner-b',
+      })).toThrow('already being operated on');
+      expect(storage.renewDiscussionLease(discussion.id, 'owner-a', 5_000)).toBe(true);
+      storage.releaseDiscussionLease(discussion.id, 'owner-a');
+      expect(storage.hasDiscussionLease(discussion.id)).toBe(false);
+    });
+
     it('updates discussion status', () => {
       const d = storage.createDiscussion({
         topic: 'Update test',
@@ -263,6 +309,18 @@ describe('Storage', () => {
         ownerId: 'discussion-b',
       })).not.toThrow();
     });
+
+    it('renews an active lease without reviving an expired owner', () => {
+      storage.acquireSessionLease({
+        provider: 'codex',
+        projectPath: '/project',
+        ownerId: 'discussion-a',
+        ttlMs: 1_000,
+      });
+      expect(storage.renewSessionLease('codex', '/project', 'discussion-a', 5_000)).toBe(true);
+      expect(storage.hasSessionLease('codex', '/project', 'discussion-a')).toBe(true);
+      expect(storage.renewSessionLease('codex', '/project', 'discussion-b', 5_000)).toBe(false);
+    });
   });
 
   describe('Session registry', () => {
@@ -272,11 +330,11 @@ describe('Storage', () => {
         sessionId: 'claude-session-1',
         projectPath: '/project',
         status: 'IDLE',
-        metadata: { source: 'hook', discussionId: 'dsc_session' },
+        metadata: { source: 'hook', discussionId: 'dsc_session', bridgeOwned: true },
       });
 
       expect(session.status).toBe('IDLE');
-      expect(session.metadata).toEqual({ source: 'hook', discussionId: 'dsc_session' });
+      expect(session.metadata).toEqual({ source: 'hook', discussionId: 'dsc_session', bridgeOwned: true });
       expect(storage.listSessions('/project')).toHaveLength(1);
       expect(storage.getSessionForDiscussion('claude', 'dsc_session', '/project')?.sessionId)
         .toBe('claude-session-1');
@@ -295,10 +353,30 @@ describe('Storage', () => {
         sessionId: 'codex-project-session',
         projectPath: '/project',
         status: 'IDLE',
-        metadata: { sessionKind: 'codex-cli' },
+        metadata: { sessionKind: 'codex-cli', bridgeOwned: true },
       });
       expect(storage.getSessionForDiscussion('codex', 'dsc_other_discussion', '/project')?.sessionId)
         .toBe('codex-project-session');
+    });
+
+    it('does not select an interactive or superseded session for a bridge dispatch', () => {
+      storage.registerSession({
+        provider: 'codex',
+        sessionId: 'codex-interactive-session',
+        projectPath: '/project',
+        status: 'IDLE',
+        metadata: { sessionKind: 'codex-cli', source: 'hook' },
+      });
+      expect(storage.getSessionForDiscussion('codex', 'dsc_other_discussion', '/project')).toBeNull();
+
+      storage.registerSession({
+        provider: 'codex',
+        sessionId: 'codex-superseded-session',
+        projectPath: '/project',
+        status: 'IDLE',
+        metadata: { bridgeOwned: true, supersededBy: 'codex-new-session' },
+      });
+      expect(storage.getSessionForDiscussion('codex', 'dsc_other_discussion', '/project')).toBeNull();
     });
 
     it('cleans expired session leases during recovery', () => {

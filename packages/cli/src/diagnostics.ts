@@ -175,7 +175,7 @@ function inspectCodexConfig(path: string): Record<string, unknown> & { ok: boole
     if (!section) return { ok: false, path, exists: true, configured: false, error: 'agentbridge section is missing' };
     const command = tomlValue(section, 'command');
     const args = tomlArray(section, 'args');
-    const environmentMatches = section.includes(`env.AGENTBRIDGE_AGENT = 'codex'`);
+    const environmentMatches = /^\s*env\.AGENTBRIDGE_AGENT\s*=\s*(?:'codex'|"codex")\s*$/m.test(section);
     const dynamicRouting = !section.includes('env.AGENTBRIDGE_PROJECT_PATH')
       && !section.includes('env.AGENTBRIDGE_DB_PATH')
       && !/^\s*cwd\s*=/m.test(section);
@@ -283,14 +283,19 @@ function extractTomlSection(source: string, name: string): string | null {
 }
 
 function tomlValue(section: string, key: string): string | null {
-  const match = section.match(new RegExp(`^\\s*${key}\\s*=\\s*'((?:''|[^'])*)'\\s*$`, 'm'));
-  return match ? match[1].replace(/''/g, "'") : null;
+  const match = section.match(new RegExp(
+    `^\\s*${key}\\s*=\\s*(?:'((?:''|[^'])*)'|"((?:\\\\.|[^"\\\\])*)")\\s*$`,
+    'm',
+  ));
+  if (!match) return null;
+  return match[1] !== undefined ? match[1].replace(/''/g, "'") : decodeTomlBasicString(match[2]);
 }
 
 function tomlArray(section: string, key: string): string[] {
   const match = section.match(new RegExp(`^\\s*${key}\\s*=\\s*\\[(.*)\\]\\s*$`, 'm'));
   if (!match) return [];
-  return [...match[1].matchAll(/'((?:''|[^'])*)'/g)].map((item) => item[1].replace(/''/g, "'"));
+  return [...match[1].matchAll(/'((?:''|[^'])*)'|"((?:\\\\.|[^"\\\\])*)"/g)]
+    .map((item) => item[1] !== undefined ? item[1].replace(/''/g, "'") : decodeTomlBasicString(item[2]));
 }
 
 function areEntryArgumentsAvailable(value: unknown): boolean {
@@ -303,6 +308,18 @@ function areEntryArgumentsAvailable(value: unknown): boolean {
 
 function tomlString(value: string): string {
   return value.replace(/'/g, "''");
+}
+
+function decodeTomlBasicString(value: string): string {
+  return value.replace(/\\(\\|"|b|f|n|r|t)/g, (match, escape: string) => ({
+    '\\\\': '\\',
+    '\\"': '"',
+    '\\b': '\b',
+    '\\f': '\f',
+    '\\n': '\n',
+    '\\r': '\r',
+    '\\t': '\t',
+  }[match] ?? escape));
 }
 
 function safeIsDirectory(path: string): boolean {
