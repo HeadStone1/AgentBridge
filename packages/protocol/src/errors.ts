@@ -12,12 +12,14 @@ export type ProviderErrorCode =
 export class ProviderError extends Error {
   readonly code: ProviderErrorCode;
   readonly retryable: boolean;
+  readonly ambiguous: boolean;
 
-  constructor(code: ProviderErrorCode, message: string, options: { retryable?: boolean; cause?: unknown } = {}) {
+  constructor(code: ProviderErrorCode, message: string, options: { retryable?: boolean; ambiguous?: boolean; cause?: unknown } = {}) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
     this.name = 'ProviderError';
     this.code = code;
     this.retryable = options.retryable ?? (code !== 'AUTH' && code !== 'RATE_LIMIT' && code !== 'CANCELLED');
+    this.ambiguous = options.ambiguous ?? false;
   }
 }
 

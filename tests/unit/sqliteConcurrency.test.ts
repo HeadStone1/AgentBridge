@@ -14,6 +14,7 @@ describe('SQLite dual-process safety', () => {
       const { parentPort, workerData } = require('node:worker_threads');
       const { DatabaseSync } = require('node:sqlite');
       const db = new DatabaseSync(workerData);
+      db.exec('PRAGMA busy_timeout = 5000;');
       db.exec('CREATE TABLE lock_probe (value INTEGER); BEGIN IMMEDIATE; INSERT INTO lock_probe VALUES (1);');
       parentPort.postMessage('locked');
       setTimeout(() => {
@@ -87,6 +88,56 @@ describe('SQLite dual-process safety', () => {
         projectPath: directory,
         ownerId: 'other-discussion',
       })).toThrow('already leased');
+
+      first.acquireDiscussionLease({
+        discussionId: discussion.id,
+        projectPath: directory,
+        ownerId: 'owner-a',
+      });
+      expect(() => second.acquireDiscussionLease({
+        discussionId: discussion.id,
+        projectPath: directory,
+        ownerId: 'owner-b',
+      })).toThrow('already being operated on');
+      expect(second.renewDiscussionLease(discussion.id, 'owner-a', 5_000)).toBe(true);
+      second.releaseDiscussionLease(discussion.id, 'owner-a');
+      expect(first.hasDiscussionLease(discussion.id)).toBe(false);
+    } finally {
+      first.close();
+      second.close();
+      rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+    }
+  });
+
+  it('serializes competing discussion lease acquisitions across connections', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'agentbridge-discussion-lease-'));
+    const dbPath = join(directory, 'shared.sqlite');
+    const first = new Storage(dbPath);
+    const second = new Storage(dbPath);
+    try {
+      const discussion = first.createDiscussion({
+        topic: 'concurrent lease',
+        driver: 'claude',
+        peer: 'codex',
+        projectPath: directory,
+        traceId: 'tr_concurrent_lease',
+      });
+
+      const results = await Promise.allSettled([
+        Promise.resolve().then(() => first.acquireDiscussionLease({
+          discussionId: discussion.id,
+          projectPath: directory,
+          ownerId: 'owner-a',
+        })),
+        Promise.resolve().then(() => second.acquireDiscussionLease({
+          discussionId: discussion.id,
+          projectPath: directory,
+          ownerId: 'owner-b',
+        })),
+      ]);
+
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
     } finally {
       first.close();
       second.close();

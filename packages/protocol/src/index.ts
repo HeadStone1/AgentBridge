@@ -15,6 +15,7 @@ export function resolveProjectPath(
 export type AgentType = 'claude' | 'codex';
 export type SessionStatus = 'IDLE' | 'BUSY' | 'BRIDGE_OWNED' | 'UNKNOWN';
 export type PeerAvailability = 'INTERACTIVE' | 'BACKGROUND' | 'UNAVAILABLE';
+export type DispatchState = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED';
 export type DiscussionStatus =
   | 'CREATED'
   | 'DISCUSSING'
@@ -64,6 +65,10 @@ export interface Discussion {
   conclusion: string | null;
   projectPath: string;
   traceId: string;
+  /** Persisted provider-dispatch lifecycle, independent from discussion status. */
+  dispatchState: DispatchState | null;
+  /** Agent expected to receive or act on the current dispatch, when applicable. */
+  waitingFor: AgentType | null;
 }
 
 export interface AgentSession {
@@ -109,6 +114,7 @@ export interface AskPeerOutput {
   peer: AgentType;
   messageId: string;
   status: DiscussionStatus;
+  dispatchState?: DispatchState;
   peerResponse?: Message;
 }
 
@@ -120,6 +126,7 @@ export interface ReplyPeerInput {
 export interface ReplyPeerOutput {
   messageId: string;
   status: DiscussionStatus;
+  dispatchState?: DispatchState;
   peerResponse?: Message;
 }
 
@@ -141,6 +148,7 @@ export interface CloseDiscussionInput {
 export interface CloseDiscussionOutput {
   discussionId: string;
   status: DiscussionStatus;
+  dispatchState?: DispatchState;
   decisionId?: string;
   waitingFor?: AgentType[];
   peerAccepted?: boolean;
@@ -156,6 +164,7 @@ export interface RetryDiscussionOutput {
   discussionId: string;
   status: 'DISCUSSING';
   retryCount: number;
+  dispatchState?: DispatchState;
   peerResponse?: Message;
 }
 

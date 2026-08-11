@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { StoragePort } from '@agentbridge/storage';
 import { AuditService } from '@agentbridge/audit';
 import type { AgentConnector, ProviderSessionKind } from '@agentbridge/connectors';
@@ -46,8 +47,10 @@ export class CollaborationService {
   private readonly maxTotalMessageChars: number;
   private readonly asyncDispatch: boolean;
   private readonly connectors: ConnectorRegistry;
+  private readonly ownerId = `collaboration:${process.pid}:${randomUUID()}`;
   private readonly inFlight = new Map<string, InFlightOperation>();
   private readonly cancellationRequests = new Set<string>();
+  private shuttingDown = false;
 
   constructor(
     storage: StoragePort,
@@ -126,6 +129,7 @@ export class CollaborationService {
     });
 
     this.storage.updateDiscussionStatus(discussion.id, 'DISCUSSING');
+    this.queueDispatch(discussion.id, params.peer);
 
     if (this.asyncDispatch) {
       this.startBackgroundDispatch(discussion.id, params.peer, params.initialMessage, []);
@@ -134,6 +138,7 @@ export class CollaborationService {
         peer: params.peer,
         messageId: message.id,
         status: 'DISCUSSING',
+        dispatchState: 'QUEUED',
       };
     }
     const peerResponse = await this.dispatchToAgent(discussion.id, params.peer, params.initialMessage, []);
@@ -142,6 +147,7 @@ export class CollaborationService {
       peer: params.peer,
       messageId: message.id,
       status: 'DISCUSSING',
+      dispatchState: peerResponse ? 'COMPLETED' : 'FAILED',
       ...(peerResponse ? { peerResponse } : {}),
     };
   }
@@ -166,47 +172,73 @@ export class CollaborationService {
 
     const receiver = params.sender === discussion.driver ? discussion.peer : discussion.driver;
     this.ensureProviderNotLeased(receiver, discussion.projectPath);
-    const message = this.storage.createMessage({
+    this.storage.acquireDiscussionLease({
       discussionId: params.discussionId,
-      sender: params.sender,
-      receiver,
-      role: 'response',
-      content: params.reply,
       projectPath: discussion.projectPath,
+      ownerId: this.ownerId,
+      ttlMs: this.timeoutMs,
     });
+    let discussionLeaseOwned = true;
+    try {
+      const message = this.storage.createMessage({
+        discussionId: params.discussionId,
+        sender: params.sender,
+        receiver,
+        role: 'response',
+        content: params.reply,
+        projectPath: discussion.projectPath,
+      });
 
-    this.audit.log({
-      traceId: discussion.traceId,
-      discussionId: params.discussionId,
-      action: 'message.sent',
-      agent: params.sender,
-      metadata: { messageId: message.id, role: 'response' },
-    });
-
-    if (overRoundBudget) {
-      this.storage.updateDiscussionStatus(params.discussionId, 'TIMEOUT');
       this.audit.log({
         traceId: discussion.traceId,
         discussionId: params.discussionId,
-        action: 'discussion.timeout',
+        action: 'message.sent',
         agent: params.sender,
-        metadata: { roundCount: discussion.roundCount, maxTurns: discussion.maxTurns, messageId: message.id },
+        metadata: { messageId: message.id, role: 'response' },
       });
-      return { messageId: message.id, status: 'TIMEOUT' };
-    }
 
-    this.storage.updateDiscussionStatus(params.discussionId, 'DISCUSSING');
-    const previousMessages = this.storage.getMessages(params.discussionId).slice(0, -1);
-    if (this.asyncDispatch) {
-      this.startBackgroundDispatch(params.discussionId, receiver, params.reply, previousMessages);
-      return { messageId: message.id, status: 'DISCUSSING' };
+      if (overRoundBudget) {
+        this.storage.updateDiscussionStatus(params.discussionId, 'TIMEOUT');
+        this.audit.log({
+          traceId: discussion.traceId,
+          discussionId: params.discussionId,
+          action: 'discussion.timeout',
+          agent: params.sender,
+          metadata: { roundCount: discussion.roundCount, maxTurns: discussion.maxTurns, messageId: message.id },
+        });
+        return { messageId: message.id, status: 'TIMEOUT' };
+      }
+
+      this.storage.updateDiscussionStatus(params.discussionId, 'DISCUSSING');
+      this.queueDispatch(params.discussionId, receiver);
+      const previousMessages = this.storage.getMessages(params.discussionId).slice(0, -1);
+      if (this.asyncDispatch) {
+        this.startBackgroundDispatch(
+          params.discussionId,
+          receiver,
+          params.reply,
+          previousMessages,
+          { discussionLeaseOwned: true },
+        );
+        discussionLeaseOwned = false;
+        return { messageId: message.id, status: 'DISCUSSING', dispatchState: 'QUEUED' };
+      }
+      const peerResponse = await this.dispatchToAgent(
+        params.discussionId,
+        receiver,
+        params.reply,
+        previousMessages,
+        { discussionLeaseOwned: true },
+      );
+      return {
+        messageId: message.id,
+        status: 'DISCUSSING',
+        dispatchState: peerResponse ? 'COMPLETED' : 'FAILED',
+        ...(peerResponse ? { peerResponse } : {}),
+      };
+    } finally {
+      if (discussionLeaseOwned) this.storage.releaseDiscussionLease(params.discussionId, this.ownerId);
     }
-    const peerResponse = await this.dispatchToAgent(params.discussionId, receiver, params.reply, previousMessages);
-    return {
-      messageId: message.id,
-      status: 'DISCUSSING',
-      ...(peerResponse ? { peerResponse } : {}),
-    };
   }
 
   async getDiscussion(discussionId: string): Promise<GetDiscussionOutput> {
@@ -246,6 +278,14 @@ export class CollaborationService {
     ));
     this.ensureWithinBudget(discussion, existingConclusion ? '' : params.conclusion);
 
+    this.storage.acquireDiscussionLease({
+      discussionId: params.discussionId,
+      projectPath: discussion.projectPath,
+      ownerId: this.ownerId,
+      ttlMs: this.timeoutMs,
+    });
+    let discussionLeaseOwned = true;
+    try {
     const agreement = this.storage.recordAgreement({
       discussionId: params.discussionId,
       agent: params.agent,
@@ -276,6 +316,25 @@ export class CollaborationService {
 
     const messages = this.storage.getMessages(params.discussionId);
     const agreementPrompt = buildAgreementPrompt(params.conclusion, agreement.decisionHash);
+    this.queueDispatch(params.discussionId, otherAgent);
+    if (this.asyncDispatch) {
+      this.startBackgroundAgreementConfirmation(
+        discussion.id,
+        params.agent,
+        otherAgent,
+        params.conclusion,
+        agreement.decisionHash,
+        agreementPrompt,
+        messages,
+      );
+      discussionLeaseOwned = false;
+      return {
+        discussionId: params.discussionId,
+        status: 'DISCUSSING',
+        waitingFor: [otherAgent],
+        dispatchState: 'QUEUED',
+      };
+    }
     let peerResponse: Message | undefined;
     try {
       peerResponse = await this.dispatchToAgent(
@@ -283,7 +342,7 @@ export class CollaborationService {
         otherAgent,
         agreementPrompt,
         messages,
-        { updateFailureStatus: false, countRound: false },
+        { updateFailureStatus: false, countRound: false, discussionLeaseOwned: true },
       );
     } catch (cause) {
       this.audit.log({
@@ -300,11 +359,13 @@ export class CollaborationService {
         discussionId: params.discussionId,
         status: 'DISCUSSING',
         waitingFor: [otherAgent],
+        dispatchState: 'FAILED',
       };
     }
 
     const peerDecision = parseAgreementResponse(peerResponse.content, agreement.decisionHash);
     if (!peerDecision.accepted) {
+      this.storage.updateDiscussionDispatch(params.discussionId, 'COMPLETED', params.agent);
       this.audit.log({
         traceId: discussion.traceId,
         discussionId: params.discussionId,
@@ -317,6 +378,7 @@ export class CollaborationService {
         status: 'DISCUSSING',
         waitingFor: [params.agent],
         peerAccepted: false,
+        dispatchState: 'COMPLETED',
         peerResponse,
       };
     }
@@ -335,6 +397,9 @@ export class CollaborationService {
     });
     const completed = this.completeDiscussion(discussion, params.conclusion, peerAgreement.agreedBy);
     return { ...completed, peerAccepted: true, peerResponse };
+    } finally {
+      if (discussionLeaseOwned) this.storage.releaseDiscussionLease(params.discussionId, this.ownerId);
+    }
   }
 
   async cancelDiscussion(params: {
@@ -374,6 +439,7 @@ export class CollaborationService {
         if (current && !isTerminal(current.status) && current.status !== 'NEEDS_USER_DECISION') {
           this.storage.updateDiscussionStatus(params.discussionId, 'NEEDS_USER_DECISION');
         }
+        this.storage.updateDiscussionDispatch(params.discussionId, 'FAILED', null);
         this.audit.log({
           traceId: discussion.traceId,
           discussionId: discussion.id,
@@ -387,8 +453,10 @@ export class CollaborationService {
       this.storage.updateDiscussionStatus(params.discussionId, 'CANCELLED', {
         endedAt: new Date().toISOString(),
       });
+      this.storage.updateDiscussionDispatch(params.discussionId, null, null);
       this.storage.releaseSessionLease(discussion.driver, discussion.projectPath, discussion.id);
       this.storage.releaseSessionLease(discussion.peer, discussion.projectPath, discussion.id);
+      this.storage.releaseDiscussionLease(discussion.id, this.ownerId);
       this.audit.log({
         traceId: discussion.traceId,
         discussionId: discussion.id,
@@ -409,6 +477,40 @@ export class CollaborationService {
     }
   }
 
+  async shutdown(graceMs = 5_000): Promise<void> {
+    if (this.shuttingDown) return;
+    if (!Number.isInteger(graceMs) || graceMs < 0 || graceMs > 60_000) {
+      throw new Error('graceMs must be an integer between 0 and 60000');
+    }
+    this.shuttingDown = true;
+    const active = [...this.inFlight.entries()];
+    for (const [discussionId, operation] of active) {
+      this.cancellationRequests.add(discussionId);
+      operation.controller.abort();
+    }
+    await Promise.allSettled(
+      active.map(([discussionId]) => {
+        const discussion = this.storage.getDiscussion(discussionId);
+        if (!discussion) return Promise.resolve();
+        const connectors = [this.connectors[discussion.driver], this.connectors[discussion.peer]];
+        return Promise.allSettled(connectors.map((connector) => connector?.cancel?.(discussionId)));
+      }),
+    );
+    const settled = await Promise.all(active.map(async ([discussionId, operation]) => ({
+      discussionId,
+      done: await waitForCompletion(operation.done, graceMs),
+    })));
+    for (const item of settled) {
+      if (!item.done) continue;
+      const discussion = this.storage.getDiscussion(item.discussionId);
+      if (!discussion) continue;
+      this.storage.releaseSessionLease(discussion.driver, discussion.projectPath, item.discussionId);
+      this.storage.releaseSessionLease(discussion.peer, discussion.projectPath, item.discussionId);
+      this.storage.releaseDiscussionLease(item.discussionId, this.ownerId);
+    }
+    for (const [discussionId] of active) this.cancellationRequests.delete(discussionId);
+  }
+
   async retryDiscussion(params: {
     discussionId: string;
     agent: AgentType;
@@ -422,6 +524,9 @@ export class CollaborationService {
       throw new Error(`Discussion ${params.discussionId} cannot be retried from ${discussion.status}`);
     }
     this.ensureNoDispatchInFlight(params.discussionId);
+    if (discussion.retryCount >= discussion.maxRetries) {
+      throw new Error(`Discussion ${params.discussionId} exhausted its maxRetries budget`);
+    }
     if (discussion.roundCount >= discussion.maxTurns) {
       throw new Error(`Discussion ${params.discussionId} exhausted its maxTurns budget`);
     }
@@ -432,11 +537,20 @@ export class CollaborationService {
       throw new Error(`Discussion ${params.discussionId} has no message to retry`);
     }
     this.ensureProviderNotLeased(lastMessage.receiver, discussion.projectPath);
+    this.storage.acquireDiscussionLease({
+      discussionId: params.discussionId,
+      projectPath: discussion.projectPath,
+      ownerId: this.ownerId,
+      ttlMs: this.timeoutMs,
+    });
+    let discussionLeaseOwned = true;
+    try {
 
     if (discussion.status === 'FAILED') {
       this.storage.updateDiscussionStatus(params.discussionId, 'CREATED');
     }
     this.storage.updateDiscussionStatus(params.discussionId, 'DISCUSSING');
+    this.queueDispatch(params.discussionId, lastMessage.receiver);
     this.audit.log({
       traceId: discussion.traceId,
       discussionId: discussion.id,
@@ -446,11 +560,19 @@ export class CollaborationService {
     });
     const previousMessages = messages.slice(0, -1);
     if (this.asyncDispatch) {
-      this.startBackgroundDispatch(params.discussionId, lastMessage.receiver, lastMessage.content, previousMessages);
+      this.startBackgroundDispatch(
+        params.discussionId,
+        lastMessage.receiver,
+        lastMessage.content,
+        previousMessages,
+        { discussionLeaseOwned: true },
+      );
+      discussionLeaseOwned = false;
       return {
         discussionId: params.discussionId,
         status: 'DISCUSSING',
         retryCount: discussion.retryCount,
+        dispatchState: 'QUEUED',
       };
     }
     const peerResponse = await this.dispatchToAgent(
@@ -458,13 +580,18 @@ export class CollaborationService {
       lastMessage.receiver,
       lastMessage.content,
       previousMessages,
+      { discussionLeaseOwned: true },
     );
     return {
       discussionId: discussion.id,
       status: 'DISCUSSING',
       retryCount: discussion.retryCount,
+      dispatchState: peerResponse ? 'COMPLETED' : 'FAILED',
       ...(peerResponse ? { peerResponse } : {}),
     };
+    } finally {
+      if (discussionLeaseOwned) this.storage.releaseDiscussionLease(params.discussionId, this.ownerId);
+    }
   }
 
   private async dispatchToAgent(
@@ -472,12 +599,16 @@ export class CollaborationService {
     receiver: AgentType,
     prompt: string,
     previousMessages: Message[],
-    options: { updateFailureStatus?: boolean; countRound?: boolean } = {},
+    options: { updateFailureStatus?: boolean; countRound?: boolean; discussionLeaseOwned?: boolean } = {},
   ): Promise<Message | undefined> {
     const connector = this.connectors[receiver];
-    if (!connector) return undefined;
     const discussion = this.storage.getDiscussion(discussionId);
     if (!discussion) throw new Error(`Discussion ${discussionId} not found`);
+    if (this.shuttingDown) {
+      this.storage.updateDiscussionDispatch(discussionId, 'FAILED', null);
+      if (options.discussionLeaseOwned) this.storage.releaseDiscussionLease(discussionId, this.ownerId);
+      throw new ProviderError('CANCELLED', 'Collaboration service is shutting down');
+    }
     if (this.inFlight.has(discussionId)) {
       throw new ProviderError('BUSY', `Discussion ${discussionId} already has a provider request in flight`);
     }
@@ -489,9 +620,31 @@ export class CollaborationService {
       resolveDone: () => resolveDone(),
     };
     let leaseAcquired = false;
+    let discussionLeaseAcquired = options.discussionLeaseOwned === true;
+    let leaseHeartbeat: ReturnType<typeof setInterval> | undefined;
     let trackedSession: { sessionId: string; metadata: Record<string, unknown> } | undefined;
     this.inFlight.set(discussionId, operation);
     try {
+      if (!discussionLeaseAcquired) {
+        this.storage.acquireDiscussionLease({
+          discussionId,
+          projectPath: discussion.projectPath,
+          ownerId: this.ownerId,
+          ttlMs: this.timeoutMs,
+        });
+        discussionLeaseAcquired = true;
+      }
+      this.storage.updateDiscussionDispatch(discussionId, 'RUNNING', receiver);
+      if (!connector) {
+        this.storage.updateDiscussionDispatch(discussionId, 'FAILED', null);
+        return undefined;
+      }
+      if (!(await connector.isAvailable())) {
+        throw new ProviderError('UNAVAILABLE', `${receiver} connector is not available`);
+      }
+      if (await connector.isBusy()) {
+        throw new ProviderError('BUSY', `${receiver} session is busy`);
+      }
       this.storage.acquireSessionLease({
         provider: receiver,
         projectPath: discussion.projectPath,
@@ -499,12 +652,19 @@ export class CollaborationService {
         ttlMs: this.timeoutMs,
       });
       leaseAcquired = true;
-      if (!(await connector.isAvailable())) {
-        throw new ProviderError('UNAVAILABLE', `${receiver} connector is not available`);
-      }
-      if (await connector.isBusy()) {
-        throw new ProviderError('BUSY', `${receiver} session is busy`);
-      }
+      leaseHeartbeat = setInterval(() => {
+        try {
+          if (!this.storage.renewSessionLease(receiver, discussion.projectPath, discussionId, this.timeoutMs)) {
+            controller.abort();
+          }
+          if (!this.storage.renewDiscussionLease(discussionId, this.ownerId, this.timeoutMs)) {
+            controller.abort();
+          }
+        } catch {
+          controller.abort();
+        }
+      }, Math.max(1_000, Math.floor(this.timeoutMs / 3)));
+      leaseHeartbeat.unref?.();
 
       const persistedSession = this.storage.getSessionForDiscussion(
         receiver,
@@ -515,6 +675,7 @@ export class CollaborationService {
         trackedSession = { sessionId: persistedSession.sessionId, metadata: persistedSession.metadata };
         this.storage.updateSessionStatus(receiver, persistedSession.sessionId, 'BRIDGE_OWNED', {
           ...persistedSession.metadata,
+          bridgeOwned: true,
           discussionId,
         });
       }
@@ -558,6 +719,7 @@ export class CollaborationService {
           status: 'IDLE',
           metadata: {
             discussionId,
+            bridgeOwned: true,
             availability: response.availability ?? 'BACKGROUND',
             sessionKind: response.providerSessionKind,
           },
@@ -599,6 +761,7 @@ export class CollaborationService {
       if (currentAfterResponse?.status === 'PEER_BUSY') {
         this.storage.updateDiscussionStatus(discussionId, 'DISCUSSING');
       }
+      this.storage.updateDiscussionDispatch(discussionId, 'COMPLETED', null);
       this.audit.log({
         traceId: discussion.traceId,
         discussionId,
@@ -608,6 +771,11 @@ export class CollaborationService {
       });
       return message;
     } catch (cause) {
+      try {
+        this.storage.updateDiscussionDispatch(discussionId, 'FAILED', null);
+      } catch {
+        // Preserve the provider error if persistence is unavailable during failure handling.
+      }
       this.audit.log({
         traceId: discussion.traceId,
         discussionId,
@@ -649,7 +817,9 @@ export class CollaborationService {
       }
       throw cause;
     } finally {
+      if (leaseHeartbeat) clearInterval(leaseHeartbeat);
       if (leaseAcquired) this.storage.releaseSessionLease(receiver, discussion.projectPath, discussionId);
+      if (discussionLeaseAcquired) this.storage.releaseDiscussionLease(discussionId, this.ownerId);
       operation.resolveDone();
       if (this.inFlight.get(discussionId) === operation) this.inFlight.delete(discussionId);
     }
@@ -672,11 +842,71 @@ export class CollaborationService {
     receiver: AgentType,
     prompt: string,
     previousMessages: Message[],
-    options: { updateFailureStatus?: boolean; countRound?: boolean } = {},
+    options: { updateFailureStatus?: boolean; countRound?: boolean; discussionLeaseOwned?: boolean } = {},
   ): void {
     void this.dispatchToAgent(discussionId, receiver, prompt, previousMessages, options).catch(() => {
       // dispatchToAgent persists and audits the failure; the caller already
       // received an accepted asynchronous request.
+    });
+  }
+
+  private queueDispatch(discussionId: string, receiver: AgentType): void {
+    this.storage.updateDiscussionDispatch(discussionId, 'QUEUED', receiver);
+  }
+
+  private startBackgroundAgreementConfirmation(
+    discussionId: string,
+    agent: AgentType,
+    otherAgent: AgentType,
+    conclusion: string,
+    decisionHash: string,
+    prompt: string,
+    previousMessages: Message[],
+  ): void {
+    void this.dispatchToAgent(
+      discussionId,
+      otherAgent,
+      prompt,
+      previousMessages,
+      { updateFailureStatus: false, countRound: false, discussionLeaseOwned: true },
+    ).then((peerResponse) => {
+      if (!peerResponse) return;
+      const decision = parseAgreementResponse(peerResponse.content, decisionHash);
+      const discussion = this.storage.getDiscussion(discussionId);
+      if (!discussion || isTerminal(discussion.status) || isPaused(discussion.status)) return;
+      if (!decision.accepted) {
+        this.storage.updateDiscussionDispatch(discussionId, 'COMPLETED', agent);
+        this.audit.log({
+          traceId: discussion.traceId,
+          discussionId,
+          action: 'agreement.rejected',
+          agent: otherAgent,
+          metadata: { reason: decision.reason ?? 'invalid_or_rejected_response' },
+        });
+        return;
+      }
+      const peerAgreement = this.storage.recordAgreement({
+        discussionId,
+        agent: otherAgent,
+        summary: conclusion,
+      });
+      this.audit.log({
+        traceId: discussion.traceId,
+        discussionId,
+        action: `agreement.${otherAgent}`,
+        agent: otherAgent,
+        metadata: { decisionHash: peerAgreement.decisionHash, source: 'connector_confirmation' },
+      });
+      this.completeDiscussion(discussion, conclusion, peerAgreement.agreedBy);
+    }).catch((cause) => {
+      const discussion = this.storage.getDiscussion(discussionId);
+      this.audit.log({
+        traceId: discussion?.traceId ?? `tr_${discussionId}`,
+        discussionId,
+        action: 'agreement.notification_failed',
+        agent: agent === otherAgent ? discussion?.driver ?? otherAgent : otherAgent,
+        metadata: { error: cause instanceof Error ? cause.message : String(cause) },
+      });
     });
   }
 
@@ -737,6 +967,7 @@ export class CollaborationService {
       conclusion,
       endedAt: new Date().toISOString(),
     });
+    this.storage.updateDiscussionDispatch(discussion.id, null, null);
     this.storage.releaseSessionLease('claude', this.storage.getDiscussion(discussion.id)!.projectPath, discussion.id);
     this.storage.releaseSessionLease('codex', this.storage.getDiscussion(discussion.id)!.projectPath, discussion.id);
     this.audit.log({

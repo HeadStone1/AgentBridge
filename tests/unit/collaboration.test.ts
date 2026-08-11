@@ -320,6 +320,7 @@ describe('CollaborationService', () => {
       traceId: 'tr_single_flight',
     });
 
+    expect(['QUEUED', 'RUNNING']).toContain(asyncStorage.getDiscussion(started.discussionId)?.dispatchState);
     await expect(asyncCollaboration.replyToDiscussion({
       discussionId: started.discussionId,
       sender: 'claude',
@@ -329,6 +330,7 @@ describe('CollaborationService', () => {
     release();
     await new Promise((resolve) => setTimeout(resolve, 25));
     expect(asyncStorage.getMessages(started.discussionId).at(-1)?.content).toBe('async response');
+    expect(asyncStorage.getDiscussion(started.discussionId)?.dispatchState).toBe('COMPLETED');
     asyncStorage.close();
   });
 
@@ -466,6 +468,7 @@ describe('CollaborationService', () => {
     })).rejects.toThrow('simulated connector failure');
     discussionId = retryStorage.listDiscussions()[0].id;
     expect(retryStorage.getDiscussion(discussionId)?.status).toBe('FAILED');
+    expect(retryStorage.getDiscussion(discussionId)?.dispatchState).toBe('FAILED');
     expect(retryStorage.getDiscussion(discussionId)?.retryCount).toBe(1);
 
     const retried = await retryCollaboration.retryDiscussion({ discussionId, agent: 'claude' });
@@ -521,12 +524,23 @@ describe('CollaborationService', () => {
 
   it('marks a superseded provider session UNKNOWN after backend fallback', async () => {
     const fallbackStorage = new Storage(':memory:');
+    const discussion = fallbackStorage.createDiscussion({
+      topic: 'fallback status',
+      driver: 'claude',
+      peer: 'codex',
+      projectPath: process.cwd(),
+      traceId: 'tr_fallback_status',
+    });
     fallbackStorage.registerSession({
       provider: 'codex',
       sessionId: 'thread_old_app_server',
       projectPath: process.cwd(),
       status: 'IDLE',
-      metadata: { sessionKind: 'codex-app-server' },
+      metadata: {
+        sessionKind: 'codex-app-server',
+        bridgeOwned: true,
+        discussionId: discussion.id,
+      },
     });
     const fallbackCollaboration = new CollaborationService(
       fallbackStorage,
@@ -548,12 +562,10 @@ describe('CollaborationService', () => {
       },
     );
 
-    await fallbackCollaboration.initiateDiscussion({
-      driver: 'claude',
-      peer: 'codex',
-      topic: 'fallback status',
-      initialMessage: 'trigger fallback',
-      traceId: 'tr_fallback_status',
+    await fallbackCollaboration.replyToDiscussion({
+      discussionId: discussion.id,
+      sender: 'claude',
+      reply: 'trigger fallback',
     });
 
     expect(fallbackStorage.getSession('codex', 'thread_old_app_server')?.status).toBe('UNKNOWN');

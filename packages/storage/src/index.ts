@@ -8,6 +8,7 @@ import type {
   Decision,
   AuditEvent,
   DiscussionStatus,
+  DispatchState,
   AgentType,
   MessageRole,
   AgentSession,
@@ -55,6 +56,8 @@ CREATE TABLE IF NOT EXISTS discussions (
   id TEXT PRIMARY KEY,
   topic TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'CREATED',
+  dispatch_state TEXT,
+  waiting_for TEXT,
   driver TEXT NOT NULL,
   peer TEXT,
   current_turn INTEGER NOT NULL DEFAULT 0,
@@ -115,6 +118,15 @@ CREATE TABLE IF NOT EXISTS session_leases (
   acquired_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
   PRIMARY KEY (provider, project_path)
+);
+
+CREATE TABLE IF NOT EXISTS discussion_leases (
+  discussion_id TEXT PRIMARY KEY,
+  project_path TEXT NOT NULL,
+  owner_id TEXT NOT NULL,
+  acquired_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  FOREIGN KEY (discussion_id) REFERENCES discussions(id)
 );
 
 CREATE TABLE IF NOT EXISTS agent_sessions (
@@ -179,6 +191,8 @@ export class Storage {
 
   private ensureSchemaCompatibility(): void {
     this.ensureColumn('discussions', 'peer', 'ALTER TABLE discussions ADD COLUMN peer TEXT');
+    this.ensureColumn('discussions', 'dispatch_state', 'ALTER TABLE discussions ADD COLUMN dispatch_state TEXT');
+    this.ensureColumn('discussions', 'waiting_for', 'ALTER TABLE discussions ADD COLUMN waiting_for TEXT');
     this.ensureColumn('discussions', 'retry_count', 'ALTER TABLE discussions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('discussions', 'max_retries', 'ALTER TABLE discussions ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 2');
     this.ensureColumn('discussions', 'round_count', 'ALTER TABLE discussions ADD COLUMN round_count INTEGER NOT NULL DEFAULT 0');
@@ -271,6 +285,13 @@ export class Storage {
     this.db.prepare(`UPDATE discussions SET ${setClauses} WHERE id = ?`).run(...values);
   }
 
+  updateDiscussionDispatch(id: string, state: DispatchState | null, waitingFor: AgentType | null = null): void {
+    if (!this.getDiscussion(id)) throw new Error(`Discussion ${id} not found`);
+    this.db
+      .prepare('UPDATE discussions SET dispatch_state = ?, waiting_for = ?, updated_at = ? WHERE id = ?')
+      .run(state, waitingFor, new Date().toISOString(), id);
+  }
+
   incrementDiscussionRound(id: string): Discussion {
     const current = this.getDiscussion(id);
     if (!current) throw new Error(`Discussion ${id} not found`);
@@ -322,7 +343,8 @@ export class Storage {
         this.db
           .prepare(
             `UPDATE discussions
-             SET status = 'NEEDS_USER_DECISION', ended_at = ?, updated_at = ?
+             SET status = 'NEEDS_USER_DECISION', dispatch_state = 'FAILED', waiting_for = NULL,
+                 ended_at = ?, updated_at = ?
              WHERE id = ? AND status IN ('CREATED', 'DISCUSSING', 'PEER_BUSY')`,
           )
           .run(now, now, row.id);
@@ -480,9 +502,6 @@ export class Storage {
     const existing = this.db
       .prepare('SELECT decision_hash FROM agreements WHERE discussion_id = ? AND agent = ?')
       .get(data.discussionId, data.agent) as { decision_hash: string } | undefined;
-    if (existing && existing.decision_hash !== hash) {
-      throw new Error('Agreement changed; both agents must accept the same decision hash');
-    }
     const otherAgreement = this.db
       .prepare('SELECT decision_hash FROM agreements WHERE discussion_id = ? AND agent <> ? LIMIT 1')
       .get(data.discussionId, data.agent) as { decision_hash: string } | undefined;
@@ -540,6 +559,85 @@ export class Storage {
     this.db
       .prepare('DELETE FROM session_leases WHERE provider = ? AND project_path = ? AND owner_id = ?')
       .run(provider, projectPath, ownerId);
+  }
+
+  renewSessionLease(provider: AgentType, projectPath: string, ownerId: string, ttlMs = 120_000): boolean {
+    if (!Number.isInteger(ttlMs) || ttlMs < 1_000 || ttlMs > 600_000) {
+      throw new Error('Session lease ttlMs must be between 1000 and 600000');
+    }
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + ttlMs);
+    const result = this.db
+      .prepare(
+        `UPDATE session_leases
+         SET expires_at = ?
+         WHERE provider = ? AND project_path = ? AND owner_id = ? AND expires_at > ?`,
+      )
+      .run(expiresAt.toISOString(), provider, projectPath, ownerId, now.toISOString());
+    return result.changes === 1;
+  }
+
+  acquireDiscussionLease(data: {
+    discussionId: string;
+    projectPath: string;
+    ownerId: string;
+    ttlMs?: number;
+  }): void {
+    if (!data.discussionId || !data.projectPath || !data.ownerId) {
+      throw new Error('Discussion lease requires discussionId, projectPath, and ownerId');
+    }
+    const ttlMs = data.ttlMs ?? 120_000;
+    if (!Number.isInteger(ttlMs) || ttlMs < 1_000 || ttlMs > 600_000) {
+      throw new Error('Discussion lease ttlMs must be between 1000 and 600000');
+    }
+    const acquiredAt = new Date();
+    const expiresAt = new Date(acquiredAt.getTime() + ttlMs);
+    try {
+      this.transaction(() => {
+        this.db.prepare('DELETE FROM discussion_leases WHERE expires_at <= ?').run(acquiredAt.toISOString());
+        this.db.prepare(
+          `INSERT INTO discussion_leases (discussion_id, project_path, owner_id, acquired_at, expires_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        ).run(data.discussionId, data.projectPath, data.ownerId, acquiredAt.toISOString(), expiresAt.toISOString());
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
+        throw new SessionBusyError(`Discussion ${data.discussionId} is already being operated on`);
+      }
+      throw error;
+    }
+  }
+
+  releaseDiscussionLease(discussionId: string, ownerId: string): void {
+    this.db.prepare('DELETE FROM discussion_leases WHERE discussion_id = ? AND owner_id = ?').run(discussionId, ownerId);
+  }
+
+  renewDiscussionLease(discussionId: string, ownerId: string, ttlMs = 120_000): boolean {
+    if (!Number.isInteger(ttlMs) || ttlMs < 1_000 || ttlMs > 600_000) {
+      throw new Error('Discussion lease ttlMs must be between 1000 and 600000');
+    }
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + ttlMs);
+    const result = this.db.prepare(
+      `UPDATE discussion_leases
+       SET expires_at = ?
+       WHERE discussion_id = ? AND owner_id = ? AND expires_at > ?`,
+    ).run(expiresAt.toISOString(), discussionId, ownerId, now.toISOString());
+    return result.changes === 1;
+  }
+
+  hasDiscussionLease(discussionId: string, ownerId?: string): boolean {
+    const now = new Date().toISOString();
+    const row = ownerId
+      ? this.db.prepare(
+        `SELECT 1 FROM discussion_leases
+         WHERE discussion_id = ? AND owner_id = ? AND expires_at > ? LIMIT 1`,
+      ).get(discussionId, ownerId, now)
+      : this.db.prepare(
+        `SELECT 1 FROM discussion_leases
+         WHERE discussion_id = ? AND expires_at > ? LIMIT 1`,
+      ).get(discussionId, now);
+    return Boolean(row);
   }
 
   hasSessionLease(provider: AgentType, projectPath: string, ownerId?: string): boolean {
@@ -618,7 +716,10 @@ export class Storage {
          LIMIT 1`,
       )
       .get(discussionId, provider, projectPath) as Record<string, unknown> | undefined;
-    if (row) return rowToAgentSession(row);
+    if (row) {
+      const session = rowToAgentSession(row);
+      if (isReusableBridgeSession(session)) return session;
+    }
 
     // Compatibility fallback for sessions registered by hooks or older
     // versions before provider_session_id was attached to messages.
@@ -631,9 +732,9 @@ export class Storage {
       .all(provider, projectPath) as Record<string, unknown>[];
     for (const legacyRow of legacyRows) {
       const session = rowToAgentSession(legacyRow);
-      if (session.metadata.discussionId === discussionId) return session;
+      if (session.metadata.discussionId === discussionId && isReusableBridgeSession(session)) return session;
     }
-    return legacyRows.length > 0 ? rowToAgentSession(legacyRows[0]) : null;
+    return null;
   }
 
   pruneSessions(maxAgeMs = 30 * 24 * 60 * 60 * 1_000): number {
@@ -725,6 +826,8 @@ function rowToDiscussion(row: Record<string, unknown>): Discussion {
     conclusion: (row.conclusion as string | null) ?? null,
     projectPath: (row.project_path as string | undefined) ?? resolveProjectPath(),
     traceId: row.trace_id as string,
+    dispatchState: (row.dispatch_state as DispatchState | null) ?? null,
+    waitingFor: (row.waiting_for as AgentType | null) ?? null,
   };
 }
 
@@ -768,6 +871,12 @@ function rowToAgentSession(row: Record<string, unknown>): AgentSession {
     createdAt: row.created_at as string,
     lastSeenAt: row.last_seen_at as string,
   };
+}
+
+function isReusableBridgeSession(session: AgentSession): boolean {
+  return (session.status === 'IDLE' || session.status === 'BRIDGE_OWNED')
+    && session.metadata.bridgeOwned === true
+    && typeof session.metadata.supersededBy !== 'string';
 }
 
 function rowToAuditEvent(row: Record<string, unknown>): AuditEvent {

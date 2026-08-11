@@ -137,10 +137,10 @@ export function configureCodexToml(path: string, server: McpServerCommand): Conf
   const existing = existsSync(path) ? readFileSync(path, 'utf8') : '';
   const section = [
     '[mcp_servers.agentbridge]',
-    `command = '${tomlString(server.command)}'`,
-    `args = [${(server.args ?? []).map((arg) => `'${tomlString(arg)}'`).join(', ')}]`,
-    ...(server.cwd ? [`cwd = '${tomlString(server.cwd)}'`] : []),
-    ...Object.entries(server.env ?? {}).map(([key, value]) => `env.${key} = '${tomlString(value)}'`),
+    `command = "${tomlString(server.command)}"`,
+    `args = [${(server.args ?? []).map((arg) => `"${tomlString(arg)}"`).join(', ')}]`,
+    ...(server.cwd ? [`cwd = "${tomlString(server.cwd)}"`] : []),
+    ...Object.entries(server.env ?? {}).map(([key, value]) => `env.${key} = "${tomlString(value)}"`),
     '',
   ].join('\n');
   const next = upsertTomlSection(existing, 'mcp_servers.agentbridge', section);
@@ -213,7 +213,12 @@ function writeTextAtomic(path: string, value: string): void {
 }
 
 function tomlString(value: string): string {
-  return value.replace(/'/g, "''");
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .replace(/\t/g, '\\t');
 }
 
 export function claudeProjectKey(projectPath: string): string {

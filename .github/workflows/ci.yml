@@ -2,7 +2,7 @@ name: Continuous Integration
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'agent/**', 'fix/**']
   pull_request:
 
 permissions:
@@ -17,10 +17,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '22.13.0'
           cache: npm
+      - run: npm run check:utf8
+      - run: git diff --check HEAD^ HEAD
       - run: npm ci
       - run: npm run typecheck
       - run: npm test

@@ -22,6 +22,7 @@ import { defaultCodexConfig, defaultGlobalCodexConfig, resolveMcpEntry } from '.
 import { runDoctor } from './diagnostics.js';
 import {
   cleanupEmptyRegistryRoot,
+  assertUpdateSupported,
   detectInstallation,
   readProjectRegistry,
   registerProject,
@@ -208,6 +209,7 @@ async function update(options: Options): Promise<unknown> {
   }
   const { release, info } = await checkForUpdate({ channel });
   if (options.install !== true || !info.updateAvailable || !release) return info;
+  assertUpdateSupported(detectInstallation());
   return installUpdate(release, info);
 }
 

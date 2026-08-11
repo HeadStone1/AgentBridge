@@ -93,6 +93,7 @@ export class CodexAppServerConnector implements AgentConnector {
       await this.ensureServer();
       const started = Date.now();
       this.inFlight = true;
+      let turnStarted = false;
       try {
         const canResume = Boolean(context.providerSessionId)
           && (!context.providerSessionKind || context.providerSessionKind === 'codex-app-server');
@@ -122,6 +123,7 @@ export class CodexAppServerConnector implements AgentConnector {
             }],
             ...(this.model ? { model: this.model } : {}),
           }, this.startupTimeoutMs);
+          turnStarted = true;
           const turnId = readString(turnResponse.turnId) ?? readNestedString(turnResponse, ['turn', 'id']);
           if (!turnId) throw new ProviderError('PROTOCOL', 'Codex App Server did not return a turn id');
           this.activeTurns.set(context.discussionId, { threadId, turnId });
@@ -140,7 +142,7 @@ export class CodexAppServerConnector implements AgentConnector {
         }
       } catch (error) {
         if (isProviderError(error) && error.code === 'CANCELLED') throw error;
-        const enriched = withStderr(error, this.stderrTail);
+        const enriched = withStderr(error, this.stderrTail, turnStarted);
         this.closeServer();
         throw enriched;
       } finally {
@@ -462,13 +464,18 @@ function redact(value: string): string {
     .trim();
 }
 
-function withStderr(error: unknown, stderrTail: string): Error {
+function withStderr(error: unknown, stderrTail: string, ambiguous = false): Error {
   const stderr = redact(stderrTail);
-  if (!stderr) return error instanceof Error ? error : new Error(String(error));
   const baseMessage = error instanceof Error ? error.message : String(error);
-  const message = `${baseMessage}; stderr: ${stderr}`;
+  if (!stderr && !ambiguous) return error instanceof Error ? error : new Error(baseMessage);
+  const message = stderr ? `${baseMessage}; stderr: ${stderr}` : baseMessage;
   if (isProviderError(error)) {
-    return new ProviderError(error.code, message, { retryable: error.retryable, cause: error });
+    return new ProviderError(error.code, message, {
+      retryable: error.retryable,
+      ambiguous: error.ambiguous || ambiguous,
+      cause: error,
+    });
   }
+  if (ambiguous) return new ProviderError('FAILED', message, { ambiguous: true, cause: error });
   return new Error(message, { cause: error });
 }

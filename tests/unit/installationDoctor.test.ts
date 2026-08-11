@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { detectInstallation, readProjectRegistry, registerProject, unregisterProject } from '../../packages/cli/src/installation.js';
+import { assertUpdateSupported, detectInstallation, readProjectRegistry, registerProject, unregisterProject } from '../../packages/cli/src/installation.js';
 
 const temporaryDirectories: string[] = [];
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -15,6 +15,12 @@ afterEach(() => {
 });
 
 describe('system installation and diagnostics', () => {
+  it('refuses release installation over npm or source-managed installs', () => {
+    expect(() => assertUpdateSupported({ mode: 'npm' } as any)).toThrow('managed by npm');
+    expect(() => assertUpdateSupported({ mode: 'source' } as any)).toThrow('source checkout');
+    expect(() => assertUpdateSupported({ mode: 'release' } as any)).not.toThrow();
+  });
+
   it('registers both MCP hosts globally without creating project state', () => {
     const root = temporaryDirectory();
     const claudeConfig = join(root, 'claude.json');
@@ -33,7 +39,7 @@ describe('system installation and diagnostics', () => {
     expect(claude.mcpServers.agentbridge.env.AGENTBRIDGE_AGENT).toBe('claude');
     expect(claude.mcpServers.agentbridge.env.AGENTBRIDGE_PROJECT_PATH).toBeUndefined();
     expect(claude.mcpServers.agentbridge.env.AGENTBRIDGE_DB_PATH).toBeUndefined();
-    expect(codex).toContain("env.AGENTBRIDGE_AGENT = 'codex'");
+    expect(codex).toContain('env.AGENTBRIDGE_AGENT = "codex"');
     expect(codex).not.toContain('AGENTBRIDGE_PROJECT_PATH');
     expect(codex).not.toContain('AGENTBRIDGE_DB_PATH');
     expect(codex).not.toMatch(/^\s*cwd\s*=/m);

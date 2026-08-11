@@ -4,7 +4,9 @@
 
 AgentBridge is a local-first MCP collaboration bridge that lets Claude Code and OpenAI Codex ask each other questions, reply, retry, reach agreement, and persist discussion state in a project-local SQLite database.
 
-> Current development version: v0.6.0. AgentBridge is registered globally once; each client session then detects the active project and keeps its SQLite data inside that project.
+> Current development version: v0.6.1. AgentBridge is registered globally once; each client session then detects the active project and keeps its SQLite data inside that project.
+
+> Current source verification: the UTF-8 check, TypeScript build, and all 96 tests across 17 test files pass. Native provider sessions resume only when they are explicitly bound to the same discussion; a new discussion never inherits another discussion's session or an unbound historical session. These automated checks do not replace live provider validation: claim real bidirectional communication only after successful Claude → Codex and Codex → Claude `ask_peer` calls.
 
 ## Install first, read details second
 
@@ -30,9 +32,9 @@ Do not mix Release, npm, and source commands. Download ordinary user builds from
 
 Download the package matching your platform plus `SHA256SUMS.txt`:
 
-- Windows x64: `AgentBridge-v0.6.0-win32-x64.zip`
-- Linux x64: `AgentBridge-v0.6.0-linux-x64.tar.gz`
-- macOS Apple Silicon: `AgentBridge-v0.6.0-darwin-arm64.tar.gz`
+- Windows x64: `AgentBridge-v0.6.1-win32-x64.zip`
+- Linux x64: `AgentBridge-v0.6.1-linux-x64.tar.gz`
+- macOS Apple Silicon: `AgentBridge-v0.6.1-darwin-arm64.tar.gz`
 
 Linux ARM64 and Intel macOS currently require npm or source installation.
 
@@ -178,13 +180,13 @@ This removes every registered AgentBridge project and the Release/npm installati
 - `Cannot find module 'node:sqlite'`: upgrade to Node.js 22.13+, or use the Release package.
 - App is open but doctor selects CLI: GUI detection is not App Server capability; verify local App installation/login and inspect `codexSelectedBackend`.
 - Config is present but tools are missing: fully quit both clients and inspect their MCP startup errors.
-- Claude and Codex see different discussions: compare their absolute `AGENTBRIDGE_DB_PATH` values and rerun setup.
+- Claude and Codex see different discussions: confirm both clients opened the same absolute project root. Start a fresh client task/window after switching projects; if project detection is unavailable, pass the same absolute `projectPath` on the first `ask_peer` or `list_discussions` call.
 - Wrong peer identity: Claude must have `AGENTBRIDGE_AGENT=claude`, Codex must have `AGENTBRIDGE_AGENT=codex`.
 - `database is locked`: keep the database on a local filesystem, stop active writers, and do not copy only part of a live SQLite WAL database.
 - `PEER_BUSY`: verify provider login/backend health, wait for current work, then call `retry_discussion`.
 - PowerShell blocks installation: verify SHA-256 first, then use the documented `Unblock-File` and Bypass command.
 - `Permission denied` on Unix: run `chmod +x install.sh` on the verified package.
-- A new project has no tools: every project requires its own setup.
+- A new project has no tools: global `setup` is required only once. Fully restart the client, open the project normally, and inspect MCP startup errors; if the first tool call cannot identify the root, pass an absolute `projectPath`.
 
 For an exhaustive automation-oriented runbook and troubleshooting matrix, see [README.ai.md](README.ai.md). The complete Chinese manual remains in [README.md](README.md).
 

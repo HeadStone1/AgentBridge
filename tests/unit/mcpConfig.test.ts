@@ -45,8 +45,24 @@ describe('MCP configuration management', () => {
       const value = readFileSync(path, 'utf8');
       expect(value).toContain('[profiles.default]');
       expect(value).toContain('[mcp_servers.agentbridge]');
-      expect(value).toContain("command = 'node'");
-      expect(value).toContain(`cwd = '${directory.replace(/'/g, "''")}'`);
+      expect(value).toContain('command = "node"');
+      expect(value).toContain(`cwd = "${directory.replace(/\\/g, '\\\\').replace(/"/g, '\\\"')}"`);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('escapes apostrophes, quotes, backslashes, and newlines in TOML basic strings', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'agentbridge-config-'));
+    const path = join(directory, 'config.toml');
+    try {
+      configureCodexToml(path, {
+        command: 'node"runner',
+        args: ["O'Reilly", 'C:\\temp\\agent', 'line\nnext'],
+      });
+      const value = readFileSync(path, 'utf8');
+      expect(value).toContain('command = "node\\"runner"');
+      expect(value).toContain('args = ["O\'Reilly", "C:\\\\temp\\\\agent", "line\\nnext"]');
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
