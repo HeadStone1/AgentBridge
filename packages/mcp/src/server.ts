@@ -171,6 +171,9 @@ function createServer(resolveRuntime: MCPRuntimeResolver, options: MCPServerOpti
     try {
       switch (name) {
         case 'ask_peer': {
+          if (process.env.AGENTBRIDGE_PEER_INVOCATION === '1') {
+            throw new Error('Nested AgentBridge peer invocation is disabled');
+          }
           const input = parse(schemas.ask, args);
           const runtime = await resolveRuntime(input.projectPath, server);
           const result = await runtime.collaboration.initiateDiscussion({

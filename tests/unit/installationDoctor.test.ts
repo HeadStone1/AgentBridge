@@ -50,6 +50,34 @@ describe('system installation and diagnostics', () => {
     expect(unregisterProject(project, env)).toEqual([]);
   });
 
+  it('does not overwrite a corrupt registry and keeps a backup on valid updates', () => {
+    const root = temporaryDirectory();
+    const env = { ...process.env, AGENTBRIDGE_INSTALL_ROOT: join(root, 'install') };
+    const registry = join(env.AGENTBRIDGE_INSTALL_ROOT, 'projects.json');
+    mkdirSync(env.AGENTBRIDGE_INSTALL_ROOT, { recursive: true });
+    writeFileSync(registry, '{not-json');
+
+    expect(() => registerProject({
+      projectPath: join(root, 'project'),
+      claudeConfig: join(root, 'claude.json'),
+      codexConfig: join(root, 'codex.toml'),
+    }, env)).toThrow('corrupt');
+    expect(readFileSync(registry, 'utf8')).toBe('{not-json');
+
+    writeFileSync(registry, JSON.stringify({ version: 1, projects: [] }));
+    registerProject({
+      projectPath: join(root, 'project'),
+      claudeConfig: join(root, 'claude.json'),
+      codexConfig: join(root, 'codex.toml'),
+    }, env);
+    registerProject({
+      projectPath: join(root, 'project-2'),
+      claudeConfig: join(root, 'claude-2.json'),
+      codexConfig: join(root, 'codex-2.toml'),
+    }, env);
+    expect(existsSync(`${registry}.bak`)).toBe(true);
+  });
+
   it('recognizes a self-contained Release installation from launcher metadata', () => {
     const root = temporaryDirectory();
     const installRoot = join(root, 'AgentBridge');

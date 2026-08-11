@@ -54,6 +54,7 @@ export interface Discussion {
   driver: AgentType; // Who initiated this discussion
   peer: AgentType;
   currentTurn: number;
+  roundCount: number;
   maxTurns: number;
   retryCount: number;
   maxRetries: number;
@@ -159,3 +160,4 @@ export interface RetryDiscussionOutput {
 }
 
 export * from './stateMachine.js';
+export * from './errors.js';

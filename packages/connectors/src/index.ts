@@ -9,6 +9,7 @@ export interface PeerResponse {
   providerSessionId?: string;
   providerSessionKind?: ProviderSessionKind;
   availability?: PeerAvailability;
+  backendSwitched?: { from: 'app-server'; to: 'cli'; reason: string };
 }
 
 export interface AgentConnector {
@@ -41,6 +42,7 @@ export interface AgentConnector {
     previousMessages?: Message[];
     providerSessionId?: string;
     providerSessionKind?: ProviderSessionKind;
+    signal?: AbortSignal;
   }): Promise<PeerResponse>;
 
   /**

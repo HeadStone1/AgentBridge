@@ -166,7 +166,7 @@ export async function installUpdate(release: GitHubRelease, info: UpdateInfo): P
       throw new Error(`Could not extract update: ${extract.stderr?.toString().trim() || 'tar failed'}`);
     }
     const packageDirectory = findPackageDirectory(directory);
-    runInstaller(packageDirectory);
+    runInstaller(packageDirectory, installRoot());
     return { ...info, installed: true, message: `Installed AgentBridge ${info.latestVersion}. Restart Claude and Codex.` };
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -215,15 +215,16 @@ function findPackageDirectory(directory: string): string {
   return join(directory, child.name);
 }
 
-function runInstaller(packageDirectory: string): void {
+function runInstaller(packageDirectory: string, targetRoot: string): void {
   const result = process.platform === 'win32'
     ? spawnSync('powershell.exe', [
       '-NoProfile',
       '-ExecutionPolicy', 'Bypass',
       '-File', join(packageDirectory, 'install.ps1'),
       '-NoSetup',
+      '-InstallRoot', targetRoot,
     ], { cwd: packageDirectory, stdio: 'inherit', windowsHide: true })
-    : spawnSync('sh', [join(packageDirectory, 'install.sh'), '--no-setup'], {
+    : spawnSync('sh', [join(packageDirectory, 'install.sh'), '--no-setup', '--install-root', targetRoot], {
       cwd: packageDirectory,
       stdio: 'inherit',
     });

@@ -28,6 +28,7 @@ export interface StoragePort {
   }): Discussion;
   getDiscussion(id: string): Discussion | null;
   updateDiscussionStatus(id: string, status: DiscussionStatus, extra?: Partial<Discussion>): void;
+  incrementDiscussionRound(id: string): Discussion;
   incrementRetry(id: string): Discussion;
   createMessage(data: {
     discussionId: string;
@@ -63,8 +64,10 @@ export interface StoragePort {
     ttlMs?: number;
   }): void;
   releaseSessionLease(provider: AgentType, projectPath: string, ownerId: string): void;
+  hasSessionLease(provider: AgentType, projectPath: string, ownerId?: string): boolean;
   recoverExpiredSessionLeases(now?: Date): number;
   recoverStaleDiscussions(maxAgeMs?: number): Discussion[];
+  pruneSessions(maxAgeMs?: number): number;
   appendAudit(event: Omit<AuditEvent, 'id' | 'timestamp'>): AuditEvent;
   getAuditLog(discussionId?: string, limit?: number): AuditEvent[];
 
@@ -75,6 +78,12 @@ export interface StoragePort {
     status?: SessionStatus;
     metadata?: Record<string, unknown>;
   }): AgentSession;
+  updateSessionStatus(
+    provider: AgentType,
+    sessionId: string,
+    status: SessionStatus,
+    metadata?: Record<string, unknown>,
+  ): AgentSession;
   getSessionForDiscussion(
     provider: AgentType,
     discussionId: string,

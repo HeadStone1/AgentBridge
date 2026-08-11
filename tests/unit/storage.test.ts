@@ -20,6 +20,7 @@ describe('Storage', () => {
       expect(d.status).toBe('CREATED');
       expect(d.driver).toBe('claude');
       expect(d.currentTurn).toBe(0);
+      expect(d.roundCount).toBe(0);
       expect(d.maxTurns).toBe(6);
     });
 
@@ -137,6 +138,13 @@ describe('Storage', () => {
       expect(after).toHaveLength(1);
       expect(after[0].content).toBe('Second');
     });
+
+    it('tracks provider rounds separately from message count', () => {
+      const d = storage.createDiscussion({ topic: 'Round test', driver: 'claude', traceId: 'tr_round' });
+      storage.createMessage({ discussionId: d.id, sender: 'claude', receiver: 'codex', role: 'proposal', content: 'proposal' });
+      expect(storage.getDiscussion(d.id)?.currentTurn).toBe(1);
+      expect(storage.incrementDiscussionRound(d.id).roundCount).toBe(1);
+    });
   });
 
   describe('Decisions', () => {
@@ -239,6 +247,7 @@ describe('Storage', () => {
         projectPath: '/project',
         ownerId: 'discussion-a',
       });
+      expect(storage.hasSessionLease('codex', '/project', 'discussion-a')).toBe(true);
 
       expect(() => storage.acquireSessionLease({
         provider: 'codex',
@@ -247,6 +256,7 @@ describe('Storage', () => {
       })).toThrow('already leased');
 
       storage.releaseSessionLease('codex', '/project', 'discussion-a');
+      expect(storage.hasSessionLease('codex', '/project')).toBe(false);
       expect(() => storage.acquireSessionLease({
         provider: 'codex',
         projectPath: '/project',
@@ -277,6 +287,18 @@ describe('Storage', () => {
 
       storage.unregisterSession('claude', 'claude-session-1');
       expect(storage.getSession('claude', 'claude-session-1')).toBeNull();
+    });
+
+    it('reuses the latest project session across discussions', () => {
+      storage.registerSession({
+        provider: 'codex',
+        sessionId: 'codex-project-session',
+        projectPath: '/project',
+        status: 'IDLE',
+        metadata: { sessionKind: 'codex-cli' },
+      });
+      expect(storage.getSessionForDiscussion('codex', 'dsc_other_discussion', '/project')?.sessionId)
+        .toBe('codex-project-session');
     });
 
     it('cleans expired session leases during recovery', () => {

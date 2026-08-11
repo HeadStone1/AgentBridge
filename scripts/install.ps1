@@ -1,6 +1,6 @@
 param(
   [string]$ProjectPath,
-  [string]$InstallRoot = (Join-Path $env:USERPROFILE '.agentbridge'),
+  [string]$InstallRoot = $(if ($env:AGENTBRIDGE_INSTALL_ROOT) { $env:AGENTBRIDGE_INSTALL_ROOT } else { Join-Path $env:USERPROFILE '.agentbridge' }),
   [switch]$NoSetup
 )
 

@@ -254,6 +254,184 @@ describe('CollaborationService', () => {
     budgetStorage.close();
   });
 
+  it('persists a max-round reply before pausing the discussion', async () => {
+    const roundStorage = new Storage(':memory:');
+    const roundCollaboration = new CollaborationService(
+      roundStorage,
+      new AuditService(roundStorage),
+      { maxTurns: 1 },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => ({ content: 'first response', duration: 1 }),
+        },
+      },
+    );
+    const started = await roundCollaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'round limit',
+      initialMessage: 'first',
+      traceId: 'tr_round_limit',
+    });
+
+    const reply = await roundCollaboration.replyToDiscussion({
+      discussionId: started.discussionId,
+      sender: 'claude',
+      reply: 'must be retained',
+    });
+    expect(reply.status).toBe('TIMEOUT');
+    expect(roundStorage.getDiscussion(started.discussionId)?.roundCount).toBe(1);
+    expect(roundStorage.getMessages(started.discussionId).at(-1)?.content).toBe('must be retained');
+    await expect(roundCollaboration.retryDiscussion({
+      discussionId: started.discussionId,
+      agent: 'claude',
+    })).rejects.toThrow('maxTurns budget');
+    roundStorage.close();
+  });
+
+  it('keeps one cancellable provider request per asynchronous discussion', async () => {
+    const asyncStorage = new Storage(':memory:');
+    let release!: () => void;
+    const providerGate = new Promise<void>((resolve) => { release = resolve; });
+    const asyncCollaboration = new CollaborationService(
+      asyncStorage,
+      new AuditService(asyncStorage),
+      { asyncDispatch: true, timeoutMs: 5_000 },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            await providerGate;
+            return { content: 'async response', duration: 1 };
+          },
+        },
+      },
+    );
+    const started = await asyncCollaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'single flight',
+      initialMessage: 'first request',
+      traceId: 'tr_single_flight',
+    });
+
+    await expect(asyncCollaboration.replyToDiscussion({
+      discussionId: started.discussionId,
+      sender: 'claude',
+      reply: 'too soon',
+    })).rejects.toMatchObject({ code: 'BUSY' });
+    expect(asyncStorage.getMessages(started.discussionId)).toHaveLength(1);
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(asyncStorage.getMessages(started.discussionId).at(-1)?.content).toBe('async response');
+    asyncStorage.close();
+  });
+
+  it('cancels an in-flight provider request through its abort signal', async () => {
+    const cancelStorage = new Storage(':memory:');
+    const connector = {
+      agentType: 'codex' as const,
+      isAvailable: async () => true,
+      isBusy: async () => false,
+      sendAndWait: async (context: { signal?: AbortSignal }) => await new Promise<never>((_, innerReject) => {
+        if (context.signal?.aborted) {
+          innerReject(new Error('cancelled by test'));
+          return;
+        }
+        context.signal?.addEventListener('abort', () => innerReject(new Error('cancelled by test')), { once: true });
+      }),
+    };
+    const service = new CollaborationService(
+      cancelStorage,
+      new AuditService(cancelStorage),
+      { timeoutMs: 5_000 },
+      { codex: connector },
+    );
+    const pending = service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'cancel provider',
+      initialMessage: 'wait',
+      traceId: 'tr_cancel_provider',
+    });
+    const discussion = cancelStorage.listDiscussions()[0];
+    await service.cancelDiscussion({ discussionId: discussion.id, agent: 'claude' });
+    await expect(pending).rejects.toThrow('cancelled by test');
+    expect(cancelStorage.listDiscussions()[0].status).toBe('CANCELLED');
+    cancelStorage.close();
+  });
+
+  it('does not report cancellation success when the provider cannot be stopped', async () => {
+    const cancelStorage = new Storage(':memory:');
+    const service = new CollaborationService(
+      cancelStorage,
+      new AuditService(cancelStorage),
+      { timeoutMs: 1_000 },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => await new Promise<never>(() => {}),
+          cancel: async () => { throw new Error('provider ignored cancellation'); },
+        },
+      },
+    );
+    const pending = service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'unconfirmed cancel',
+      initialMessage: 'wait forever',
+      traceId: 'tr_unconfirmed_cancel',
+    });
+    const discussion = cancelStorage.listDiscussions()[0];
+    const pendingRejection = expect(pending).rejects.toMatchObject({ code: 'TIMEOUT' });
+
+    await expect(service.cancelDiscussion({
+      discussionId: discussion.id,
+      agent: 'claude',
+    })).rejects.toThrow('could not be confirmed');
+    await pendingRejection;
+    expect(cancelStorage.getDiscussion(discussion.id)?.status).toBe('NEEDS_USER_DECISION');
+    cancelStorage.close();
+  });
+
+  it('does not claim cancellation of a provider owned by another MCP process', async () => {
+    const remoteStorage = new Storage(':memory:');
+    const service = new CollaborationService(remoteStorage, new AuditService(remoteStorage));
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'remote provider',
+      initialMessage: 'running elsewhere',
+      traceId: 'tr_remote_provider',
+    });
+    remoteStorage.acquireSessionLease({
+      provider: 'codex',
+      projectPath: process.cwd(),
+      ownerId: started.discussionId,
+    });
+
+    await expect(service.replyToDiscussion({
+      discussionId: started.discussionId,
+      sender: 'claude',
+      reply: 'must not race',
+    })).rejects.toThrow('already leased');
+    expect(remoteStorage.getMessages(started.discussionId)).toHaveLength(1);
+    await expect(service.cancelDiscussion({
+      discussionId: started.discussionId,
+      agent: 'claude',
+    })).rejects.toThrow('could not be confirmed');
+    expect(remoteStorage.getDiscussion(started.discussionId)?.status).toBe('NEEDS_USER_DECISION');
+    remoteStorage.releaseSessionLease('codex', process.cwd(), started.discussionId);
+    remoteStorage.close();
+  });
+
   it('requires an explicit retry after a connector failure', async () => {
     const retryStorage = new Storage(':memory:');
     let attempts = 0;
@@ -339,5 +517,48 @@ describe('CollaborationService', () => {
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  it('marks a superseded provider session UNKNOWN after backend fallback', async () => {
+    const fallbackStorage = new Storage(':memory:');
+    fallbackStorage.registerSession({
+      provider: 'codex',
+      sessionId: 'thread_old_app_server',
+      projectPath: process.cwd(),
+      status: 'IDLE',
+      metadata: { sessionKind: 'codex-app-server' },
+    });
+    const fallbackCollaboration = new CollaborationService(
+      fallbackStorage,
+      new AuditService(fallbackStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => ({
+            content: 'fallback response',
+            duration: 1,
+            providerSessionId: 'thread_new_cli',
+            providerSessionKind: 'codex-cli',
+            backendSwitched: { from: 'app-server', to: 'cli', reason: 'fixture failure' },
+          }),
+        },
+      },
+    );
+
+    await fallbackCollaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'fallback status',
+      initialMessage: 'trigger fallback',
+      traceId: 'tr_fallback_status',
+    });
+
+    expect(fallbackStorage.getSession('codex', 'thread_old_app_server')?.status).toBe('UNKNOWN');
+    expect(fallbackStorage.getSession('codex', 'thread_new_cli')?.status).toBe('IDLE');
+    expect(fallbackStorage.getSession('codex', 'thread_new_cli')?.metadata.sessionKind).toBe('codex-cli');
+    fallbackStorage.close();
   });
 });
