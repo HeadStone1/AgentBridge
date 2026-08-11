@@ -6,6 +6,8 @@ AgentBridge es un puente MCP local que permite que Claude Code y OpenAI Codex se
 
 > Versión de desarrollo actual: v0.6.0. AgentBridge se registra globalmente una sola vez; cada sesión detecta el proyecto activo y guarda su base SQLite dentro de ese proyecto.
 
+> Verificación actual del código fuente: pasan la comprobación UTF-8, la compilación TypeScript y las 96 pruebas de 17 archivos. Una sesión nativa del proveedor solo se reanuda cuando está vinculada explícitamente a la misma conversación; una conversación nueva no hereda sesiones ajenas ni sesiones históricas sin vínculo. Estas pruebas automáticas no sustituyen la validación con proveedores reales: solo declare comunicación bidireccional después de llamadas `ask_peer` correctas de Claude → Codex y Codex → Claude.
+
 ## Instalación rápida
 
 ### Elija un solo método
@@ -182,13 +184,13 @@ Elimina los proyectos registrados y la instalación Release/npm. Nunca elimina a
 - `Cannot find module 'node:sqlite'`: actualice a Node.js 22.13+ o use el paquete Release.
 - Codex App está abierta pero doctor elige CLI: la presencia de la interfaz no garantiza App Server; revise `codexSelectedBackend`, la instalación local y el inicio de sesión.
 - La configuración existe pero no aparecen herramientas: cierre completamente ambos clientes, vuelva a abrirlos y revise sus errores de inicio MCP.
-- Claude y Codex no ven las mismas conversaciones: compare sus valores absolutos de `AGENTBRIDGE_DB_PATH` y repita `setup`.
+- Claude y Codex no ven las mismas conversaciones: confirme que ambos clientes abrieron la misma raíz absoluta del proyecto. Inicie una tarea o ventana nueva después de cambiar de proyecto; si no se detecta la raíz, pase el mismo `projectPath` absoluto en la primera llamada a `ask_peer` o `list_discussions`.
 - El agente remoto es incorrecto: Claude requiere `AGENTBRIDGE_AGENT=claude` y Codex requiere `AGENTBRIDGE_AGENT=codex`.
 - `database is locked`: mantenga SQLite en un disco local, detenga escritores activos y copie todo `.agentbridge` al hacer la copia de seguridad.
 - `PEER_BUSY`: compruebe autenticación y salud del proveedor, espere a que termine el trabajo activo y use `retry_discussion`.
 - PowerShell bloquea el script: primero valide SHA-256; después use `Unblock-File` y el comando Bypass documentado.
 - `Permission denied` en Unix: aplique `chmod +x install.sh` al paquete ya verificado.
-- Un segundo proyecto no muestra herramientas: ejecute `setup` específicamente para ese proyecto.
+- Un segundo proyecto no muestra herramientas: `setup` global se ejecuta una sola vez. Reinicie completamente el cliente, abra el proyecto y revise los errores de inicio MCP; si la primera llamada no detecta la raíz, pase un `projectPath` absoluto.
 - AgentBridge está dentro de una VM y Codex App solo en el anfitrión: instale Codex dentro de la VM o utilice una CLI autenticada dentro de la VM.
 
 La matriz completa de diagnóstico para automatización está en [README.ai.md](README.ai.md). El manual chino completo se conserva en [README.md](README.md).

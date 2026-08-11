@@ -6,6 +6,8 @@ AgentBridge 是一个本地优先的 MCP 协作核心，让 Claude Code 和 Code
 
 > 当前开发版本：v0.6.0。本项目以 GitHub Release 分发本地 stdio MCP；便携包自带 Node.js 运行时，不要求用户另外安装 Node 或 npm。Release 安装后程序独立位于用户目录，不依赖下载目录或源码仓库。
 
+> 当前源码验证状态：UTF-8 校验、TypeScript 构建以及 17 个测试文件中的 96 项测试均已通过。Provider 原生会话只会在明确属于同一 discussion 时续接，不会把其他 discussion 或未绑定会话自动复用到新讨论。上述自动化测试不等同于真实 Provider 端到端验收；只有 Claude → Codex 和 Codex → Claude 两个方向都完成实际 `ask_peer` 调用，才能声明真实双向通信可用。
+
 > 如果你准备把本项目交给 Claude、Codex 或其他 AI Agent 自动部署，请优先让它完整阅读 [README.ai.md](README.ai.md)。该手册要求 Agent 明确判断当前连接的是 Codex App 的 App Server 还是独立 Codex CLI，并完成 doctor、配置文件、MCP 工具、真实双向调用四层验收。
 
 > 许可提醒：v0.5.0 起采用 `PolyForm-Noncommercial-1.0.0`，公开许可只允许非商业用途；商业使用需要 HeadStone1 的单独书面授权。v0.4.2 及更早已发布版本继续适用当时的 Apache-2.0，详见 [许可历史](LICENSE_HISTORY.md)。因此 v0.5.0 起应称为“源码可用（source-available）”，不应称为 OSI 开源软件。
@@ -395,7 +397,7 @@ AgentBridge 不会把代码或讨论上传到自己的云服务。实际模型�
 - 使用 Node 内置 `node:sqlite` 的 SQLite WAL 存储。
 - 双 MCP 进程共享讨论、消息、决定、审计事件、会话租约和 provider 原生会话 ID。
 - `ask_peer`、`reply_peer`、`get_discussion`、`list_discussions`、`close_discussion`、`cancel_discussion`、`retry_discussion` 七个 MCP 工具。
-- Claude CLI、Codex CLI 和 Codex App Server 的会话 ID 按讨论持久化；MCP 重启后自动续接，续接失败时使用 SQLite 历史重建有界上下文。
+- Claude CLI、Codex CLI 和 Codex App Server 的会话 ID 按讨论持久化；MCP 重启后只续接当前 discussion 明确绑定的会话，不跨 discussion 复用未绑定或其他讨论的会话；续接失败时使用 SQLite 历史重建有界上下文。
 - 自动发现 Codex Desktop 自带的可执行程序，优先使用 App Server stdio 协议。
 - App Server 不可用时自动回退到 Codex CLI `exec --json` 和 `exec resume`。
 - 讨论轮数、重试次数、总消息长度和持续时间限制。

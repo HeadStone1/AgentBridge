@@ -4,6 +4,8 @@
 
 This document is written for an AI coding agent that has been asked to deploy, upgrade, diagnose, or remove AgentBridge on a user's machine. Preserve the user's data and existing MCP configuration. Do not report success until the verification gates below pass.
 
+> Current source verification: the UTF-8 check, TypeScript build, and all 96 tests across 17 test files pass. This is repository-level evidence only. It does not prove that the user's authenticated Claude and Codex providers can communicate; Gates 3 and 4 remain mandatory for a live deployment.
+
 ## Mission and invariants
 
 AgentBridge is a local stdio MCP server connecting Claude Code with either Codex App's bundled App Server or a standalone Codex CLI. It keeps each project's discussions in `<project>/.agentbridge/agentbridge.sqlite`.
@@ -19,6 +21,7 @@ The following conditions are mandatory:
 5. Runtime data remains project-scoped. AgentBridge resolves the active root from an explicit/legacy project environment, `CLAUDE_PROJECT_DIR`, MCP `roots/list`, or the MCP process working directory. `ask_peer.projectPath` is the explicit fallback.
 6. Choose exactly one installation method: GitHub Release, npm, or source. Do not mix launchers from different methods.
 7. Do not delete a source checkout, project database, configuration, or system installation without explicit user approval.
+8. Treat provider sessions as discussion-scoped. Resume only a session explicitly linked to the current discussion; never reuse an unbound historical session or a session belonging to another discussion.
 
 ## Ask or discover before changing anything
 
