@@ -4,7 +4,7 @@
 
 This document is written for an AI coding agent that has been asked to deploy, upgrade, diagnose, or remove AgentBridge on a user's machine. Preserve the user's data and existing MCP configuration. Do not report success until the verification gates below pass.
 
-> Current source verification: the UTF-8 check, TypeScript build, and all 96 tests across 17 test files pass. This is repository-level evidence only. It does not prove that the user's authenticated Claude and Codex providers can communicate; Gates 3 and 4 remain mandatory for a live deployment.
+> Current v0.6.1 source verification: the UTF-8 check, TypeScript build, and all 96 tests across 17 test files pass. This is repository-level evidence only. It does not prove that the user's authenticated Claude and Codex providers can communicate; Gates 3 and 4 remain mandatory for a live deployment.
 
 ## Mission and invariants
 

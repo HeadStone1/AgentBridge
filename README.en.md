@@ -4,7 +4,7 @@
 
 AgentBridge is a local-first MCP collaboration bridge that lets Claude Code and OpenAI Codex ask each other questions, reply, retry, reach agreement, and persist discussion state in a project-local SQLite database.
 
-> Current development version: v0.6.0. AgentBridge is registered globally once; each client session then detects the active project and keeps its SQLite data inside that project.
+> Current development version: v0.6.1. AgentBridge is registered globally once; each client session then detects the active project and keeps its SQLite data inside that project.
 
 > Current source verification: the UTF-8 check, TypeScript build, and all 96 tests across 17 test files pass. Native provider sessions resume only when they are explicitly bound to the same discussion; a new discussion never inherits another discussion's session or an unbound historical session. These automated checks do not replace live provider validation: claim real bidirectional communication only after successful Claude → Codex and Codex → Claude `ask_peer` calls.
 
@@ -32,9 +32,9 @@ Do not mix Release, npm, and source commands. Download ordinary user builds from
 
 Download the package matching your platform plus `SHA256SUMS.txt`:
 
-- Windows x64: `AgentBridge-v0.6.0-win32-x64.zip`
-- Linux x64: `AgentBridge-v0.6.0-linux-x64.tar.gz`
-- macOS Apple Silicon: `AgentBridge-v0.6.0-darwin-arm64.tar.gz`
+- Windows x64: `AgentBridge-v0.6.1-win32-x64.zip`
+- Linux x64: `AgentBridge-v0.6.1-linux-x64.tar.gz`
+- macOS Apple Silicon: `AgentBridge-v0.6.1-darwin-arm64.tar.gz`
 
 Linux ARM64 and Intel macOS currently require npm or source installation.
 

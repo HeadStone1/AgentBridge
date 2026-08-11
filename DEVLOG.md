@@ -1,5 +1,15 @@
 # AgentBridge 开发日志
 
+## 2026-08-11
+
+### v0.6.1 会话隔离、生命周期与 CI 修复
+
+- Provider 原生会话只在明确绑定同一 discussion 时续接，避免新 discussion 复用其他讨论或未绑定历史会话。
+- 持久化异步派发状态和等待目标，并强化取消、关闭、重试、Agreement 与进程关闭流程。
+- 增加 SQLite 双连接、并发 Lease 和 Session 隔离回归覆盖；当前共 17 个测试文件、96 项测试。
+- CI 使用完整 Git 历史执行提交差异检查，并在 Windows、Ubuntu、macOS 上执行 UTF-8、构建和测试验证。
+- 四份 README 同步说明当前验证证据和真实双 Provider 端到端验收边界。
+
 ## 2026-08-10
 
 ### v0.6.0 全局 MCP 注册与动态项目隔离

@@ -4,7 +4,7 @@
 
 AgentBridge 是一个本地优先的 MCP 协作核心，让 Claude Code 和 Codex 能在同一个项目中互相提问、回复、重试、达成一致，并把讨论状态保存在项目本地的 SQLite 数据库中。
 
-> 当前开发版本：v0.6.0。本项目以 GitHub Release 分发本地 stdio MCP；便携包自带 Node.js 运行时，不要求用户另外安装 Node 或 npm。Release 安装后程序独立位于用户目录，不依赖下载目录或源码仓库。
+> 当前开发版本：v0.6.1。本项目以 GitHub Release 分发本地 stdio MCP；便携包自带 Node.js 运行时，不要求用户另外安装 Node 或 npm。Release 安装后程序独立位于用户目录，不依赖下载目录或源码仓库。
 
 > 当前源码验证状态：UTF-8 校验、TypeScript 构建以及 17 个测试文件中的 96 项测试均已通过。Provider 原生会话只会在明确属于同一 discussion 时续接，不会把其他 discussion 或未绑定会话自动复用到新讨论。上述自动化测试不等同于真实 Provider 端到端验收；只有 Claude → Codex 和 Codex → Claude 两个方向都完成实际 `ask_peer` 调用，才能声明真实双向通信可用。
 
@@ -14,7 +14,7 @@ AgentBridge 是一个本地优先的 MCP 协作核心，让 Claude Code 和 Code
 
 ## 使用方法（先看这里）
 
-### v0.6.0 最重要的变化：只需全局注册一次
+### v0.6 系列最重要的变化：只需全局注册一次
 
 安装后只运行一次 `agentbridge setup`。它会在 `~/.claude.json` 和 `~/.codex/config.toml` 中各写入一个全局 AgentBridge MCP 条目，不固定项目路径、数据库路径或 Codex `cwd`。以后打开项目 A、项目 B 或新项目时，不需要再次 setup。
 
@@ -28,7 +28,7 @@ agentbridge setup
 agentbridge doctor
 ```
 
-从 v0.5.x 升级时，安装 v0.6.0 后执行一次 `agentbridge setup`。它会把已登记的项目级 Claude/Codex 条目迁移为全局条目，保留其他 MCP 配置和各项目已有数据库。然后彻底退出并重启 Claude Code 与 Codex。
+从 v0.5.x 升级时，安装 v0.6.1 后执行一次 `agentbridge setup`。它会把已登记的项目级 Claude/Codex 条目迁移为全局条目，保留其他 MCP 配置和各项目已有数据库。然后彻底退出并重启 Claude Code 与 Codex。
 
 ### 1. 先选择安装方式
 
@@ -56,13 +56,13 @@ agentbridge doctor
 
 1. 从 [最新 Release](https://github.com/HeadStone1/AgentBridge/releases/latest) 下载以下两个文件：
 
-   - `AgentBridge-v0.6.0-win32-x64.zip`
+   - `AgentBridge-v0.6.1-win32-x64.zip`
    - `SHA256SUMS.txt`
 
 2. 在下载目录校验压缩包。下面命令在哈希不一致时会直接报错：
 
 ```powershell
-$asset = 'AgentBridge-v0.6.0-win32-x64.zip'
+$asset = 'AgentBridge-v0.6.1-win32-x64.zip'
 $line = Get-Content -LiteralPath '.\SHA256SUMS.txt' |
   Where-Object { $_ -match "\s+$([regex]::Escape($asset))$" }
 if (-not $line) { throw "SHA256SUMS.txt 中找不到 $asset" }
@@ -72,7 +72,7 @@ if ($actual -ne $expected) { throw "SHA-256 校验失败，禁止安装" }
 "SHA-256 verified: $asset"
 ```
 
-3. 解压 ZIP，进入解压后的 `AgentBridge-v0.6.0-win32-x64` 目录，然后执行一次全局安装：
+3. 解压 ZIP，进入解压后的 `AgentBridge-v0.6.1-win32-x64` 目录，然后执行一次全局安装：
 
 ```powershell
 Unblock-File -LiteralPath '.\install.ps1'
@@ -82,7 +82,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 `Test-Path` 必须返回 `True`。安装完成时，最后应看到类似输出：
 
 ```text
-AgentBridge 0.6.0 installed in C:\Users\<用户名>\.agentbridge
+AgentBridge 0.6.1 installed in C:\Users\<用户名>\.agentbridge
 Launcher: C:\Users\<用户名>\.agentbridge\bin\agentbridge.cmd
 Full uninstall: & "C:\Users\<用户名>\.agentbridge\bin\agentbridge.cmd" uninstall-all --yes --remove-program
 AgentBridge is registered globally. Restart Claude Code and Codex, then open any project.
@@ -116,22 +116,22 @@ uname -m
 
 | 输出 | 下载文件 |
 |---|---|
-| `Linux` + `x86_64` | `AgentBridge-v0.6.0-linux-x64.tar.gz` |
-| `Darwin` + `arm64` | `AgentBridge-v0.6.0-darwin-arm64.tar.gz` |
+| `Linux` + `x86_64` | `AgentBridge-v0.6.1-linux-x64.tar.gz` |
+| `Darwin` + `arm64` | `AgentBridge-v0.6.1-darwin-arm64.tar.gz` |
 
 当前 Release 不提供 Linux ARM64 或 Intel Mac x64 便携包；这些平台请使用 npm 或源码安装。
 
 下载对应压缩包和 `SHA256SUMS.txt` 后校验。Linux 示例：
 
 ```bash
-asset='AgentBridge-v0.6.0-linux-x64.tar.gz'
+asset='AgentBridge-v0.6.1-linux-x64.tar.gz'
 grep "  $asset$" SHA256SUMS.txt | sha256sum -c -
 ```
 
 macOS 示例：
 
 ```bash
-asset='AgentBridge-v0.6.0-darwin-arm64.tar.gz'
+asset='AgentBridge-v0.6.1-darwin-arm64.tar.gz'
 expected=$(awk -v file="$asset" '$2 == file {print $1}' SHA256SUMS.txt)
 actual=$(shasum -a 256 "$asset" | awk '{print $1}')
 test -n "$expected" && test "$actual" = "$expected" || { echo 'SHA-256 校验失败，禁止安装' >&2; exit 1; }
@@ -149,7 +149,7 @@ chmod +x install.sh
 ~/.agentbridge/bin/agentbridge doctor
 ```
 
-压缩包通常已经保留执行权限；如果出现 `Permission denied`，重新执行 `chmod +x install.sh`。安装脚本会依次运行全局 `setup` 和 `doctor`；完成时应看到 `AgentBridge 0.6.0 installed in ...`、`Launcher: ...`、`Full uninstall: ...` 和重启提示。
+压缩包通常已经保留执行权限；如果出现 `Permission denied`，重新执行 `chmod +x install.sh`。安装脚本会依次运行全局 `setup` 和 `doctor`；完成时应看到 `AgentBridge 0.6.1 installed in ...`、`Launcher: ...`、`Full uninstall: ...` 和重启提示。
 
 ### 4. npm 安装（已有 Node.js 的开发者）
 
@@ -1058,9 +1058,9 @@ npm run release:package
 3. 提交代码后创建与 `package.json` 完全一致的标签：
 
 ```bash
-git tag v0.6.0
+git tag v0.6.1
 git push origin main
-git push origin v0.6.0
+git push origin v0.6.1
 ```
 
 标签推送后，[GitHub Actions Release 工作流](.github/workflows/release.yml) 会再次执行构建和测试，然后分别在 Windows、Linux、macOS runner 上打包自带运行时的压缩包，生成 `SHA256SUMS.txt`，最后创建 GitHub Release。标签与 `package.json` 版本不一致时工作流会拒绝发布。
