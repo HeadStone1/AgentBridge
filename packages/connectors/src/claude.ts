@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import type { AgentConnector, PeerResponse } from './index.js';
+import { ProviderError } from '@agentbridge/protocol';
 import type { Message } from '@agentbridge/protocol';
 import { buildPeerPrompt } from './prompt.js';
 
@@ -54,6 +55,7 @@ export class ClaudeConnector implements AgentConnector {
     previousMessages?: Message[];
     providerSessionId?: string;
     providerSessionKind?: 'claude-cli' | 'codex-cli' | 'codex-app-server';
+    signal?: AbortSignal;
   }): Promise<PeerResponse> {
     const started = Date.now();
     const canResume = Boolean(context.providerSessionId)
@@ -66,11 +68,12 @@ export class ClaudeConnector implements AgentConnector {
       [...this.buildArgs(sessionId, resumed), prompt],
       context.projectPath,
       this.timeoutMs,
+      context.signal,
     );
 
     // Provider-side sessions can be deleted independently. Rebuild a fresh
     // session from SQLite history instead of losing the discussion.
-    if (result.exitCode !== 0 && resumed) {
+    if (result.exitCode !== 0 && resumed && isSessionLost(result)) {
       sessionId = randomUUID();
       resumed = false;
       prompt = buildPeerPrompt(context.prompt, context.previousMessages ?? []);
@@ -79,10 +82,11 @@ export class ClaudeConnector implements AgentConnector {
         [...this.buildArgs(sessionId, false), prompt],
         context.projectPath,
         this.timeoutMs,
+        context.signal,
       );
     }
     if (result.exitCode !== 0) {
-      throw new Error(`Claude CLI failed (${result.exitCode}): ${result.stderr || result.stdout}`.trim());
+      throw new ProviderError('FAILED', `Claude CLI failed (${result.exitCode}): ${result.stderr || result.stdout}`.trim());
     }
 
     const parsed = parseClaudeOutput(result.stdout);
@@ -143,25 +147,74 @@ interface ProcessResult {
   stderr: string;
 }
 
-function runProcess(command: string, args: string[], cwd: string, timeoutMs: number): Promise<ProcessResult> {
+function runProcess(
+  command: string,
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, windowsHide: true, shell: false });
+    const child = spawn(command, args, {
+      cwd,
+      windowsHide: true,
+      shell: false,
+      env: { ...process.env, AGENTBRIDGE_PEER_INVOCATION: '1' },
+    });
     let stdout = '';
     let stderr = '';
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`Process timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+    let termination: { code: 'CANCELLED' | 'TIMEOUT'; message: string } | undefined;
+    const finish = (action: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      signal?.removeEventListener('abort', onAbort);
+      action();
+    };
+    const terminate = (reason: { code: 'CANCELLED' | 'TIMEOUT'; message: string }) => {
+      if (settled || termination) return;
+      termination = reason;
+      if (timer) clearTimeout(timer);
+      try { child.kill(); } catch { /* close/error will settle the operation */ }
+      forceKillTimer = setTimeout(() => {
+        if (!settled && child.exitCode === null) {
+          try { child.kill('SIGKILL'); } catch { /* close/error will report failure */ }
+        }
+      }, 2_000);
+    };
+    const onAbort = () => terminate({ code: 'CANCELLED', message: 'Claude CLI request was cancelled' });
+    signal?.addEventListener('abort', onAbort, { once: true });
 
     child.stdout?.on('data', (chunk: Buffer | string) => { stdout += chunk.toString(); });
     child.stderr?.on('data', (chunk: Buffer | string) => { stderr += chunk.toString(); });
     child.once('error', (error) => {
-      clearTimeout(timer);
-      reject(error);
+      const failure = termination
+        ? new ProviderError(termination.code, termination.message, { cause: error })
+        : new ProviderError('UNAVAILABLE', `Claude CLI could not start: ${error.message}`, { cause: error });
+      finish(() => reject(failure));
     });
     child.once('close', (exitCode) => {
-      clearTimeout(timer);
-      resolve({ exitCode, stdout, stderr });
+      if (termination) {
+        finish(() => reject(new ProviderError(termination!.code, termination!.message)));
+      } else {
+        finish(() => resolve({ exitCode, stdout, stderr }));
+      }
     });
+    if (signal?.aborted) onAbort();
+    if (!termination) {
+      timer = setTimeout(() => terminate({
+        code: 'TIMEOUT',
+        message: `Claude CLI timed out after ${timeoutMs}ms`,
+      }), timeoutMs);
+    }
   });
+}
+
+function isSessionLost(result: ProcessResult): boolean {
+  const output = `${result.stderr}\n${result.stdout}`.toLowerCase();
+  return /session[_ -]?(not found|missing|lost|expired|invalid)|unknown session|session_corrupted/.test(output);
 }

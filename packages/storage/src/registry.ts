@@ -1,5 +1,6 @@
 import {
   closeSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   openSync,
@@ -43,20 +44,19 @@ export function registryPath(env: NodeJS.ProcessEnv = process.env): string {
 export function readProjectRegistry(env: NodeJS.ProcessEnv = process.env): RegisteredProject[] {
   const path = registryPath(env);
   if (!existsSync(path)) return [];
+  let value: Partial<ProjectRegistry>;
   try {
-    const value = JSON.parse(readFileSync(path, 'utf8')) as Partial<ProjectRegistry>;
-    if (value.version !== 1 || !Array.isArray(value.projects)) return [];
-    return value.projects
-      .filter((item): item is RegisteredProject => Boolean(
-        item
-        && typeof item.projectPath === 'string'
-        && typeof item.claudeConfig === 'string'
-        && typeof item.codexConfig === 'string',
-      ))
-      .map((item) => ({ ...item, projectPath: resolve(item.projectPath) }));
-  } catch {
-    return [];
+    value = JSON.parse(readFileSync(path, 'utf8')) as Partial<ProjectRegistry>;
+  } catch (cause) {
+    throw new Error(`Project registry is corrupt: ${path}`, { cause });
   }
+  if (value.version !== 1 || !Array.isArray(value.projects)) {
+    throw new Error(`Project registry has an invalid format: ${path}`);
+  }
+  if (value.projects.some((item) => !isRegisteredProject(item))) {
+    throw new Error(`Project registry contains an invalid project entry: ${path}`);
+  }
+  return value.projects.map((item) => ({ ...item, projectPath: resolve(item.projectPath) }));
 }
 
 export function registerProject(
@@ -110,10 +110,21 @@ export function ensureProjectMetadata(projectPathValue: string): Record<string, 
 function writeRegistry(projects: RegisteredProject[], env: NodeJS.ProcessEnv): void {
   const path = registryPath(env);
   mkdirSync(dirname(path), { recursive: true });
+  if (existsSync(path)) copyFileSync(path, `${path}.bak`);
   const tempPath = `${path}.tmp-${process.pid}-${randomUUID()}`;
   const value: ProjectRegistry = { version: 1, projects };
   writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
   renameSync(tempPath, path);
+}
+
+function isRegisteredProject(value: unknown): value is RegisteredProject {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Partial<RegisteredProject>;
+  return typeof item.projectPath === 'string'
+    && typeof item.claudeConfig === 'string'
+    && typeof item.codexConfig === 'string'
+    && typeof item.setupAt === 'string'
+    && (item.scope === undefined || item.scope === 'project' || item.scope === 'global');
 }
 
 function withRegistryLock<T>(env: NodeJS.ProcessEnv, action: () => T): T {

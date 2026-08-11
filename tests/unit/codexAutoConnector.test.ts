@@ -9,6 +9,7 @@ import {
 
 const appServerFixture = resolve(fileURLToPath(new URL('../fixtures/fake-codex-app-server.mjs', import.meta.url)));
 const cliFixture = resolve(fileURLToPath(new URL('../fixtures/fake-codex.mjs', import.meta.url)));
+const runtimeFailureFixture = resolve(fileURLToPath(new URL('../fixtures/fake-codex-app-server-runtime-failure.mjs', import.meta.url)));
 
 describe('Codex GUI-first backend selection', () => {
   it('discovers the executable bundled with Codex Desktop on Windows', () => {
@@ -61,6 +62,28 @@ describe('Codex GUI-first backend selection', () => {
       discussionId: 'dsc_auto_cli',
     });
     expect(response.content).toBe('initial codex response');
+  });
+
+  it('falls back to codex exec after an App Server runtime failure', async () => {
+    const connector = new CodexAutoConnector({
+      candidates: [{
+        command: process.execPath,
+        source: 'desktop',
+        label: 'runtime failure fixture',
+        mode: 'auto',
+        args: [runtimeFailureFixture],
+      }],
+      timeoutMs: 5_000,
+    });
+
+    const response = await connector.sendAndWait({
+      projectPath: process.cwd(),
+      prompt: 'fallback',
+      discussionId: 'dsc_auto_runtime_fallback',
+    });
+
+    expect(response.content).toBe('cli fallback response');
+    expect(response.backendSwitched).toMatchObject({ from: 'app-server', to: 'cli' });
   });
 });
 

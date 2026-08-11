@@ -13,7 +13,7 @@ import type {
   AgentSession,
   SessionStatus,
 } from '@agentbridge/protocol';
-import { canTransition, resolveProjectPath } from '@agentbridge/protocol';
+import { canTransition, resolveProjectPath, SessionBusyError } from '@agentbridge/protocol';
 
 export type { StoragePort } from './port.js';
 export {
@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS discussions (
   driver TEXT NOT NULL,
   peer TEXT,
   current_turn INTEGER NOT NULL DEFAULT 0,
+  round_count INTEGER NOT NULL DEFAULT 0,
   max_turns INTEGER NOT NULL DEFAULT 6,
   retry_count INTEGER NOT NULL DEFAULT 0,
   max_retries INTEGER NOT NULL DEFAULT 2,
@@ -180,6 +181,7 @@ export class Storage {
     this.ensureColumn('discussions', 'peer', 'ALTER TABLE discussions ADD COLUMN peer TEXT');
     this.ensureColumn('discussions', 'retry_count', 'ALTER TABLE discussions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('discussions', 'max_retries', 'ALTER TABLE discussions ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 2');
+    this.ensureColumn('discussions', 'round_count', 'ALTER TABLE discussions ADD COLUMN round_count INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('messages', 'provider_session_id', 'ALTER TABLE messages ADD COLUMN provider_session_id TEXT');
   }
 
@@ -235,8 +237,8 @@ export class Storage {
 
     this.db
       .prepare(
-        `INSERT INTO discussions (id, topic, status, driver, peer, current_turn, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id)
-         VALUES (?, ?, 'CREATED', ?, ?, 0, ?, 0, ?, ?, ?, ?, ?)`,
+        `INSERT INTO discussions (id, topic, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id)
+         VALUES (?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?)`,
       )
       .run(id, data.topic, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId);
 
@@ -267,6 +269,15 @@ export class Storage {
       .join(', ');
     const values = [...Object.values(fields), id];
     this.db.prepare(`UPDATE discussions SET ${setClauses} WHERE id = ?`).run(...values);
+  }
+
+  incrementDiscussionRound(id: string): Discussion {
+    const current = this.getDiscussion(id);
+    if (!current) throw new Error(`Discussion ${id} not found`);
+    this.db
+      .prepare('UPDATE discussions SET round_count = round_count + 1, updated_at = ? WHERE id = ?')
+      .run(new Date().toISOString(), id);
+    return this.getDiscussion(id)!;
   }
 
   incrementRetry(id: string): Discussion {
@@ -519,7 +530,7 @@ export class Storage {
       });
     } catch (error) {
       if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
-        throw new Error(`Session for ${data.provider} is already leased for project ${data.projectPath}`);
+        throw new SessionBusyError(`Session for ${data.provider} is already leased for project ${data.projectPath}`);
       }
       throw error;
     }
@@ -529,6 +540,22 @@ export class Storage {
     this.db
       .prepare('DELETE FROM session_leases WHERE provider = ? AND project_path = ? AND owner_id = ?')
       .run(provider, projectPath, ownerId);
+  }
+
+  hasSessionLease(provider: AgentType, projectPath: string, ownerId?: string): boolean {
+    const now = new Date().toISOString();
+    const row = ownerId
+      ? this.db.prepare(
+        `SELECT 1 FROM session_leases
+         WHERE provider = ? AND project_path = ? AND owner_id = ? AND expires_at > ?
+         LIMIT 1`,
+      ).get(provider, projectPath, ownerId, now)
+      : this.db.prepare(
+        `SELECT 1 FROM session_leases
+         WHERE provider = ? AND project_path = ? AND expires_at > ?
+         LIMIT 1`,
+      ).get(provider, projectPath, now);
+    return Boolean(row);
   }
 
   recoverExpiredSessionLeases(now = new Date()): number {
@@ -606,7 +633,25 @@ export class Storage {
       const session = rowToAgentSession(legacyRow);
       if (session.metadata.discussionId === discussionId) return session;
     }
-    return null;
+    return legacyRows.length > 0 ? rowToAgentSession(legacyRows[0]) : null;
+  }
+
+  pruneSessions(maxAgeMs = 30 * 24 * 60 * 60 * 1_000): number {
+    if (!Number.isInteger(maxAgeMs) || maxAgeMs < 1_000 || maxAgeMs > 365 * 24 * 60 * 60 * 1_000) {
+      throw new Error('maxAgeMs must be an integer between 1000 and 31536000000');
+    }
+    const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+    const result = this.db.prepare(
+      `DELETE FROM agent_sessions
+       WHERE last_seen_at < ?
+         AND NOT EXISTS (
+           SELECT 1 FROM agent_sessions newer
+           WHERE newer.provider = agent_sessions.provider
+             AND newer.project_path = agent_sessions.project_path
+             AND newer.last_seen_at > agent_sessions.last_seen_at
+         )`,
+    ).run(cutoff);
+    return result.changes;
   }
 
   listSessions(projectPath?: string): AgentSession[] {
@@ -670,6 +715,7 @@ function rowToDiscussion(row: Record<string, unknown>): Discussion {
     driver,
     peer: (row.peer as AgentType | null) ?? (driver === 'claude' ? 'codex' : 'claude'),
     currentTurn: row.current_turn as number,
+    roundCount: Number(row.round_count ?? 0),
     maxTurns: row.max_turns as number,
     retryCount: Number(row.retry_count ?? 0),
     maxRetries: Number(row.max_retries ?? 2),

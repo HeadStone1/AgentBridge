@@ -1,4 +1,5 @@
 import type { Message } from '@agentbridge/protocol';
+import { isProviderError } from '@agentbridge/protocol';
 import type { AgentConnector, PeerResponse, ProviderSessionKind } from './index.js';
 import { CodexAppServerConnector } from './codexAppServer.js';
 import { CodexConnector, type CodexConnectorOptions } from './codex.js';
@@ -12,10 +13,13 @@ export interface CodexAutoConnectorOptions {
   mode?: CodexBackendMode;
   candidates?: CodexCommandCandidate[];
   timeoutMs?: number;
+  startupTimeoutMs?: number;
   model?: string;
   sandbox?: CodexConnectorOptions['sandbox'];
   appServerArgs?: string[];
   cliExtraArgs?: string[];
+  selectionTtlMs?: number;
+  failedSelectionTtlMs?: number;
 }
 
 export interface CodexBackendSelection {
@@ -37,6 +41,7 @@ export class CodexAutoConnector implements AgentConnector {
   private readonly candidates: CodexCommandCandidate[];
   private readonly options: CodexAutoConnectorOptions;
   private selection?: Promise<SelectedBackend | undefined>;
+  private selectionExpiresAt = 0;
 
   constructor(options: CodexAutoConnectorOptions = {}) {
     this.mode = options.mode ?? readMode(process.env.AGENTBRIDGE_CODEX_MODE);
@@ -64,6 +69,7 @@ export class CodexAutoConnector implements AgentConnector {
     previousMessages?: Message[];
     providerSessionId?: string;
     providerSessionKind?: ProviderSessionKind;
+    signal?: AbortSignal;
   }): Promise<PeerResponse> {
     const selected = await this.selectBackend();
     if (!selected) {
@@ -73,7 +79,23 @@ export class CodexAutoConnector implements AgentConnector {
         + 'Install Codex Desktop/CLI or set AGENTBRIDGE_CODEX_APP_COMMAND.',
       );
     }
-    return selected.connector.sendAndWait(context);
+    try {
+      return await selected.connector.sendAndWait(context);
+    } catch (cause) {
+      if (selected.info.mode !== 'app-server' || this.mode !== 'auto' || !shouldFallback(cause)) throw cause;
+      this.invalidateSelection();
+      const fallback = await this.selectBackend(true, 'cli');
+      if (!fallback) throw cause;
+      const response = await fallback.connector.sendAndWait(context);
+      return {
+        ...response,
+        backendSwitched: {
+          from: 'app-server',
+          to: 'cli',
+          reason: cause instanceof Error ? cause.message : String(cause),
+        },
+      };
+    }
   }
 
   async cancel(discussionId: string): Promise<void> {
@@ -89,19 +111,34 @@ export class CodexAutoConnector implements AgentConnector {
     return this.candidates;
   }
 
-  private selectBackend(): Promise<SelectedBackend | undefined> {
-    this.selection ??= this.findBackend();
+  private selectBackend(force = false, only?: 'cli'): Promise<SelectedBackend | undefined> {
+    if (force || !this.selection || Date.now() >= this.selectionExpiresAt) {
+      const selection = this.findBackend(only);
+      this.selection = selection.then((selected) => {
+        this.selectionExpiresAt = Date.now() + (selected
+          ? this.options.selectionTtlMs ?? 10 * 60 * 1_000
+          : this.options.failedSelectionTtlMs ?? 5_000);
+        return selected;
+      });
+    }
     return this.selection;
   }
 
-  private async findBackend(): Promise<SelectedBackend | undefined> {
-    if (this.mode !== 'cli') {
+  private invalidateSelection(): void {
+    this.selection = undefined;
+    this.selectionExpiresAt = 0;
+  }
+
+  private async findBackend(only?: 'cli'): Promise<SelectedBackend | undefined> {
+    if (this.mode !== 'cli' && only !== 'cli') {
       for (const candidate of this.candidates) {
         if (candidate.mode === 'cli') continue;
         const connector = new CodexAppServerConnector({
           command: candidate.command,
           serverArgs: [...(candidate.args ?? []), ...(this.options.appServerArgs ?? [])],
           timeoutMs: this.options.timeoutMs,
+          startupTimeoutMs: this.options.startupTimeoutMs,
+          model: this.options.model,
         });
         if (await connector.isAvailable()) {
           return { connector, info: backendInfo(candidate, 'app-server') };
@@ -140,4 +177,8 @@ function readMode(value: string | undefined): CodexBackendMode {
   if (!value?.trim()) return 'auto';
   if (value === 'auto' || value === 'app-server' || value === 'cli') return value;
   throw new Error('AGENTBRIDGE_CODEX_MODE must be auto, app-server, or cli');
+}
+
+function shouldFallback(error: unknown): boolean {
+  return !(isProviderError(error) && ['AUTH', 'RATE_LIMIT', 'CANCELLED'].includes(error.code));
 }

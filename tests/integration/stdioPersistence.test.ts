@@ -69,6 +69,7 @@ function startMcp(agent: 'claude' | 'codex', dbPath: string, exitAfterToolCalls:
       AGENTBRIDGE_DB_PATH: dbPath,
       AGENTBRIDGE_CLAUDE_COMMAND: '__agentbridge_missing_claude__',
       AGENTBRIDGE_CODEX_COMMAND: '__agentbridge_missing_codex__',
+      AGENTBRIDGE_ASYNC_DISPATCH: '0',
       AGENTBRIDGE_TEST_EXIT_AFTER_TOOL_CALLS: String(exitAfterToolCalls),
       AGENTBRIDGE_TEST_MAX_LIFETIME_MS: '12000',
     },

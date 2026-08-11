@@ -2,16 +2,13 @@ import { createInterface } from 'node:readline';
 
 const args = process.argv.slice(2);
 if (args.includes('--help')) {
-  console.log('codex app-server test fixture');
+  console.log('codex app-server failure fixture');
   process.exit(0);
 }
-if (process.env.AGENTBRIDGE_PEER_INVOCATION !== '1') {
-  console.error('missing AGENTBRIDGE_PEER_INVOCATION');
-  process.exit(3);
-}
 
-const threadId = 'thread_fake_app_server';
-let turnNumber = 0;
+console.error('simulated provider diagnostic');
+
+const threadId = 'thread_fake_failure';
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
 
 for await (const line of input) {
@@ -23,18 +20,13 @@ for await (const line of input) {
   } else if (request.method === 'thread/start' || request.method === 'thread/resume') {
     write(request.id, { thread: { id: threadId } });
   } else if (request.method === 'turn/start') {
-    turnNumber += 1;
-    const turnId = `turn_fake_${turnNumber}`;
-    write(request.id, { turn: { id: turnId } });
-    notify('item/agentMessage/delta', { threadId, turnId, delta: `app response ${turnNumber}` });
-    notify('item/completed', {
+    write(request.id, { turn: { id: 'turn_fake_failure' } });
+    notify('turn/completed', {
       threadId,
-      turnId,
-      item: { type: 'agentMessage', text: `app response ${turnNumber}` },
+      turnId: 'turn_fake_failure',
+      status: 'failed',
+      message: 'simulated App Server turn failure',
     });
-    notify('turn/completed', { threadId, turnId, turn: { id: turnId, status: 'completed' } });
-  } else if (request.method === 'turn/interrupt') {
-    write(request.id, {});
   } else {
     write(request.id, {});
   }

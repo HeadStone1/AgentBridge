@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { canTransition, getNextStatus, isTerminal, isError } from '../../packages/protocol/src/stateMachine';
+import { canRetry, canTransition, getNextStatus, isError, isPaused, isTerminal } from '../../packages/protocol/src/stateMachine';
 import type { DiscussionStatus } from '../../packages/protocol/src/index';
 
 describe('State Machine', () => {
@@ -53,9 +53,9 @@ describe('State Machine', () => {
   });
 
   describe('isTerminal', () => {
-    it('COMPLETED/FAILED/CANCELLED are terminal', () => {
+    it('only COMPLETED/CANCELLED are terminal', () => {
       expect(isTerminal('COMPLETED')).toBe(true);
-      expect(isTerminal('FAILED')).toBe(true);
+      expect(isTerminal('FAILED')).toBe(false);
       expect(isTerminal('CANCELLED')).toBe(true);
     });
 
@@ -75,6 +75,17 @@ describe('State Machine', () => {
     it('DISCUSSING/AGREED are not error states', () => {
       expect(isError('DISCUSSING')).toBe(false);
       expect(isError('AGREED')).toBe(false);
+    });
+  });
+
+  describe('paused/retry states', () => {
+    it('requires the retry API for paused states', () => {
+      expect(isPaused('TIMEOUT')).toBe(true);
+      expect(isPaused('PEER_BUSY')).toBe(true);
+      expect(isPaused('FAILED')).toBe(true);
+      expect(canRetry('TIMEOUT')).toBe(true);
+      expect(canRetry('CANCELLED')).toBe(false);
+      expect(canTransition('CANCELLED', 'CREATED')).toBe(false);
     });
   });
 });

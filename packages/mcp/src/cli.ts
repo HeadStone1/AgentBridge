@@ -42,6 +42,11 @@ async function createRuntime(projectPath: string): Promise<MCPRuntime> {
   activeStorage = storage;
   const audit = new AuditService(storage);
   storage.recoverExpiredSessionLeases();
+  storage.pruneSessions(readBoundedInteger('AGENTBRIDGE_SESSION_PRUNE_MAX_AGE_MS', 30 * 24 * 60 * 60 * 1_000, 1_000, 365 * 24 * 60 * 60 * 1_000));
+  const timeoutMs = readBoundedInteger('AGENTBRIDGE_TIMEOUT_MS', 120_000, 1_000, 600_000);
+  const startupTimeoutMs = readBoundedInteger('AGENTBRIDGE_STARTUP_TIMEOUT_MS', 15_000, 1_000, 600_000);
+  const maxDurationMs = readBoundedInteger('AGENTBRIDGE_MAX_DURATION_MS', 30 * 60 * 1_000, 1_000, 7 * 24 * 60 * 60 * 1_000);
+  const maxTurns = readBoundedInteger('AGENTBRIDGE_MAX_TURNS', 6, 1, 50);
   const recoveryAgeMs = Number.parseInt(process.env.AGENTBRIDGE_RECOVERY_MAX_AGE_MS ?? '', 10);
   const recovered = storage.recoverStaleDiscussions(
     Number.isInteger(recoveryAgeMs) && recoveryAgeMs > 0 ? recoveryAgeMs : undefined,
@@ -58,13 +63,40 @@ async function createRuntime(projectPath: string): Promise<MCPRuntime> {
   const collaboration = new CollaborationService(
     storage,
     audit,
-    {},
     {
-      claude: new ClaudeConnector({ command: process.env.AGENTBRIDGE_CLAUDE_COMMAND }),
-      codex: new CodexAutoConnector({ model: process.env.AGENTBRIDGE_CODEX_MODEL }),
+      maxTurns,
+      timeoutMs,
+      maxDurationMs,
+      asyncDispatch: readBoolean('AGENTBRIDGE_ASYNC_DISPATCH', true),
+    },
+    {
+      claude: new ClaudeConnector({ command: process.env.AGENTBRIDGE_CLAUDE_COMMAND, timeoutMs }),
+      codex: new CodexAutoConnector({
+        model: process.env.AGENTBRIDGE_CODEX_MODEL,
+        timeoutMs,
+        startupTimeoutMs,
+      }),
     },
   );
   return { storage, collaboration, projectPath };
+}
+
+function readBoundedInteger(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name];
+  if (!raw?.trim()) return fallback;
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return value;
+}
+
+function readBoolean(name: string, fallback: boolean): boolean {
+  const raw = process.env[name]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
+  if (['0', 'false', 'no', 'off'].includes(raw)) return false;
+  throw new Error(`${name} must be a boolean value`);
 }
 
 async function detectProjectPath(requestedProjectPath: string | undefined, server: Server): Promise<string> {

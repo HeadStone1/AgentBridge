@@ -4,6 +4,8 @@ import { resolve } from 'node:path';
 import { CodexAppServerConnector } from '../../packages/connectors/src/codexAppServer';
 
 const fixture = resolve(fileURLToPath(new URL('../fixtures/fake-codex-app-server.mjs', import.meta.url)));
+const failureFixture = resolve(fileURLToPath(new URL('../fixtures/fake-codex-app-server-failure.mjs', import.meta.url)));
+const missingStatusFixture = resolve(fileURLToPath(new URL('../fixtures/fake-codex-app-server-missing-status.mjs', import.meta.url)));
 
 describe('CodexAppServerConnector', () => {
   it('starts one App Server and resumes its thread', async () => {
@@ -34,5 +36,38 @@ describe('CodexAppServerConnector', () => {
     } finally {
       await connector.cancel?.();
     }
+  });
+
+  it('rejects a completed turn whose provider status is failed', async () => {
+    const connector = new CodexAppServerConnector({
+      command: process.execPath,
+      serverArgs: [failureFixture],
+      timeoutMs: 5_000,
+    });
+
+    await expect(connector.sendAndWait({
+      projectPath: process.cwd(),
+      prompt: 'fail',
+      discussionId: 'dsc_app_server_failure',
+    })).rejects.toMatchObject({
+      code: 'FAILED',
+      message: expect.stringContaining('simulated provider diagnostic'),
+    });
+    await connector.cancel?.();
+  });
+
+  it('rejects a completed turn without an explicit provider status', async () => {
+    const connector = new CodexAppServerConnector({
+      command: process.execPath,
+      serverArgs: [missingStatusFixture],
+      timeoutMs: 5_000,
+    });
+
+    await expect(connector.sendAndWait({
+      projectPath: process.cwd(),
+      prompt: 'missing status',
+      discussionId: 'dsc_app_server_missing_status',
+    })).rejects.toMatchObject({ code: 'PROTOCOL' });
+    await connector.cancel?.();
   });
 });

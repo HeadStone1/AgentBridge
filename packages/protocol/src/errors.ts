@@ -1,0 +1,33 @@
+export type ProviderErrorCode =
+  | 'UNAVAILABLE'
+  | 'BUSY'
+  | 'TIMEOUT'
+  | 'PROTOCOL'
+  | 'SESSION_LOST'
+  | 'CANCELLED'
+  | 'AUTH'
+  | 'RATE_LIMIT'
+  | 'FAILED';
+
+export class ProviderError extends Error {
+  readonly code: ProviderErrorCode;
+  readonly retryable: boolean;
+
+  constructor(code: ProviderErrorCode, message: string, options: { retryable?: boolean; cause?: unknown } = {}) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.name = 'ProviderError';
+    this.code = code;
+    this.retryable = options.retryable ?? (code !== 'AUTH' && code !== 'RATE_LIMIT' && code !== 'CANCELLED');
+  }
+}
+
+export class SessionBusyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SessionBusyError';
+  }
+}
+
+export function isProviderError(value: unknown): value is ProviderError {
+  return value instanceof ProviderError;
+}
