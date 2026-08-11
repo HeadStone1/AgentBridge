@@ -94,6 +94,29 @@ describe('Storage', () => {
       expect(updated!.status).toBe('DISCUSSING');
     });
 
+    it('persists provider dispatch lifecycle independently from discussion status', () => {
+      const d = storage.createDiscussion({
+        topic: 'Dispatch state',
+        driver: 'claude',
+        peer: 'codex',
+        traceId: 'tr_dispatch_state',
+      });
+
+      expect(d.dispatchState).toBeNull();
+      expect(d.waitingFor).toBeNull();
+      storage.updateDiscussionDispatch(d.id, 'QUEUED', 'codex');
+      expect(storage.getDiscussion(d.id)).toMatchObject({
+        dispatchState: 'QUEUED',
+        waitingFor: 'codex',
+      });
+      storage.updateDiscussionDispatch(d.id, 'RUNNING', 'codex');
+      storage.updateDiscussionDispatch(d.id, 'COMPLETED', null);
+      expect(storage.getDiscussion(d.id)).toMatchObject({
+        dispatchState: 'COMPLETED',
+        waitingFor: null,
+      });
+    });
+
     it('lists discussions by project path', () => {
       storage.createDiscussion({ topic: 'A', driver: 'claude', traceId: 'tr1', projectPath: '/project' });
       storage.createDiscussion({ topic: 'B', driver: 'claude', traceId: 'tr2', projectPath: '/project' });
@@ -347,7 +370,7 @@ describe('Storage', () => {
       expect(storage.getSession('claude', 'claude-session-1')).toBeNull();
     });
 
-    it('reuses the latest project session across discussions', () => {
+    it('does not reuse an unbound project session across discussions', () => {
       storage.registerSession({
         provider: 'codex',
         sessionId: 'codex-project-session',
@@ -355,8 +378,20 @@ describe('Storage', () => {
         status: 'IDLE',
         metadata: { sessionKind: 'codex-cli', bridgeOwned: true },
       });
-      expect(storage.getSessionForDiscussion('codex', 'dsc_other_discussion', '/project')?.sessionId)
-        .toBe('codex-project-session');
+      expect(storage.getSessionForDiscussion('codex', 'dsc_other_discussion', '/project')).toBeNull();
+    });
+
+    it('reuses only a session explicitly bound to the current discussion', () => {
+      storage.registerSession({
+        provider: 'codex',
+        sessionId: 'codex-discussion-session',
+        projectPath: '/project',
+        status: 'IDLE',
+        metadata: { sessionKind: 'codex-cli', bridgeOwned: true, discussionId: 'dsc_current' },
+      });
+      expect(storage.getSessionForDiscussion('codex', 'dsc_current', '/project')?.sessionId)
+        .toBe('codex-discussion-session');
+      expect(storage.getSessionForDiscussion('codex', 'dsc_other', '/project')).toBeNull();
     });
 
     it('does not select an interactive or superseded session for a bridge dispatch', () => {

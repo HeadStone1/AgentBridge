@@ -5,6 +5,7 @@ import type {
   Decision,
   Discussion,
   DiscussionStatus,
+  DispatchState,
   Message,
   MessageRole,
   SessionStatus,
@@ -28,6 +29,7 @@ export interface StoragePort {
   }): Discussion;
   getDiscussion(id: string): Discussion | null;
   updateDiscussionStatus(id: string, status: DiscussionStatus, extra?: Partial<Discussion>): void;
+  updateDiscussionDispatch(id: string, state: DispatchState | null, waitingFor?: AgentType | null): void;
   incrementDiscussionRound(id: string): Discussion;
   incrementRetry(id: string): Discussion;
   createMessage(data: {

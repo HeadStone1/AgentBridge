@@ -65,6 +65,10 @@ export interface Discussion {
   conclusion: string | null;
   projectPath: string;
   traceId: string;
+  /** Persisted provider-dispatch lifecycle, independent from discussion status. */
+  dispatchState: DispatchState | null;
+  /** Agent expected to receive or act on the current dispatch, when applicable. */
+  waitingFor: AgentType | null;
 }
 
 export interface AgentSession {

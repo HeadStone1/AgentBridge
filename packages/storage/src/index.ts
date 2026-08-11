@@ -8,6 +8,7 @@ import type {
   Decision,
   AuditEvent,
   DiscussionStatus,
+  DispatchState,
   AgentType,
   MessageRole,
   AgentSession,
@@ -55,6 +56,8 @@ CREATE TABLE IF NOT EXISTS discussions (
   id TEXT PRIMARY KEY,
   topic TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'CREATED',
+  dispatch_state TEXT,
+  waiting_for TEXT,
   driver TEXT NOT NULL,
   peer TEXT,
   current_turn INTEGER NOT NULL DEFAULT 0,
@@ -188,6 +191,8 @@ export class Storage {
 
   private ensureSchemaCompatibility(): void {
     this.ensureColumn('discussions', 'peer', 'ALTER TABLE discussions ADD COLUMN peer TEXT');
+    this.ensureColumn('discussions', 'dispatch_state', 'ALTER TABLE discussions ADD COLUMN dispatch_state TEXT');
+    this.ensureColumn('discussions', 'waiting_for', 'ALTER TABLE discussions ADD COLUMN waiting_for TEXT');
     this.ensureColumn('discussions', 'retry_count', 'ALTER TABLE discussions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('discussions', 'max_retries', 'ALTER TABLE discussions ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 2');
     this.ensureColumn('discussions', 'round_count', 'ALTER TABLE discussions ADD COLUMN round_count INTEGER NOT NULL DEFAULT 0');
@@ -280,6 +285,13 @@ export class Storage {
     this.db.prepare(`UPDATE discussions SET ${setClauses} WHERE id = ?`).run(...values);
   }
 
+  updateDiscussionDispatch(id: string, state: DispatchState | null, waitingFor: AgentType | null = null): void {
+    if (!this.getDiscussion(id)) throw new Error(`Discussion ${id} not found`);
+    this.db
+      .prepare('UPDATE discussions SET dispatch_state = ?, waiting_for = ?, updated_at = ? WHERE id = ?')
+      .run(state, waitingFor, new Date().toISOString(), id);
+  }
+
   incrementDiscussionRound(id: string): Discussion {
     const current = this.getDiscussion(id);
     if (!current) throw new Error(`Discussion ${id} not found`);
@@ -331,7 +343,8 @@ export class Storage {
         this.db
           .prepare(
             `UPDATE discussions
-             SET status = 'NEEDS_USER_DECISION', ended_at = ?, updated_at = ?
+             SET status = 'NEEDS_USER_DECISION', dispatch_state = 'FAILED', waiting_for = NULL,
+                 ended_at = ?, updated_at = ?
              WHERE id = ? AND status IN ('CREATED', 'DISCUSSING', 'PEER_BUSY')`,
           )
           .run(now, now, row.id);
@@ -721,9 +734,7 @@ export class Storage {
       const session = rowToAgentSession(legacyRow);
       if (session.metadata.discussionId === discussionId && isReusableBridgeSession(session)) return session;
     }
-    return legacyRows
-      .map(rowToAgentSession)
-      .find(isReusableBridgeSession) ?? null;
+    return null;
   }
 
   pruneSessions(maxAgeMs = 30 * 24 * 60 * 60 * 1_000): number {
@@ -815,6 +826,8 @@ function rowToDiscussion(row: Record<string, unknown>): Discussion {
     conclusion: (row.conclusion as string | null) ?? null,
     projectPath: (row.project_path as string | undefined) ?? resolveProjectPath(),
     traceId: row.trace_id as string,
+    dispatchState: (row.dispatch_state as DispatchState | null) ?? null,
+    waitingFor: (row.waiting_for as AgentType | null) ?? null,
   };
 }
 
