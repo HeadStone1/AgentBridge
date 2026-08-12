@@ -1,12 +1,13 @@
+import { createRequire } from 'node:module';
 import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { posix, win32 } from 'node:path';
+import { dirname, join, posix, win32 } from 'node:path';
 
 export type CodexBackendMode = 'auto' | 'app-server' | 'cli';
 
 export interface CodexCommandCandidate {
   command: string;
-  source: 'environment' | 'desktop' | 'system';
+  source: 'environment' | 'bundled' | 'desktop' | 'system';
   label: string;
   mode: CodexBackendMode;
   /** Arguments placed before `app-server` or `exec` (primarily for wrappers/tests). */
@@ -19,6 +20,7 @@ export interface CodexDiscoveryOptions {
   homeDirectory?: string;
   pathExists?: (path: string) => boolean;
   readDirectory?: (path: string) => string[];
+  resolveBundledCodexEntrypoint?: () => string | undefined;
 }
 
 /**
@@ -43,6 +45,17 @@ export function discoverCodexCommands(options: CodexDiscoveryOptions = {}): Code
   // override still permits independent CLI discovery for safe fallback.
   if (candidates.some((candidate) => candidate.mode !== 'app-server')) {
     return deduplicate(candidates, platform === 'win32');
+  }
+
+  const bundledEntrypoint = (options.resolveBundledCodexEntrypoint ?? resolveBundledCodexEntrypoint)();
+  if (bundledEntrypoint) {
+    candidates.push({
+      command: process.execPath,
+      args: [bundledEntrypoint],
+      source: 'bundled',
+      label: 'AgentBridge bundled official Codex CLI',
+      mode: 'auto',
+    });
   }
 
   if (platform === 'win32') {
@@ -84,6 +97,17 @@ export function discoverCodexCommands(options: CodexDiscoveryOptions = {}): Code
 
   candidates.push({ command: platform === 'win32' ? 'codex.exe' : 'codex', source: 'system', label: 'PATH', mode: 'auto' });
   return deduplicate(candidates, platform === 'win32');
+}
+
+function resolveBundledCodexEntrypoint(): string | undefined {
+  try {
+    const require = createRequire(import.meta.url);
+    const packageJson = require.resolve('@openai/codex/package.json');
+    const entrypoint = join(dirname(packageJson), 'bin', 'codex.js');
+    return existsSync(entrypoint) ? entrypoint : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function compareVersionedExecutables(left: string, right: string): number {

@@ -29,11 +29,17 @@ const documentationFiles = [
   'LICENSE_HISTORY.md',
   'COMMERCIAL_LICENSE.md',
 ];
+const codexPlatformPackage = codexPlatformPackageName(targetPlatform, targetArch);
+const codexPackageRoot = join(root, 'node_modules', '@openai', 'codex');
+const codexPlatformPackageRoot = join(root, 'node_modules', '@openai', codexPlatformPackage);
 
 for (const required of [
   join(root, 'release', 'agentbridge-cli.mjs'),
   join(root, 'release', 'agentbridge-mcp.mjs'),
   ...documentationFiles.map((file) => join(root, file)),
+  join(codexPackageRoot, 'package.json'),
+  join(codexPackageRoot, 'bin', 'codex.js'),
+  join(codexPlatformPackageRoot, 'package.json'),
   runtime,
 ]) {
   if (!existsSync(required)) throw new Error(`Required release input not found: ${required}`);
@@ -53,6 +59,8 @@ for (const file of documentationFiles) {
 copyFileSync(join(root, 'scripts', 'install.ps1'), join(output, 'install.ps1'));
 copyFileSync(join(root, 'scripts', 'install.sh'), join(output, 'install.sh'));
 copyDirectory(join(root, 'skills'), join(output, 'skills'));
+copyDirectory(codexPackageRoot, join(output, 'app', 'node_modules', '@openai', 'codex'));
+copyDirectory(codexPlatformPackageRoot, join(output, 'app', 'node_modules', '@openai', codexPlatformPackage));
 
 if (targetPlatform === 'win32') {
   copyFileSync(runtime, join(output, 'runtime', 'node.exe'));
@@ -97,4 +105,19 @@ function copyDirectory(source, target) {
     if (entry.isDirectory()) copyDirectory(from, to);
     else if (entry.isFile()) copyFileSync(from, to);
   }
+}
+
+function codexPlatformPackageName(targetPlatform, targetArch) {
+  const key = `${targetPlatform}-${targetArch}`;
+  const names = {
+    'win32-x64': 'codex-win32-x64',
+    'win32-arm64': 'codex-win32-arm64',
+    'linux-x64': 'codex-linux-x64',
+    'linux-arm64': 'codex-linux-arm64',
+    'darwin-x64': 'codex-darwin-x64',
+    'darwin-arm64': 'codex-darwin-arm64',
+  };
+  const name = names[key];
+  if (!name) throw new Error(`Unsupported Codex release target: ${key}`);
+  return name;
 }

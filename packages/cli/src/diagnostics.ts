@@ -219,7 +219,7 @@ async function inspectProviders(options: DoctorOptions, env: NodeJS.ProcessEnv):
     const [claudeCli, codexSelection, codexAppDetected] = await Promise.all([
       safely(() => new ClaudeConnector({ command: env.AGENTBRIDGE_CLAUDE_COMMAND }).isAvailable(), false),
       safely(() => codexAuto.getSelection(), null),
-      isProcessRunning('codex'),
+      Promise.all([isProcessRunning('codex'), isProcessRunning('ChatGPT')]).then((values) => values.some(Boolean)),
     ]);
     const codexCli = codexSelection
       ? await safely(() => new CodexConnector({ command: codexSelection.command }).isAvailable(), false)

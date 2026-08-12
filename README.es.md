@@ -4,7 +4,9 @@
 
 AgentBridge es un puente MCP local que permite que Claude Code y OpenAI Codex se hagan preguntas, respondan, reintenten, alcancen acuerdos y guarden el estado de cada conversación en una base de datos SQLite dentro del proyecto.
 
-> Versión de desarrollo actual: v0.7.0. AgentBridge se registra globalmente una sola vez; cada sesión detecta el proyecto activo y guarda su base SQLite dentro de ese proyecto.
+> Versión de desarrollo actual: v0.7.1. AgentBridge se registra globalmente una sola vez; cada sesión detecta el proyecto activo y guarda su base SQLite dentro de ese proyecto.
+
+En Windows, el paquete MSIX unificado de ChatGPT Desktop no permite que procesos externos ejecuten su runtime privado de Codex. Por eso AgentBridge incluye la CLI oficial `@openai/codex` e inicia con ella un App Server stdio independiente; ejecuta `codex login` una vez con la misma cuenta de Windows si todavía no está autenticada.
 
 > Verificación actual del código fuente: pasan la comprobación UTF-8, la compilación TypeScript y las 102 pruebas de 18 archivos. Una sesión nativa del proveedor solo se reanuda cuando está vinculada explícitamente a la misma conversación; una conversación nueva no hereda sesiones ajenas ni sesiones históricas sin vínculo. Estas pruebas automáticas no sustituyen la validación con proveedores reales: solo declare comunicación bidireccional después de llamadas `ask_peer` correctas de Claude → Codex y Codex → Claude.
 
@@ -32,9 +34,9 @@ No mezcle comandos de Release, npm y código fuente. Los paquetes para usuarios 
 
 Descargue `SHA256SUMS.txt` y el paquete de su plataforma:
 
-- Windows x64: `AgentBridge-v0.7.0-win32-x64.zip`
-- Linux x64: `AgentBridge-v0.7.0-linux-x64.tar.gz`
-- macOS Apple Silicon: `AgentBridge-v0.7.0-darwin-arm64.tar.gz`
+- Windows x64: `AgentBridge-v0.7.1-win32-x64.zip`
+- Linux x64: `AgentBridge-v0.7.1-linux-x64.tar.gz`
+- macOS Apple Silicon: `AgentBridge-v0.7.1-darwin-arm64.tar.gz`
 
 Linux ARM64 y macOS Intel requieren actualmente npm o instalación desde el código fuente.
 

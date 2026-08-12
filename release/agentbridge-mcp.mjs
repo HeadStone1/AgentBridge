@@ -6913,7 +6913,7 @@ var require_dist = __commonJS({
 // packages/mcp/dist/cli.js
 import { existsSync as existsSync3, statSync as statSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname3, join as join3, parse as parse4, resolve as resolve3 } from "node:path";
+import { dirname as dirname4, join as join4, parse as parse4, resolve as resolve3 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // packages/audit/dist/index.js
@@ -8928,9 +8928,10 @@ function withStderr(error3, stderrTail, ambiguous = false) {
 }
 
 // packages/connectors/dist/codexDiscovery.js
+import { createRequire } from "node:module";
 import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { posix, win32 } from "node:path";
+import { dirname, join, posix, win32 } from "node:path";
 function discoverCodexCommands(options = {}) {
   const platform = options.platform ?? process.platform;
   const env = options.env ?? process.env;
@@ -8944,6 +8945,16 @@ function discoverCodexCommands(options = {}) {
   addEnvironmentCandidate(candidates, env.CODEX_CLI_PATH, "CODEX_CLI_PATH", "auto");
   if (candidates.some((candidate) => candidate.mode !== "app-server")) {
     return deduplicate(candidates, platform === "win32");
+  }
+  const bundledEntrypoint = (options.resolveBundledCodexEntrypoint ?? resolveBundledCodexEntrypoint)();
+  if (bundledEntrypoint) {
+    candidates.push({
+      command: process.execPath,
+      args: [bundledEntrypoint],
+      source: "bundled",
+      label: "AgentBridge bundled official Codex CLI",
+      mode: "auto"
+    });
   }
   if (platform === "win32") {
     const localAppData = env.LOCALAPPDATA;
@@ -8970,6 +8981,16 @@ function discoverCodexCommands(options = {}) {
   }
   candidates.push({ command: platform === "win32" ? "codex.exe" : "codex", source: "system", label: "PATH", mode: "auto" });
   return deduplicate(candidates, platform === "win32");
+}
+function resolveBundledCodexEntrypoint() {
+  try {
+    const require3 = createRequire(import.meta.url);
+    const packageJson = require3.resolve("@openai/codex/package.json");
+    const entrypoint = join(dirname(packageJson), "bin", "codex.js");
+    return existsSync(entrypoint) ? entrypoint : void 0;
+  } catch {
+    return void 0;
+  }
 }
 function compareVersionedExecutables(left, right) {
   const parts = (value) => (value.match(/\d+(?:\.\d+)*/)?.[0] ?? "0").split(".").map(Number);
@@ -9159,25 +9180,25 @@ function withBackend(error3, backend) {
 
 // packages/storage/dist/index.js
 import { createHash, randomUUID as randomUUID4 } from "crypto";
-import { dirname as dirname2, join as join2 } from "path";
+import { dirname as dirname3, join as join3 } from "path";
 import { mkdirSync as mkdirSync2 } from "fs";
-import { createRequire } from "node:module";
+import { createRequire as createRequire2 } from "node:module";
 
 // packages/storage/dist/registry.js
 import { closeSync, copyFileSync, existsSync as existsSync2, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { homedir as homedir2 } from "node:os";
-import { basename, dirname, join, resolve as resolve2 } from "node:path";
+import { basename, dirname as dirname2, join as join2, resolve as resolve2 } from "node:path";
 import process2 from "node:process";
 var LOCK_RETRY_MS = 20;
 var LOCK_TIMEOUT_MS = 5e3;
 var LOCK_STALE_MS = 3e4;
 var WAIT_BUFFER = new Int32Array(new SharedArrayBuffer(4));
 function registryRoot(env = process2.env) {
-  return resolve2(env.AGENTBRIDGE_INSTALL_ROOT ?? join(homedir2(), ".agentbridge"));
+  return resolve2(env.AGENTBRIDGE_INSTALL_ROOT ?? join2(homedir2(), ".agentbridge"));
 }
 function registryPath(env = process2.env) {
-  return join(registryRoot(env), "projects.json");
+  return join2(registryRoot(env), "projects.json");
 }
 function readProjectRegistry(env = process2.env) {
   const path = registryPath(env);
@@ -9212,8 +9233,8 @@ function ensureProjectMetadata(projectPathValue) {
   if (!existsSync2(projectPath) || !statSync(projectPath).isDirectory()) {
     throw new Error(`Project directory does not exist: ${projectPath}`);
   }
-  const stateDir = join(projectPath, ".agentbridge");
-  const projectFile = join(stateDir, "project.json");
+  const stateDir = join2(projectPath, ".agentbridge");
+  const projectFile = join2(stateDir, "project.json");
   mkdirSync(stateDir, { recursive: true });
   if (!existsSync2(projectFile)) {
     const value = {
@@ -9234,7 +9255,7 @@ function ensureProjectMetadata(projectPathValue) {
 }
 function writeRegistry(projects, env) {
   const path = registryPath(env);
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname2(path), { recursive: true });
   if (existsSync2(path))
     copyFileSync(path, `${path}.bak`);
   const tempPath = `${path}.tmp-${process2.pid}-${randomUUID3()}`;
@@ -9252,7 +9273,7 @@ function isRegisteredProject(value) {
 function withRegistryLock(env, action) {
   const path = registryPath(env);
   const lockPath = `${path}.lock`;
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname2(path), { recursive: true });
   const started = Date.now();
   let descriptor;
   while (descriptor === void 0) {
@@ -9292,7 +9313,7 @@ var MAX_TEXT_LENGTH = 1e5;
 var SQLITE_STARTUP_TIMEOUT_MS = 5e3;
 var SQLITE_RETRY_DELAY_MS = 25;
 var SQLITE_RETRY_BUFFER = new Int32Array(new SharedArrayBuffer(4));
-var require2 = createRequire(import.meta.url);
+var require2 = createRequire2(import.meta.url);
 var { DatabaseSync } = require2("node:sqlite");
 var SCHEMA = `
 CREATE TABLE IF NOT EXISTS discussions (
@@ -9407,9 +9428,9 @@ CREATE INDEX IF NOT EXISTS idx_discussions_project_path ON discussions(project_p
 `;
 var Storage = class {
   db;
-  constructor(dbPath = process.env.AGENTBRIDGE_DB_PATH ?? join2(resolveProjectPath(), ".agentbridge", "agentbridge.sqlite")) {
+  constructor(dbPath = process.env.AGENTBRIDGE_DB_PATH ?? join3(resolveProjectPath(), ".agentbridge", "agentbridge.sqlite")) {
     if (dbPath !== ":memory:" && !dbPath.startsWith("file:")) {
-      mkdirSync2(dirname2(dbPath), { recursive: true });
+      mkdirSync2(dirname3(dbPath), { recursive: true });
     }
     this.db = new DatabaseSync(dbPath);
     try {
@@ -21390,11 +21411,11 @@ async function createRuntime(projectPath) {
   ensureProjectMetadata(projectPath);
   registerProject({
     projectPath,
-    claudeConfig: process.env.AGENTBRIDGE_CLAUDE_CONFIG ?? join3(homedir3(), ".claude.json"),
-    codexConfig: process.env.AGENTBRIDGE_CODEX_CONFIG ?? join3(homedir3(), ".codex", "config.toml"),
+    claudeConfig: process.env.AGENTBRIDGE_CLAUDE_CONFIG ?? join4(homedir3(), ".claude.json"),
+    codexConfig: process.env.AGENTBRIDGE_CODEX_CONFIG ?? join4(homedir3(), ".codex", "config.toml"),
     scope: "global"
   });
-  const storage = new Storage(process.env.AGENTBRIDGE_DB_PATH ?? join3(projectPath, ".agentbridge", "agentbridge.sqlite"));
+  const storage = new Storage(process.env.AGENTBRIDGE_DB_PATH ?? join4(projectPath, ".agentbridge", "agentbridge.sqlite"));
   activeStorage = storage;
   const audit = new AuditService(storage);
   storage.recoverExpiredSessionLeases();
@@ -21497,7 +21518,7 @@ function validateProjectPath(value) {
 }
 function isUnsafeImplicitPath(path) {
   const roots = [parse4(path).root, homedir3(), process.env.AGENTBRIDGE_INSTALL_ROOT].filter((value) => Boolean(value)).map((value) => resolve3(value));
-  return roots.some((value) => samePath2(value, path)) || samePath2(dirname3(process.execPath), path);
+  return roots.some((value) => samePath2(value, path)) || samePath2(dirname4(process.execPath), path);
 }
 function samePath2(left, right) {
   const a = resolve3(left);

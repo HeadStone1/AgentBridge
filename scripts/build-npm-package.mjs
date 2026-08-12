@@ -52,6 +52,7 @@ const packageJson = {
   homepage: 'https://github.com/HeadStone1/AgentBridge#readme',
   bugs: { url: 'https://github.com/HeadStone1/AgentBridge/issues' },
   keywords: ['mcp', 'claude', 'codex', 'agent', 'collaboration'],
+  dependencies: { '@openai/codex': sourcePackage.dependencies['@openai/codex'] },
   publishConfig: { access: 'public' },
 };
 

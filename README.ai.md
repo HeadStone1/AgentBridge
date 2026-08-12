@@ -4,7 +4,9 @@
 
 This document is written for an AI coding agent that has been asked to deploy, upgrade, diagnose, or remove AgentBridge on a user's machine. Preserve the user's data and existing MCP configuration. Do not report success until the verification gates below pass.
 
-> Current v0.7.0 source verification must include the UTF-8 check, TypeScript build, complete test suite, and package smoke tests before release.
+> Current v0.7.1 source verification must include the UTF-8 check, TypeScript build, complete test suite, and package smoke tests before release.
+
+Windows note: the unified ChatGPT Desktop MSIX runtime is private to the package. AgentBridge distributions include the official `@openai/codex` CLI and launch its independent stdio App Server instead of attempting to attach to the GUI daemon.
 
 ## Mission and invariants
 
