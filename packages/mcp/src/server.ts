@@ -48,6 +48,7 @@ function buildTools(agentType: AgentType): Tool[] {
           message: { type: 'string', description: 'Proposal or question for the peer' },
           projectPath: { type: 'string', description: 'Project path; defaults to the current working directory' },
           maxTurns: { type: 'integer', minimum: 1, maximum: 50, description: 'Maximum successful provider responses (default: 12)' },
+          sessionPolicy: { type: 'string', enum: ['auto', 'reuse', 'fresh'], description: 'Provider session policy (default: auto)' },
         },
         required: ['peer', 'message'],
       },
@@ -158,6 +159,7 @@ function createServer(resolveRuntime: MCPRuntimeResolver, options: MCPServerOpti
       message: text,
       projectPath: z.string().trim().min(1).max(4096).optional(),
       maxTurns: z.number().int().min(1).max(50).optional(),
+      sessionPolicy: z.enum(['auto', 'reuse', 'fresh']).optional(),
     }),
     reply: z.object({ discussionId: id, message: text }),
     get: z.object({ discussionId: id }),
@@ -204,6 +206,7 @@ function createServer(resolveRuntime: MCPRuntimeResolver, options: MCPServerOpti
             projectPath: runtime.projectPath ?? input.projectPath,
             traceId: `tr_${randomUUID()}`,
             maxTurns: input.maxTurns,
+            sessionPolicy: input.sessionPolicy,
           });
           return ok(result);
         }

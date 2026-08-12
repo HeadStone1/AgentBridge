@@ -2,6 +2,7 @@
 
 // packages/cli/dist/index.js
 import { existsSync as existsSync8, readFileSync as readFileSync6, rmSync as rmSync5 } from "node:fs";
+import { spawn as spawn6 } from "node:child_process";
 import { join as join9, parse as parse2, resolve as resolve8 } from "node:path";
 import { homedir as homedir7 } from "node:os";
 import process7 from "node:process";
@@ -318,7 +319,8 @@ CREATE TABLE IF NOT EXISTS discussions (
   ended_at TEXT,
   conclusion TEXT,
   project_path TEXT,
-  trace_id TEXT NOT NULL
+  trace_id TEXT NOT NULL,
+  collaboration_session_id TEXT
   ,stop_reason TEXT
   ,last_error TEXT
 );
@@ -390,6 +392,20 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
   PRIMARY KEY (provider, session_id)
 );
 
+CREATE TABLE IF NOT EXISTS collaboration_sessions (
+  id TEXT PRIMARY KEY,
+  project_path TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  policy TEXT NOT NULL DEFAULT 'auto',
+  claude_session_id TEXT,
+  codex_session_id TEXT,
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_collaboration_sessions_active_project
+  ON collaboration_sessions(project_path) WHERE status = 'ACTIVE' AND policy <> 'fresh';
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_discussion_hash
   ON decisions(discussion_id, decision_hash);
 
@@ -442,6 +458,7 @@ var Storage = class {
     this.ensureColumn("discussions", "round_count", "ALTER TABLE discussions ADD COLUMN round_count INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("discussions", "stop_reason", "ALTER TABLE discussions ADD COLUMN stop_reason TEXT");
     this.ensureColumn("discussions", "last_error", "ALTER TABLE discussions ADD COLUMN last_error TEXT");
+    this.ensureColumn("discussions", "collaboration_session_id", "ALTER TABLE discussions ADD COLUMN collaboration_session_id TEXT");
     this.ensureColumn("messages", "provider_session_id", "ALTER TABLE messages ADD COLUMN provider_session_id TEXT");
   }
   ensureColumn(table, columnName, alterSql) {
@@ -482,9 +499,67 @@ var Storage = class {
     assertText(data.traceId, "traceId");
     assertTurns(maxTurns);
     assertRetries(maxRetries);
-    this.db.prepare(`INSERT INTO discussions (id, topic, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id)
-         VALUES (?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?)`).run(id, data.topic, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId);
+    this.db.prepare(`INSERT INTO discussions (id, topic, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id, collaboration_session_id)
+         VALUES (?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?)`).run(id, data.topic, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId, data.collaborationSessionId ?? null);
     return this.getDiscussion(id);
+  }
+  // --- Project-scoped collaboration sessions ---
+  createCollaborationSession(data) {
+    assertText(data.projectPath, "projectPath");
+    const policy = data.policy ?? "auto";
+    assertSessionPolicy(policy);
+    const id = `cfs_${randomUUID2().replace(/-/g, "").slice(0, 12)}`;
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    this.db.prepare(`INSERT INTO collaboration_sessions (id, project_path, status, policy, created_at, last_seen_at)
+       VALUES (?, ?, 'ACTIVE', ?, ?, ?)`).run(id, data.projectPath, policy, now, now);
+    return this.getCollaborationSession(id);
+  }
+  getOrCreateCollaborationSession(data) {
+    assertText(data.projectPath, "projectPath");
+    const policy = data.policy ?? "auto";
+    assertSessionPolicy(policy);
+    const existing = this.db.prepare(`SELECT * FROM collaboration_sessions
+       WHERE project_path = ? AND status = 'ACTIVE' AND policy <> 'fresh'
+       ORDER BY last_seen_at DESC LIMIT 1`).get(data.projectPath);
+    if (existing)
+      return rowToCollaborationSession(existing);
+    try {
+      return this.createCollaborationSession({ projectPath: data.projectPath, policy });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("UNIQUE constraint failed")) {
+        const concurrent = this.db.prepare(`SELECT * FROM collaboration_sessions
+           WHERE project_path = ? AND status = 'ACTIVE'
+           ORDER BY last_seen_at DESC LIMIT 1`).get(data.projectPath);
+        if (concurrent)
+          return rowToCollaborationSession(concurrent);
+      }
+      throw error;
+    }
+  }
+  getCollaborationSession(id) {
+    const row = this.db.prepare("SELECT * FROM collaboration_sessions WHERE id = ?").get(id);
+    return row ? rowToCollaborationSession(row) : null;
+  }
+  getSessionForCollaboration(provider, collaborationSessionId, projectPath) {
+    const column = provider === "claude" ? "claude_session_id" : "codex_session_id";
+    const row = this.db.prepare(`SELECT sessions.* FROM collaboration_sessions AS collaborations
+       JOIN agent_sessions AS sessions
+         ON sessions.provider = ? AND sessions.session_id = collaborations.${column}
+       WHERE collaborations.id = ? AND collaborations.project_path = ?
+         AND collaborations.status = 'ACTIVE'
+       LIMIT 1`).get(provider, collaborationSessionId, projectPath);
+    if (!row)
+      return null;
+    const session = rowToAgentSession(row);
+    return isReusableBridgeSession(session) ? session : null;
+  }
+  bindProviderSession(data) {
+    const column = data.provider === "claude" ? "claude_session_id" : "codex_session_id";
+    const result = this.db.prepare(`UPDATE collaboration_sessions
+       SET ${column} = ?, last_seen_at = ?
+       WHERE id = ? AND status = 'ACTIVE'`).run(data.sessionId, (/* @__PURE__ */ new Date()).toISOString(), data.collaborationSessionId);
+    if (result.changes !== 1)
+      throw new Error(`Collaboration session ${data.collaborationSessionId} not found or archived`);
   }
   getDiscussion(id) {
     const row = this.db.prepare("SELECT * FROM discussions WHERE id = ?").get(id);
@@ -843,7 +918,16 @@ var Storage = class {
     return rows.map(rowToAgentSession);
   }
   listSessionsForDiscussion(discussionId) {
-    return this.listSessions().filter((session) => session.metadata.discussionId === discussionId);
+    const discussion = this.getDiscussion(discussionId);
+    if (!discussion?.collaborationSessionId) {
+      return this.listSessions().filter((session) => session.metadata.discussionId === discussionId);
+    }
+    const rows = this.db.prepare(`SELECT sessions.* FROM collaboration_sessions AS collaborations
+       JOIN agent_sessions AS sessions
+         ON (sessions.provider = 'claude' AND sessions.session_id = collaborations.claude_session_id)
+         OR (sessions.provider = 'codex' AND sessions.session_id = collaborations.codex_session_id)
+       WHERE collaborations.id = ?`).all(discussion.collaborationSessionId);
+    return rows.map(rowToAgentSession);
   }
   updateSessionStatus(provider, sessionId, status2, metadata) {
     const current = this.getSession(provider, sessionId);
@@ -887,11 +971,24 @@ function rowToDiscussion(row) {
     endedAt: row.ended_at ?? null,
     conclusion: row.conclusion ?? null,
     projectPath: row.project_path ?? resolveProjectPath(),
+    collaborationSessionId: row.collaboration_session_id ?? null,
     traceId: row.trace_id,
     dispatchState: row.dispatch_state ?? null,
     waitingFor: row.waiting_for ?? null,
     stopReason: row.stop_reason ?? null,
     lastError: parseJsonObject(row.last_error)
+  };
+}
+function rowToCollaborationSession(row) {
+  return {
+    id: row.id,
+    projectPath: row.project_path,
+    status: row.status,
+    policy: row.policy,
+    claudeSessionId: row.claude_session_id ?? null,
+    codexSessionId: row.codex_session_id ?? null,
+    createdAt: row.created_at,
+    lastSeenAt: row.last_seen_at
   };
 }
 function parseJsonObject(value) {
@@ -945,6 +1042,11 @@ function rowToAgentSession(row) {
 }
 function isReusableBridgeSession(session) {
   return (session.status === "IDLE" || session.status === "BRIDGE_OWNED") && session.metadata.bridgeOwned === true && typeof session.metadata.supersededBy !== "string";
+}
+function assertSessionPolicy(value) {
+  if (value !== "auto" && value !== "reuse" && value !== "fresh") {
+    throw new Error("session policy must be auto, reuse, or fresh");
+  }
 }
 function rowToAuditEvent(row) {
   return {
@@ -3003,7 +3105,7 @@ import { homedir as homedir6, tmpdir } from "node:os";
 import { basename as basename3, join as join8, resolve as resolve7 } from "node:path";
 import { spawnSync } from "node:child_process";
 import process6 from "node:process";
-var CURRENT_VERSION = true ? "0.7.1" : readWorkspaceVersion();
+var CURRENT_VERSION = true ? "0.7.2" : readWorkspaceVersion();
 var DEFAULT_RELEASE_REPOSITORY = "HeadStone1/AgentBridge";
 function normalizeVersion(value) {
   return value.trim().replace(/^v/i, "").split("+", 1)[0];
@@ -3202,7 +3304,20 @@ async function main(argv) {
       console.log(JSON.stringify(cleanup(projectPath, options), null, 2));
       return;
     case "doctor":
-      console.log(JSON.stringify(await runDoctor(projectPath, options), null, 2));
+      {
+        const result = await runDoctor(projectPath, options);
+        console.log(JSON.stringify(result, null, 2));
+        if (!result.ok)
+          process7.exitCode = 1;
+      }
+      return;
+    case "verify":
+      {
+        const result = await verify(options);
+        console.log(JSON.stringify(result, null, 2));
+        if (!result.ok)
+          process7.exitCode = 1;
+      }
       return;
     case "version":
     case "--version":
@@ -3355,6 +3470,173 @@ async function update(options) {
     return info;
   assertUpdateSupported(detectInstallation());
   return installUpdate(release, info);
+}
+async function verify(options) {
+  const liveRequested = options.live === true;
+  const liveConfigured = Boolean(process7.env.AGENTBRIDGE_CLAUDE_COMMAND) && Boolean(process7.env.AGENTBRIDGE_CODEX_COMMAND || process7.env.AGENTBRIDGE_CODEX_APP_COMMAND);
+  const mcpEntry = defaultMcpEntry();
+  const mcpSmoke = await runMcpSmoke(mcpEntry, resolve8(String(options["project-path"] ?? process7.cwd())));
+  const live = liveRequested ? await runLiveProviderSmoke(resolve8(String(options["project-path"] ?? process7.cwd()))) : {
+    claudeToCodex: { status: "NOT_TESTED", detail: "Pass --live with explicit provider commands to request live verification." },
+    codexToClaude: { status: "NOT_TESTED", detail: "Pass --live with explicit provider commands to request live verification." }
+  };
+  const checks = {
+    launcher: { status: mcpSmoke.status, detail: mcpSmoke.detail, entry: mcpEntry },
+    localDoctor: { status: "NOT_TESTED", detail: "Run `agentbridge doctor <project>` separately for project-specific diagnostics." },
+    mcpInitialize: { status: mcpSmoke.status, detail: mcpSmoke.detail, tools: mcpSmoke.tools },
+    claudeToCodex: {
+      ...live.claudeToCodex
+    },
+    codexToClaude: {
+      ...live.codexToClaude
+    },
+    restartRecovery: { status: "NOT_TESTED", detail: "Requires two real MCP client processes and authenticated providers." }
+  };
+  const tested = Object.values(checks).filter((check) => check.status !== "NOT_TESTED").length;
+  return {
+    ok: checks.launcher.status === "PASS" && Object.values(checks).every((check) => check.status !== "FAIL"),
+    liveRequested,
+    liveConfigured,
+    status: tested > 0 && Object.values(checks).some((check) => check.status === "NOT_TESTED") ? "PARTIAL" : "PASS",
+    checks,
+    limitation: "NOT_TESTED is intentional when authenticated real-provider E2E prerequisites are absent; it is never reported as a pass."
+  };
+}
+async function runLiveProviderSmoke(projectPath) {
+  const unavailable = {
+    claudeToCodex: {
+      status: "NOT_TESTED",
+      detail: "NOT_TESTED: set AGENTBRIDGE_CLAUDE_COMMAND and AGENTBRIDGE_CODEX_COMMAND or AGENTBRIDGE_CODEX_APP_COMMAND for live verification."
+    },
+    codexToClaude: {
+      status: "NOT_TESTED",
+      detail: "NOT_TESTED: set AGENTBRIDGE_CLAUDE_COMMAND and AGENTBRIDGE_CODEX_COMMAND or AGENTBRIDGE_CODEX_APP_COMMAND for live verification."
+    }
+  };
+  if (!process7.env.AGENTBRIDGE_CLAUDE_COMMAND || !process7.env.AGENTBRIDGE_CODEX_COMMAND && !process7.env.AGENTBRIDGE_CODEX_APP_COMMAND)
+    return unavailable;
+  const timeoutMs = boundedVerifyTimeout(process7.env.AGENTBRIDGE_VERIFY_TIMEOUT_MS);
+  const claude = new ClaudeConnector({ command: process7.env.AGENTBRIDGE_CLAUDE_COMMAND, timeoutMs });
+  const codex = new CodexAutoConnector({
+    candidates: discoverCodexCommands(),
+    timeoutMs,
+    startupTimeoutMs: Math.min(timeoutMs, 3e4)
+  });
+  const result = {
+    claudeToCodex: { status: "NOT_TESTED", detail: "" },
+    codexToClaude: { status: "NOT_TESTED", detail: "" }
+  };
+  try {
+    const [claudeAvailable, codexAvailable] = await Promise.all([claude.isAvailable(), codex.isAvailable()]);
+    if (!codexAvailable)
+      result.claudeToCodex.detail = "NOT_TESTED: Codex provider command is unavailable or not logged in.";
+    else {
+      try {
+        const response = await codex.sendAndWait({
+          projectPath,
+          discussionId: `verify_claude_to_codex_${Date.now()}`,
+          prompt: "AgentBridge live verification. Reply with exactly LIVE_CODEX_OK and do not call any tools."
+        });
+        result.claudeToCodex.status = response.content.trim() ? "PASS" : "FAIL";
+        result.claudeToCodex.detail = response.content.trim() ? "Codex returned a live response." : "Codex returned an empty response.";
+      } catch (cause) {
+        result.claudeToCodex.status = "FAIL";
+        result.claudeToCodex.detail = `Codex live request failed: ${safeVerifyError(cause)}`;
+      }
+    }
+    if (!claudeAvailable)
+      result.codexToClaude.detail = "NOT_TESTED: Claude provider command is unavailable or not logged in.";
+    else {
+      try {
+        const response = await claude.sendAndWait({
+          projectPath,
+          discussionId: `verify_codex_to_claude_${Date.now()}`,
+          prompt: "AgentBridge live verification. Reply with exactly LIVE_CLAUDE_OK and do not call any tools."
+        });
+        result.codexToClaude.status = response.content.trim() ? "PASS" : "FAIL";
+        result.codexToClaude.detail = response.content.trim() ? "Claude returned a live response." : "Claude returned an empty response.";
+      } catch (cause) {
+        result.codexToClaude.status = "FAIL";
+        result.codexToClaude.detail = `Claude live request failed: ${safeVerifyError(cause)}`;
+      }
+    }
+    return result;
+  } finally {
+    await codex.cancel("");
+  }
+}
+function boundedVerifyTimeout(value) {
+  if (!value?.trim())
+    return 12e4;
+  const timeoutMs = Number.parseInt(value, 10);
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1e3 || timeoutMs > 6e5) {
+    throw new Error("AGENTBRIDGE_VERIFY_TIMEOUT_MS must be an integer between 1000 and 600000");
+  }
+  return timeoutMs;
+}
+function safeVerifyError(cause) {
+  return (cause instanceof Error ? cause.message : String(cause)).replace(/(token|password|api[_ -]?key)\s*[:=]\s*[^\s;]+/gi, "$1=[REDACTED]").slice(0, 512);
+}
+async function runMcpSmoke(entry, projectPath) {
+  if (!existsSync8(entry))
+    return { status: "FAIL", detail: `MCP entry does not exist: ${entry}`, tools: [] };
+  return new Promise((resolveResult) => {
+    const child = spawn6(process7.execPath, [entry], {
+      cwd: projectPath,
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process7.env,
+        AGENTBRIDGE_AGENT: "claude",
+        AGENTBRIDGE_PROJECT_PATH: projectPath,
+        AGENTBRIDGE_ASYNC_DISPATCH: "0",
+        AGENTBRIDGE_TEST_MAX_LIFETIME_MS: "10_000"
+      }
+    });
+    let buffer = "";
+    let settled = false;
+    const finish = (result) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill();
+      resolveResult(result);
+    };
+    const timer = setTimeout(() => finish({ status: "FAIL", detail: "MCP initialize/tools smoke test timed out.", tools: [] }), 8e3);
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString();
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.trim())
+          continue;
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (message.id === 1) {
+          child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}
+`);
+          child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}
+`);
+        } else if (message.id === 2) {
+          const tools = Array.isArray(message.result?.tools) ? message.result.tools.map((tool) => tool.name).filter((name) => typeof name === "string") : [];
+          finish(tools.length === 8 ? { status: "PASS", detail: "MCP initialize \u2192 initialized \u2192 tools/list completed.", tools } : { status: "FAIL", detail: `MCP tools/list returned ${tools.length} tools; expected 8.`, tools });
+        }
+      }
+    });
+    child.once("error", (error) => finish({ status: "FAIL", detail: error.message, tools: [] }));
+    child.stdin.write(`${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "agentbridge-verify", version: CURRENT_VERSION } }
+    })}
+`);
+  });
 }
 function uninstallProject(projectPath, confirmed, options) {
   if (!confirmed)
@@ -3516,6 +3798,7 @@ function printHelp() {
     "  status [path]               Show sessions, discussions, and metrics",
     "  cleanup [path]              Preview/delete old completed discussions",
     "  doctor [path]               Diagnose install, config, database, and providers",
+    "  verify [--live]             Run release/MCP verification checks; live provider checks stay NOT_TESTED without an E2E harness",
     "  version                     Show the installed AgentBridge version",
     "  update [--install]          Check GitHub Releases; install only with --install",
     "  rollback                    Switch to the previous locally installed version",

@@ -4,6 +4,7 @@ import { AuditService } from '@agentbridge/audit';
 import type { AgentConnector, ProviderSessionKind } from '@agentbridge/connectors';
 import type {
   AgentType,
+  SessionPolicy,
   Message,
   AskPeerOutput,
   ReplyPeerOutput,
@@ -30,6 +31,7 @@ export interface CollaborationConfig {
   maxTotalMessageChars?: number;
   asyncDispatch?: boolean;
   archiveSessionsOnClose?: boolean;
+  sessionPolicy?: SessionPolicy;
 }
 
 export type ConnectorRegistry = Partial<Record<AgentType, AgentConnector>>;
@@ -49,6 +51,7 @@ export class CollaborationService {
   private readonly maxTotalMessageChars: number;
   private readonly asyncDispatch: boolean;
   private readonly archiveSessionsOnClose: boolean;
+  private readonly sessionPolicy: SessionPolicy;
   private readonly connectors: ConnectorRegistry;
   private readonly ownerId = `collaboration:${process.pid}:${randomUUID()}`;
   private readonly inFlight = new Map<string, InFlightOperation>();
@@ -69,6 +72,8 @@ export class CollaborationService {
     this.maxTotalMessageChars = config.maxTotalMessageChars ?? 500_000;
     this.asyncDispatch = config.asyncDispatch ?? false;
     this.archiveSessionsOnClose = config.archiveSessionsOnClose ?? false;
+    this.sessionPolicy = config.sessionPolicy ?? 'auto';
+    if (!['auto', 'reuse', 'fresh'].includes(this.sessionPolicy)) throw new Error('sessionPolicy must be auto, reuse, or fresh');
     if (!Number.isInteger(this.maxTurns) || this.maxTurns < 1 || this.maxTurns > 50) {
       throw new Error('maxTurns must be an integer between 1 and 50');
     }
@@ -92,6 +97,7 @@ export class CollaborationService {
     projectPath?: string;
     traceId: string;
     maxTurns?: number;
+    sessionPolicy?: SessionPolicy;
   }): Promise<AskPeerOutput> {
     const projectPath = resolveProjectPath(params.projectPath);
     const maxTurns = params.maxTurns ?? this.maxTurns;
@@ -104,6 +110,10 @@ export class CollaborationService {
       throw new Error('Discussion message budget exceeded');
     }
 
+    const sessionPolicy = params.sessionPolicy ?? this.sessionPolicy;
+    const collaborationSession = sessionPolicy === 'fresh'
+      ? this.storage.createCollaborationSession({ projectPath, policy: 'fresh' })
+      : this.storage.getOrCreateCollaborationSession({ projectPath, policy: sessionPolicy });
     const discussion = this.storage.createDiscussion({
       topic: params.topic,
       driver: params.driver,
@@ -111,6 +121,7 @@ export class CollaborationService {
       projectPath,
       traceId: params.traceId,
       maxTurns,
+      collaborationSessionId: collaborationSession.id,
     });
 
     this.audit.log({
@@ -118,7 +129,7 @@ export class CollaborationService {
       discussionId: discussion.id,
       action: 'discussion.created',
       agent: params.driver,
-      metadata: { peer: params.peer, topic: params.topic, projectPath },
+      metadata: { peer: params.peer, topic: params.topic, projectPath, sessionPolicy, collaborationSessionId: collaborationSession.id },
     });
 
     const message = this.storage.createMessage({
@@ -145,6 +156,7 @@ export class CollaborationService {
       this.startBackgroundDispatch(discussion.id, params.peer, params.initialMessage, []);
       return {
         discussionId: discussion.id,
+        collaborationSessionId: collaborationSession.id,
         peer: params.peer,
         messageId: message.id,
         status: 'DISCUSSING',
@@ -154,6 +166,7 @@ export class CollaborationService {
     const peerResponse = await this.dispatchToAgent(discussion.id, params.peer, params.initialMessage, []);
     return {
       discussionId: discussion.id,
+      collaborationSessionId: collaborationSession.id,
       peer: params.peer,
       messageId: message.id,
       status: 'DISCUSSING',
@@ -711,20 +724,24 @@ export class CollaborationService {
       }, Math.max(1_000, Math.floor(this.timeoutMs / 3)));
       leaseHeartbeat.unref?.();
 
-      const persistedSession = this.storage.getSessionForDiscussion(
-        receiver,
-        discussionId,
-        discussion.projectPath,
-      );
+      const collaborationSession = discussion.collaborationSessionId
+        ? this.storage.getCollaborationSession(discussion.collaborationSessionId)
+        : null;
+      const persistedSession = collaborationSession && collaborationSession.policy !== 'fresh'
+        ? this.storage.getSessionForCollaboration(receiver, collaborationSession.id, discussion.projectPath)
+        : !collaborationSession
+          ? this.storage.getSessionForDiscussion(receiver, discussionId, discussion.projectPath)
+          : null;
       if (persistedSession) {
         trackedSession = { sessionId: persistedSession.sessionId, metadata: persistedSession.metadata };
         this.storage.updateSessionStatus(receiver, persistedSession.sessionId, 'BRIDGE_OWNED', {
           ...persistedSession.metadata,
           bridgeOwned: true,
           discussionId,
+          ...(collaborationSession ? { collaborationSessionId: collaborationSession.id } : {}),
         });
       }
-      const providerSessionKind = readProviderSessionKind(persistedSession?.metadata.sessionKind);
+    const providerSessionKind = readProviderSessionKind(persistedSession?.metadata.sessionKind);
       const response = await withTimeout(
         connector.sendAndWait({
           projectPath: discussion.projectPath,
@@ -767,8 +784,16 @@ export class CollaborationService {
             bridgeOwned: true,
             availability: response.availability ?? 'BACKGROUND',
             sessionKind: response.providerSessionKind,
+            ...(collaborationSession ? { collaborationSessionId: collaborationSession.id } : {}),
           },
         });
+        if (collaborationSession && collaborationSession.policy !== 'fresh') {
+          this.storage.bindProviderSession({
+            collaborationSessionId: collaborationSession.id,
+            provider: receiver,
+            sessionId: providerSessionId,
+          });
+        }
       }
 
       const message = this.storage.createMessage({

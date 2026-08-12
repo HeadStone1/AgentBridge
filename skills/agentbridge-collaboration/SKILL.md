@@ -5,7 +5,7 @@ description: Coordinate structured peer discussions between Claude Code and Code
 
 # AgentBridge collaboration
 
-Use AgentBridge as a bounded peer-review channel, not as an open-ended chat.
+Use AgentBridge as a bounded collaboration channel with a project-scoped provider session. It is not an open-ended chat, but separate discussions in the same project can reuse the same Claude/Codex provider sessions.
 
 ## Start a discussion
 
@@ -13,6 +13,8 @@ Use AgentBridge as a bounded peer-review channel, not as an open-ended chat.
 2. Structure `message` with: goal, verified evidence, constraints, exact question, and acceptance criteria.
 3. Keep the returned `discussionId`. Never create another discussion merely because dispatch is queued.
 4. Set `maxTurns` only when the default 12 successful Provider responses is unsuitable.
+5. Keep the default `sessionPolicy=auto` for continuity. Use `sessionPolicy=reuse` when continuity is required, and `sessionPolicy=fresh` only when the user explicitly requests an isolated provider context.
+6. A fresh discussion ID does not imply a fresh provider session; check `collaborationSessionId` in the result when session continuity matters.
 
 ## Continue and wait
 
@@ -27,5 +29,11 @@ Use AgentBridge as a bounded peer-review channel, not as an open-ended chat.
 - On `NEEDS_USER_DECISION`, present the exact unresolved choice to the user; do not bypass a turn limit or ambiguous Provider result.
 - When both sides accept one exact canonical conclusion, call `close_discussion` with that conclusion unchanged.
 - Call `cancel_discussion` when the user withdraws the request or continuing could duplicate an ambiguous Provider action.
+
+Session safety:
+
+- Provider sessions are reused only within the same project and only when AgentBridge owns a live, non-superseded session.
+- If a provider session disappears or changes backend, AgentBridge records the old session as unavailable and creates a replacement; do not treat a provider session ID as proof of identity outside AgentBridge.
+- `agentbridge verify --live` reports real-provider checks as `NOT_TESTED` unless an authenticated E2E harness performs them; never infer live connectivity from local MCP initialization alone.
 
 Read [references/discussion-protocol.md](references/discussion-protocol.md) when status handling or prompt structure needs more detail.

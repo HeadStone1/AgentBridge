@@ -15,6 +15,8 @@ import type {
   SessionStatus,
   DiscussionError,
   DiscussionStopReason,
+  CollaborationSession,
+  SessionPolicy,
 } from '@agentbridge/protocol';
 import { canTransition, resolveProjectPath, SessionBusyError } from '@agentbridge/protocol';
 
@@ -72,7 +74,8 @@ CREATE TABLE IF NOT EXISTS discussions (
   ended_at TEXT,
   conclusion TEXT,
   project_path TEXT,
-  trace_id TEXT NOT NULL
+  trace_id TEXT NOT NULL,
+  collaboration_session_id TEXT
   ,stop_reason TEXT
   ,last_error TEXT
 );
@@ -144,6 +147,20 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
   PRIMARY KEY (provider, session_id)
 );
 
+CREATE TABLE IF NOT EXISTS collaboration_sessions (
+  id TEXT PRIMARY KEY,
+  project_path TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  policy TEXT NOT NULL DEFAULT 'auto',
+  claude_session_id TEXT,
+  codex_session_id TEXT,
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_collaboration_sessions_active_project
+  ON collaboration_sessions(project_path) WHERE status = 'ACTIVE' AND policy <> 'fresh';
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_discussion_hash
   ON decisions(discussion_id, decision_hash);
 
@@ -202,6 +219,7 @@ export class Storage {
     this.ensureColumn('discussions', 'round_count', 'ALTER TABLE discussions ADD COLUMN round_count INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('discussions', 'stop_reason', 'ALTER TABLE discussions ADD COLUMN stop_reason TEXT');
     this.ensureColumn('discussions', 'last_error', 'ALTER TABLE discussions ADD COLUMN last_error TEXT');
+    this.ensureColumn('discussions', 'collaboration_session_id', 'ALTER TABLE discussions ADD COLUMN collaboration_session_id TEXT');
     this.ensureColumn('messages', 'provider_session_id', 'ALTER TABLE messages ADD COLUMN provider_session_id TEXT');
   }
 
@@ -243,6 +261,7 @@ export class Storage {
     traceId: string;
     maxTurns?: number;
     maxRetries?: number;
+    collaborationSessionId?: string;
   }): Discussion {
     const id = `dsc_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
     const now = new Date().toISOString();
@@ -257,12 +276,85 @@ export class Storage {
 
     this.db
       .prepare(
-        `INSERT INTO discussions (id, topic, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id)
-         VALUES (?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?)`,
+        `INSERT INTO discussions (id, topic, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id, collaboration_session_id)
+         VALUES (?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, data.topic, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId);
+      .run(id, data.topic, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId, data.collaborationSessionId ?? null);
 
     return this.getDiscussion(id)!;
+  }
+
+  // --- Project-scoped collaboration sessions ---
+  createCollaborationSession(data: { projectPath: string; policy?: SessionPolicy }): CollaborationSession {
+    assertText(data.projectPath, 'projectPath');
+    const policy = data.policy ?? 'auto';
+    assertSessionPolicy(policy);
+    const id = `cfs_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+    const now = new Date().toISOString();
+    this.db.prepare(
+      `INSERT INTO collaboration_sessions (id, project_path, status, policy, created_at, last_seen_at)
+       VALUES (?, ?, 'ACTIVE', ?, ?, ?)`,
+    ).run(id, data.projectPath, policy, now, now);
+    return this.getCollaborationSession(id)!;
+  }
+
+  getOrCreateCollaborationSession(data: { projectPath: string; policy?: Exclude<SessionPolicy, 'fresh'> }): CollaborationSession {
+    assertText(data.projectPath, 'projectPath');
+    const policy = data.policy ?? 'auto';
+    assertSessionPolicy(policy);
+    const existing = this.db.prepare(
+      `SELECT * FROM collaboration_sessions
+       WHERE project_path = ? AND status = 'ACTIVE' AND policy <> 'fresh'
+       ORDER BY last_seen_at DESC LIMIT 1`,
+    ).get(data.projectPath) as Record<string, unknown> | undefined;
+    if (existing) return rowToCollaborationSession(existing);
+    try {
+      return this.createCollaborationSession({ projectPath: data.projectPath, policy });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
+        const concurrent = this.db.prepare(
+          `SELECT * FROM collaboration_sessions
+           WHERE project_path = ? AND status = 'ACTIVE'
+           ORDER BY last_seen_at DESC LIMIT 1`,
+        ).get(data.projectPath) as Record<string, unknown> | undefined;
+        if (concurrent) return rowToCollaborationSession(concurrent);
+      }
+      throw error;
+    }
+  }
+
+  getCollaborationSession(id: string): CollaborationSession | null {
+    const row = this.db.prepare('SELECT * FROM collaboration_sessions WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return row ? rowToCollaborationSession(row) : null;
+  }
+
+  getSessionForCollaboration(
+    provider: AgentType,
+    collaborationSessionId: string,
+    projectPath: string,
+  ): AgentSession | null {
+    const column = provider === 'claude' ? 'claude_session_id' : 'codex_session_id';
+    const row = this.db.prepare(
+      `SELECT sessions.* FROM collaboration_sessions AS collaborations
+       JOIN agent_sessions AS sessions
+         ON sessions.provider = ? AND sessions.session_id = collaborations.${column}
+       WHERE collaborations.id = ? AND collaborations.project_path = ?
+         AND collaborations.status = 'ACTIVE'
+       LIMIT 1`,
+    ).get(provider, collaborationSessionId, projectPath) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    const session = rowToAgentSession(row);
+    return isReusableBridgeSession(session) ? session : null;
+  }
+
+  bindProviderSession(data: { collaborationSessionId: string; provider: AgentType; sessionId: string }): void {
+    const column = data.provider === 'claude' ? 'claude_session_id' : 'codex_session_id';
+    const result = this.db.prepare(
+      `UPDATE collaboration_sessions
+       SET ${column} = ?, last_seen_at = ?
+       WHERE id = ? AND status = 'ACTIVE'`,
+    ).run(data.sessionId, new Date().toISOString(), data.collaborationSessionId);
+    if (result.changes !== 1) throw new Error(`Collaboration session ${data.collaborationSessionId} not found or archived`);
   }
 
   getDiscussion(id: string): Discussion | null {
@@ -814,7 +906,18 @@ export class Storage {
   }
 
   listSessionsForDiscussion(discussionId: string): AgentSession[] {
-    return this.listSessions().filter((session) => session.metadata.discussionId === discussionId);
+    const discussion = this.getDiscussion(discussionId);
+    if (!discussion?.collaborationSessionId) {
+      return this.listSessions().filter((session) => session.metadata.discussionId === discussionId);
+    }
+    const rows = this.db.prepare(
+      `SELECT sessions.* FROM collaboration_sessions AS collaborations
+       JOIN agent_sessions AS sessions
+         ON (sessions.provider = 'claude' AND sessions.session_id = collaborations.claude_session_id)
+         OR (sessions.provider = 'codex' AND sessions.session_id = collaborations.codex_session_id)
+       WHERE collaborations.id = ?`,
+    ).all(discussion.collaborationSessionId) as Record<string, unknown>[];
+    return rows.map(rowToAgentSession);
   }
 
   updateSessionStatus(
@@ -880,11 +983,25 @@ function rowToDiscussion(row: Record<string, unknown>): Discussion {
     endedAt: (row.ended_at as string | null) ?? null,
     conclusion: (row.conclusion as string | null) ?? null,
     projectPath: (row.project_path as string | undefined) ?? resolveProjectPath(),
+    collaborationSessionId: (row.collaboration_session_id as string | null) ?? null,
     traceId: row.trace_id as string,
     dispatchState: (row.dispatch_state as DispatchState | null) ?? null,
     waitingFor: (row.waiting_for as AgentType | null) ?? null,
     stopReason: (row.stop_reason as DiscussionStopReason | null) ?? null,
     lastError: parseJsonObject(row.last_error) as unknown as DiscussionError | null,
+  };
+}
+
+function rowToCollaborationSession(row: Record<string, unknown>): CollaborationSession {
+  return {
+    id: row.id as string,
+    projectPath: row.project_path as string,
+    status: row.status as 'ACTIVE' | 'ARCHIVED',
+    policy: row.policy as SessionPolicy,
+    claudeSessionId: (row.claude_session_id as string | null) ?? null,
+    codexSessionId: (row.codex_session_id as string | null) ?? null,
+    createdAt: row.created_at as string,
+    lastSeenAt: row.last_seen_at as string,
   };
 }
 
@@ -946,6 +1063,12 @@ function isReusableBridgeSession(session: AgentSession): boolean {
   return (session.status === 'IDLE' || session.status === 'BRIDGE_OWNED')
     && session.metadata.bridgeOwned === true
     && typeof session.metadata.supersededBy !== 'string';
+}
+
+function assertSessionPolicy(value: string): asserts value is SessionPolicy {
+  if (value !== 'auto' && value !== 'reuse' && value !== 'fresh') {
+    throw new Error('session policy must be auto, reuse, or fresh');
+  }
 }
 
 function rowToAuditEvent(row: Record<string, unknown>): AuditEvent {

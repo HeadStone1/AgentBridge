@@ -7083,6 +7083,7 @@ var CollaborationService = class {
   maxTotalMessageChars;
   asyncDispatch;
   archiveSessionsOnClose;
+  sessionPolicy;
   connectors;
   ownerId = `collaboration:${process.pid}:${randomUUID()}`;
   inFlight = /* @__PURE__ */ new Map();
@@ -7097,6 +7098,9 @@ var CollaborationService = class {
     this.maxTotalMessageChars = config2.maxTotalMessageChars ?? 5e5;
     this.asyncDispatch = config2.asyncDispatch ?? false;
     this.archiveSessionsOnClose = config2.archiveSessionsOnClose ?? false;
+    this.sessionPolicy = config2.sessionPolicy ?? "auto";
+    if (!["auto", "reuse", "fresh"].includes(this.sessionPolicy))
+      throw new Error("sessionPolicy must be auto, reuse, or fresh");
     if (!Number.isInteger(this.maxTurns) || this.maxTurns < 1 || this.maxTurns > 50) {
       throw new Error("maxTurns must be an integer between 1 and 50");
     }
@@ -7122,20 +7126,23 @@ var CollaborationService = class {
     if (params.initialMessage.length > this.maxTotalMessageChars) {
       throw new Error("Discussion message budget exceeded");
     }
+    const sessionPolicy = params.sessionPolicy ?? this.sessionPolicy;
+    const collaborationSession = sessionPolicy === "fresh" ? this.storage.createCollaborationSession({ projectPath, policy: "fresh" }) : this.storage.getOrCreateCollaborationSession({ projectPath, policy: sessionPolicy });
     const discussion = this.storage.createDiscussion({
       topic: params.topic,
       driver: params.driver,
       peer: params.peer,
       projectPath,
       traceId: params.traceId,
-      maxTurns
+      maxTurns,
+      collaborationSessionId: collaborationSession.id
     });
     this.audit.log({
       traceId: params.traceId,
       discussionId: discussion.id,
       action: "discussion.created",
       agent: params.driver,
-      metadata: { peer: params.peer, topic: params.topic, projectPath }
+      metadata: { peer: params.peer, topic: params.topic, projectPath, sessionPolicy, collaborationSessionId: collaborationSession.id }
     });
     const message = this.storage.createMessage({
       discussionId: discussion.id,
@@ -7158,6 +7165,7 @@ var CollaborationService = class {
       this.startBackgroundDispatch(discussion.id, params.peer, params.initialMessage, []);
       return {
         discussionId: discussion.id,
+        collaborationSessionId: collaborationSession.id,
         peer: params.peer,
         messageId: message.id,
         status: "DISCUSSING",
@@ -7167,6 +7175,7 @@ var CollaborationService = class {
     const peerResponse = await this.dispatchToAgent(discussion.id, params.peer, params.initialMessage, []);
     return {
       discussionId: discussion.id,
+      collaborationSessionId: collaborationSession.id,
       peer: params.peer,
       messageId: message.id,
       status: "DISCUSSING",
@@ -7642,13 +7651,15 @@ var CollaborationService = class {
         }
       }, Math.max(1e3, Math.floor(this.timeoutMs / 3)));
       leaseHeartbeat.unref?.();
-      const persistedSession = this.storage.getSessionForDiscussion(receiver, discussionId, discussion.projectPath);
+      const collaborationSession = discussion.collaborationSessionId ? this.storage.getCollaborationSession(discussion.collaborationSessionId) : null;
+      const persistedSession = collaborationSession && collaborationSession.policy !== "fresh" ? this.storage.getSessionForCollaboration(receiver, collaborationSession.id, discussion.projectPath) : !collaborationSession ? this.storage.getSessionForDiscussion(receiver, discussionId, discussion.projectPath) : null;
       if (persistedSession) {
         trackedSession = { sessionId: persistedSession.sessionId, metadata: persistedSession.metadata };
         this.storage.updateSessionStatus(receiver, persistedSession.sessionId, "BRIDGE_OWNED", {
           ...persistedSession.metadata,
           bridgeOwned: true,
-          discussionId
+          discussionId,
+          ...collaborationSession ? { collaborationSessionId: collaborationSession.id } : {}
         });
       }
       const providerSessionKind = readProviderSessionKind(persistedSession?.metadata.sessionKind);
@@ -7685,9 +7696,17 @@ var CollaborationService = class {
             discussionId,
             bridgeOwned: true,
             availability: response.availability ?? "BACKGROUND",
-            sessionKind: response.providerSessionKind
+            sessionKind: response.providerSessionKind,
+            ...collaborationSession ? { collaborationSessionId: collaborationSession.id } : {}
           }
         });
+        if (collaborationSession && collaborationSession.policy !== "fresh") {
+          this.storage.bindProviderSession({
+            collaborationSessionId: collaborationSession.id,
+            provider: receiver,
+            sessionId: providerSessionId
+          });
+        }
       }
       const message = this.storage.createMessage({
         discussionId,
@@ -9334,7 +9353,8 @@ CREATE TABLE IF NOT EXISTS discussions (
   ended_at TEXT,
   conclusion TEXT,
   project_path TEXT,
-  trace_id TEXT NOT NULL
+  trace_id TEXT NOT NULL,
+  collaboration_session_id TEXT
   ,stop_reason TEXT
   ,last_error TEXT
 );
@@ -9406,6 +9426,20 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
   PRIMARY KEY (provider, session_id)
 );
 
+CREATE TABLE IF NOT EXISTS collaboration_sessions (
+  id TEXT PRIMARY KEY,
+  project_path TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  policy TEXT NOT NULL DEFAULT 'auto',
+  claude_session_id TEXT,
+  codex_session_id TEXT,
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_collaboration_sessions_active_project
+  ON collaboration_sessions(project_path) WHERE status = 'ACTIVE' AND policy <> 'fresh';
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_discussion_hash
   ON decisions(discussion_id, decision_hash);
 
@@ -9458,6 +9492,7 @@ var Storage = class {
     this.ensureColumn("discussions", "round_count", "ALTER TABLE discussions ADD COLUMN round_count INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("discussions", "stop_reason", "ALTER TABLE discussions ADD COLUMN stop_reason TEXT");
     this.ensureColumn("discussions", "last_error", "ALTER TABLE discussions ADD COLUMN last_error TEXT");
+    this.ensureColumn("discussions", "collaboration_session_id", "ALTER TABLE discussions ADD COLUMN collaboration_session_id TEXT");
     this.ensureColumn("messages", "provider_session_id", "ALTER TABLE messages ADD COLUMN provider_session_id TEXT");
   }
   ensureColumn(table, columnName, alterSql) {
@@ -9498,9 +9533,67 @@ var Storage = class {
     assertText2(data.traceId, "traceId");
     assertTurns(maxTurns);
     assertRetries(maxRetries);
-    this.db.prepare(`INSERT INTO discussions (id, topic, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id)
-         VALUES (?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?)`).run(id2, data.topic, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId);
+    this.db.prepare(`INSERT INTO discussions (id, topic, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id, collaboration_session_id)
+         VALUES (?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?)`).run(id2, data.topic, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId, data.collaborationSessionId ?? null);
     return this.getDiscussion(id2);
+  }
+  // --- Project-scoped collaboration sessions ---
+  createCollaborationSession(data) {
+    assertText2(data.projectPath, "projectPath");
+    const policy = data.policy ?? "auto";
+    assertSessionPolicy(policy);
+    const id2 = `cfs_${randomUUID4().replace(/-/g, "").slice(0, 12)}`;
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    this.db.prepare(`INSERT INTO collaboration_sessions (id, project_path, status, policy, created_at, last_seen_at)
+       VALUES (?, ?, 'ACTIVE', ?, ?, ?)`).run(id2, data.projectPath, policy, now, now);
+    return this.getCollaborationSession(id2);
+  }
+  getOrCreateCollaborationSession(data) {
+    assertText2(data.projectPath, "projectPath");
+    const policy = data.policy ?? "auto";
+    assertSessionPolicy(policy);
+    const existing = this.db.prepare(`SELECT * FROM collaboration_sessions
+       WHERE project_path = ? AND status = 'ACTIVE' AND policy <> 'fresh'
+       ORDER BY last_seen_at DESC LIMIT 1`).get(data.projectPath);
+    if (existing)
+      return rowToCollaborationSession(existing);
+    try {
+      return this.createCollaborationSession({ projectPath: data.projectPath, policy });
+    } catch (error3) {
+      if (error3 instanceof Error && error3.message.includes("UNIQUE constraint failed")) {
+        const concurrent = this.db.prepare(`SELECT * FROM collaboration_sessions
+           WHERE project_path = ? AND status = 'ACTIVE'
+           ORDER BY last_seen_at DESC LIMIT 1`).get(data.projectPath);
+        if (concurrent)
+          return rowToCollaborationSession(concurrent);
+      }
+      throw error3;
+    }
+  }
+  getCollaborationSession(id2) {
+    const row = this.db.prepare("SELECT * FROM collaboration_sessions WHERE id = ?").get(id2);
+    return row ? rowToCollaborationSession(row) : null;
+  }
+  getSessionForCollaboration(provider, collaborationSessionId, projectPath) {
+    const column = provider === "claude" ? "claude_session_id" : "codex_session_id";
+    const row = this.db.prepare(`SELECT sessions.* FROM collaboration_sessions AS collaborations
+       JOIN agent_sessions AS sessions
+         ON sessions.provider = ? AND sessions.session_id = collaborations.${column}
+       WHERE collaborations.id = ? AND collaborations.project_path = ?
+         AND collaborations.status = 'ACTIVE'
+       LIMIT 1`).get(provider, collaborationSessionId, projectPath);
+    if (!row)
+      return null;
+    const session = rowToAgentSession(row);
+    return isReusableBridgeSession(session) ? session : null;
+  }
+  bindProviderSession(data) {
+    const column = data.provider === "claude" ? "claude_session_id" : "codex_session_id";
+    const result = this.db.prepare(`UPDATE collaboration_sessions
+       SET ${column} = ?, last_seen_at = ?
+       WHERE id = ? AND status = 'ACTIVE'`).run(data.sessionId, (/* @__PURE__ */ new Date()).toISOString(), data.collaborationSessionId);
+    if (result.changes !== 1)
+      throw new Error(`Collaboration session ${data.collaborationSessionId} not found or archived`);
   }
   getDiscussion(id2) {
     const row = this.db.prepare("SELECT * FROM discussions WHERE id = ?").get(id2);
@@ -9859,7 +9952,16 @@ var Storage = class {
     return rows.map(rowToAgentSession);
   }
   listSessionsForDiscussion(discussionId) {
-    return this.listSessions().filter((session) => session.metadata.discussionId === discussionId);
+    const discussion = this.getDiscussion(discussionId);
+    if (!discussion?.collaborationSessionId) {
+      return this.listSessions().filter((session) => session.metadata.discussionId === discussionId);
+    }
+    const rows = this.db.prepare(`SELECT sessions.* FROM collaboration_sessions AS collaborations
+       JOIN agent_sessions AS sessions
+         ON (sessions.provider = 'claude' AND sessions.session_id = collaborations.claude_session_id)
+         OR (sessions.provider = 'codex' AND sessions.session_id = collaborations.codex_session_id)
+       WHERE collaborations.id = ?`).all(discussion.collaborationSessionId);
+    return rows.map(rowToAgentSession);
   }
   updateSessionStatus(provider, sessionId, status, metadata) {
     const current = this.getSession(provider, sessionId);
@@ -9903,11 +10005,24 @@ function rowToDiscussion(row) {
     endedAt: row.ended_at ?? null,
     conclusion: row.conclusion ?? null,
     projectPath: row.project_path ?? resolveProjectPath(),
+    collaborationSessionId: row.collaboration_session_id ?? null,
     traceId: row.trace_id,
     dispatchState: row.dispatch_state ?? null,
     waitingFor: row.waiting_for ?? null,
     stopReason: row.stop_reason ?? null,
     lastError: parseJsonObject(row.last_error)
+  };
+}
+function rowToCollaborationSession(row) {
+  return {
+    id: row.id,
+    projectPath: row.project_path,
+    status: row.status,
+    policy: row.policy,
+    claudeSessionId: row.claude_session_id ?? null,
+    codexSessionId: row.codex_session_id ?? null,
+    createdAt: row.created_at,
+    lastSeenAt: row.last_seen_at
   };
 }
 function parseJsonObject(value) {
@@ -9961,6 +10076,11 @@ function rowToAgentSession(row) {
 }
 function isReusableBridgeSession(session) {
   return (session.status === "IDLE" || session.status === "BRIDGE_OWNED") && session.metadata.bridgeOwned === true && typeof session.metadata.supersededBy !== "string";
+}
+function assertSessionPolicy(value) {
+  if (value !== "auto" && value !== "reuse" && value !== "fresh") {
+    throw new Error("session policy must be auto, reuse, or fresh");
+  }
 }
 function rowToAuditEvent(row) {
   return {
@@ -21176,7 +21296,8 @@ function buildTools(agentType2) {
           peer: { type: "string", enum: [peer], description: "The agent to discuss with" },
           message: { type: "string", description: "Proposal or question for the peer" },
           projectPath: { type: "string", description: "Project path; defaults to the current working directory" },
-          maxTurns: { type: "integer", minimum: 1, maximum: 50, description: "Maximum successful provider responses (default: 12)" }
+          maxTurns: { type: "integer", minimum: 1, maximum: 50, description: "Maximum successful provider responses (default: 12)" },
+          sessionPolicy: { type: "string", enum: ["auto", "reuse", "fresh"], description: "Provider session policy (default: auto)" }
         },
         required: ["peer", "message"]
       }
@@ -21272,7 +21393,8 @@ function createServer(resolveRuntime2, options) {
       peer: external_exports.literal(opposite(agentType2)),
       message: text,
       projectPath: external_exports.string().trim().min(1).max(4096).optional(),
-      maxTurns: external_exports.number().int().min(1).max(50).optional()
+      maxTurns: external_exports.number().int().min(1).max(50).optional(),
+      sessionPolicy: external_exports.enum(["auto", "reuse", "fresh"]).optional()
     }),
     reply: external_exports.object({ discussionId: id, message: text }),
     get: external_exports.object({ discussionId: id }),
@@ -21311,7 +21433,8 @@ function createServer(resolveRuntime2, options) {
             initialMessage: input.message,
             projectPath: runtime.projectPath ?? input.projectPath,
             traceId: `tr_${randomUUID5()}`,
-            maxTurns: input.maxTurns
+            maxTurns: input.maxTurns,
+            sessionPolicy: input.sessionPolicy
           });
           return ok(result);
         }

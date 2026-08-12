@@ -363,6 +363,28 @@ describe('Storage', () => {
   });
 
   describe('Session registry', () => {
+    it('reuses one active project collaboration session and binds provider sessions', () => {
+      const first = storage.getOrCreateCollaborationSession({ projectPath: '/project', policy: 'auto' });
+      const second = storage.getOrCreateCollaborationSession({ projectPath: '/project', policy: 'reuse' });
+      expect(second.id).toBe(first.id);
+
+      storage.registerSession({
+        provider: 'codex',
+        sessionId: 'codex-project-session',
+        projectPath: '/project',
+        status: 'IDLE',
+        metadata: { sessionKind: 'codex-cli', bridgeOwned: true },
+      });
+      storage.bindProviderSession({
+        collaborationSessionId: first.id,
+        provider: 'codex',
+        sessionId: 'codex-project-session',
+      });
+      expect(storage.getSessionForCollaboration('codex', first.id, '/project')?.sessionId)
+        .toBe('codex-project-session');
+      expect(storage.createCollaborationSession({ projectPath: '/project', policy: 'fresh' }).id).not.toBe(first.id);
+    });
+
     it('registers, updates, lists, and removes provider sessions', () => {
       const session = storage.registerSession({
         provider: 'claude',
