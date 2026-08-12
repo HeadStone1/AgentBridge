@@ -65,7 +65,11 @@ export class CodexAppServerConnector implements AgentConnector {
 
   async isAvailable(): Promise<boolean> {
     if (!this.command.trim()) return false;
-    this.availability ??= probe(this.command, this.serverArgs);
+    this.availability ??= this.ensureServer().then(() => true).catch(() => {
+      this.closeServer();
+      this.availability = undefined;
+      return false;
+    });
     return this.availability;
   }
 
@@ -157,6 +161,17 @@ export class CodexAppServerConnector implements AgentConnector {
       return;
     }
     await this.interruptTurn(discussionId);
+  }
+
+  async archiveSession(sessionId: string): Promise<boolean> {
+    if (!(await this.isAvailable())) return false;
+    try {
+      await this.request('thread/archive', { threadId: sessionId }, this.startupTimeoutMs);
+      return true;
+    } catch (cause) {
+      if (isUnsupportedMethod(cause)) return false;
+      throw cause;
+    }
   }
 
   private async runSerial<T>(operation: () => Promise<T>): Promise<T> {
@@ -311,12 +326,24 @@ export class CodexAppServerConnector implements AgentConnector {
         this.pending.delete(id);
         if (isRecord(message.error)) pending.reject(providerErrorFromMessage(message.error));
         else pending.resolve(isRecord(message.result) ? message.result : {});
+      } else if (typeof message.method === 'string' && message.id !== undefined) {
+        this.respondToServerRequest(message);
       } else if (typeof message.method === 'string') {
         const waiter = this.eventWaiters.shift();
         if (waiter) waiter(message);
         else this.events.push(message);
       }
     }
+  }
+
+  private respondToServerRequest(message: JsonObject): void {
+    if (!this.child || this.child.exitCode !== null || this.child.killed) return;
+    const method = String(message.method);
+    const id = message.id;
+    const response = /approval/i.test(method)
+      ? { id, result: { decision: 'decline' } }
+      : { id, error: { code: -32601, message: `AgentBridge cannot satisfy interactive request ${method}` } };
+    this.child.stdin.write(`${JSON.stringify(response)}\n`);
   }
 
   private nextEvent(timeoutMs: number): Promise<JsonObject> {
@@ -356,6 +383,7 @@ export class CodexAppServerConnector implements AgentConnector {
     const child = this.child;
     this.child = undefined;
     this.initialized = false;
+    this.availability = undefined;
     this.buffer = '';
     this.events.splice(0, this.events.length);
     if (child && child.exitCode === null) {
@@ -369,15 +397,6 @@ export class CodexAppServerConnector implements AgentConnector {
       child.once('close', () => clearTimeout(forceKillTimer));
     }
   }
-}
-
-async function probe(command: string, serverArgs: string[]): Promise<boolean> {
-  return new Promise((resolve) => {
-    const child = spawn(command, [...serverArgs, 'app-server', '--help'], { windowsHide: true, shell: false });
-    const timer = setTimeout(() => { child.kill(); resolve(false); }, 10_000);
-    child.once('error', () => { clearTimeout(timer); resolve(false); });
-    child.once('close', (code) => { clearTimeout(timer); resolve(code === 0); });
-  });
 }
 
 function readString(value: unknown): string | undefined {
@@ -458,6 +477,11 @@ function isSessionLostError(error: unknown): boolean {
   return /session|thread/i.test(text) && /not found|missing|lost|expired|invalid|unknown/i.test(text);
 }
 
+function isUnsupportedMethod(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error);
+  return /method.*not found|unsupported|unknown method/i.test(text);
+}
+
 function redact(value: string): string {
   return value
     .replace(/(token|password|api[_ -]?key)\s*[:=]\s*[^\s]+/gi, '$1=[REDACTED]')
@@ -473,6 +497,7 @@ function withStderr(error: unknown, stderrTail: string, ambiguous = false): Erro
     return new ProviderError(error.code, message, {
       retryable: error.retryable,
       ambiguous: error.ambiguous || ambiguous,
+      backend: error.backend,
       cause: error,
     });
   }

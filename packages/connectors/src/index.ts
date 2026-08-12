@@ -52,6 +52,9 @@ export interface AgentConnector {
 
   /** Best-effort cancellation for adapters that support it. */
   cancel?(discussionId: string): Promise<void>;
+
+  /** Best-effort native archival. Unsupported providers return false. */
+  archiveSession?(sessionId: string, sessionKind?: ProviderSessionKind): Promise<boolean>;
 }
 
 export { ClaudeConnector } from './claude.js';

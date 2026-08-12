@@ -13,9 +13,19 @@ export function resolveProjectPath(
 }
 
 export type AgentType = 'claude' | 'codex';
-export type SessionStatus = 'IDLE' | 'BUSY' | 'BRIDGE_OWNED' | 'UNKNOWN';
+export type SessionStatus = 'IDLE' | 'BUSY' | 'BRIDGE_OWNED' | 'ARCHIVED' | 'UNKNOWN';
 export type PeerAvailability = 'INTERACTIVE' | 'BACKGROUND' | 'UNAVAILABLE';
 export type DispatchState = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED';
+export type DiscussionStopReason = 'MAX_TURNS' | 'MAX_DURATION' | 'MESSAGE_BUDGET' | 'PROVIDER_ERROR';
+
+export interface DiscussionError {
+  code: string;
+  message: string;
+  backend: string | null;
+  retryable: boolean;
+  ambiguous: boolean;
+  at: string;
+}
 export type DiscussionStatus =
   | 'CREATED'
   | 'DISCUSSING'
@@ -69,6 +79,8 @@ export interface Discussion {
   dispatchState: DispatchState | null;
   /** Agent expected to receive or act on the current dispatch, when applicable. */
   waitingFor: AgentType | null;
+  stopReason: DiscussionStopReason | null;
+  lastError: DiscussionError | null;
 }
 
 export interface AgentSession {
@@ -107,6 +119,8 @@ export interface AskPeerInput {
   peer: AgentType;
   message: string;
   projectPath?: string;
+  /** Maximum successful provider responses for this discussion. */
+  maxTurns?: number;
 }
 
 export interface AskPeerOutput {
@@ -138,6 +152,26 @@ export interface GetDiscussionOutput {
   discussion: Discussion;
   messages: Message[];
   decision: Decision | null;
+  providerSessions: ProviderSessionSummary[];
+}
+
+export interface ProviderSessionSummary {
+  provider: AgentType;
+  sessionId: string;
+  kind: string | null;
+  status: SessionStatus;
+  lastSeenAt: string;
+}
+
+export interface WaitDiscussionInput {
+  discussionId: string;
+  timeoutMs?: number;
+  afterMessageId?: string;
+}
+
+export interface WaitDiscussionOutput extends GetDiscussionOutput {
+  waitTimedOut: boolean;
+  lastMessageId: string | null;
 }
 
 export interface CloseDiscussionInput {

@@ -4,9 +4,9 @@
 
 AgentBridge 是一个本地优先的 MCP 协作核心，让 Claude Code 和 Codex 能在同一个项目中互相提问、回复、重试、达成一致，并把讨论状态保存在项目本地的 SQLite 数据库中。
 
-> 当前开发版本：v0.6.1。本项目以 GitHub Release 分发本地 stdio MCP；便携包自带 Node.js 运行时，不要求用户另外安装 Node 或 npm。Release 安装后程序独立位于用户目录，不依赖下载目录或源码仓库。
+> 当前开发版本：v0.7.0。本项目以 GitHub Release 分发本地 stdio MCP；便携包自带 Node.js 运行时，不要求用户另外安装 Node 或 npm。Release 安装后程序独立位于用户目录，不依赖下载目录或源码仓库。
 
-> 当前源码验证状态：UTF-8 校验、TypeScript 构建以及 17 个测试文件中的 96 项测试均已通过。Provider 原生会话只会在明确属于同一 discussion 时续接，不会把其他 discussion 或未绑定会话自动复用到新讨论。上述自动化测试不等同于真实 Provider 端到端验收；只有 Claude → Codex 和 Codex → Claude 两个方向都完成实际 `ask_peer` 调用，才能声明真实双向通信可用。
+> 当前源码验证状态：UTF-8 校验、TypeScript 构建以及 18 个测试文件中的 102 项测试均已通过。Provider 原生会话只会在明确属于同一 discussion 时续接，不会把其他 discussion 或未绑定会话自动复用到新讨论。上述自动化测试不等同于真实 Provider 端到端验收；只有 Claude → Codex 和 Codex → Claude 两个方向都完成实际 `ask_peer` 调用，才能声明真实双向通信可用。
 
 > 如果你准备把本项目交给 Claude、Codex 或其他 AI Agent 自动部署，请优先让它完整阅读 [README.ai.md](README.ai.md)。该手册要求 Agent 明确判断当前连接的是 Codex App 的 App Server 还是独立 Codex CLI，并完成 doctor、配置文件、MCP 工具、真实双向调用四层验收。
 
@@ -28,7 +28,7 @@ agentbridge setup
 agentbridge doctor
 ```
 
-从 v0.5.x 升级时，安装 v0.6.1 后执行一次 `agentbridge setup`。它会把已登记的项目级 Claude/Codex 条目迁移为全局条目，保留其他 MCP 配置和各项目已有数据库。然后彻底退出并重启 Claude Code 与 Codex。
+从 v0.5.x 升级时，安装 v0.7.0 后执行一次 `agentbridge setup`。它会把已登记的项目级 Claude/Codex 条目迁移为全局条目，保留其他 MCP 配置和各项目已有数据库。然后彻底退出并重启 Claude Code 与 Codex。
 
 ### 1. 先选择安装方式
 
@@ -56,13 +56,13 @@ agentbridge doctor
 
 1. 从 [最新 Release](https://github.com/HeadStone1/AgentBridge/releases/latest) 下载以下两个文件：
 
-   - `AgentBridge-v0.6.1-win32-x64.zip`
+   - `AgentBridge-v0.7.0-win32-x64.zip`
    - `SHA256SUMS.txt`
 
 2. 在下载目录校验压缩包。下面命令在哈希不一致时会直接报错：
 
 ```powershell
-$asset = 'AgentBridge-v0.6.1-win32-x64.zip'
+$asset = 'AgentBridge-v0.7.0-win32-x64.zip'
 $line = Get-Content -LiteralPath '.\SHA256SUMS.txt' |
   Where-Object { $_ -match "\s+$([regex]::Escape($asset))$" }
 if (-not $line) { throw "SHA256SUMS.txt 中找不到 $asset" }
@@ -72,7 +72,7 @@ if ($actual -ne $expected) { throw "SHA-256 校验失败，禁止安装" }
 "SHA-256 verified: $asset"
 ```
 
-3. 解压 ZIP，进入解压后的 `AgentBridge-v0.6.1-win32-x64` 目录，然后执行一次全局安装：
+3. 解压 ZIP，进入解压后的 `AgentBridge-v0.7.0-win32-x64` 目录，然后执行一次全局安装：
 
 ```powershell
 Unblock-File -LiteralPath '.\install.ps1'
@@ -82,7 +82,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 `Test-Path` 必须返回 `True`。安装完成时，最后应看到类似输出：
 
 ```text
-AgentBridge 0.6.1 installed in C:\Users\<用户名>\.agentbridge
+AgentBridge 0.7.0 installed in C:\Users\<用户名>\.agentbridge
 Launcher: C:\Users\<用户名>\.agentbridge\bin\agentbridge.cmd
 Full uninstall: & "C:\Users\<用户名>\.agentbridge\bin\agentbridge.cmd" uninstall-all --yes --remove-program
 AgentBridge is registered globally. Restart Claude Code and Codex, then open any project.
@@ -116,22 +116,22 @@ uname -m
 
 | 输出 | 下载文件 |
 |---|---|
-| `Linux` + `x86_64` | `AgentBridge-v0.6.1-linux-x64.tar.gz` |
-| `Darwin` + `arm64` | `AgentBridge-v0.6.1-darwin-arm64.tar.gz` |
+| `Linux` + `x86_64` | `AgentBridge-v0.7.0-linux-x64.tar.gz` |
+| `Darwin` + `arm64` | `AgentBridge-v0.7.0-darwin-arm64.tar.gz` |
 
 当前 Release 不提供 Linux ARM64 或 Intel Mac x64 便携包；这些平台请使用 npm 或源码安装。
 
 下载对应压缩包和 `SHA256SUMS.txt` 后校验。Linux 示例：
 
 ```bash
-asset='AgentBridge-v0.6.1-linux-x64.tar.gz'
+asset='AgentBridge-v0.7.0-linux-x64.tar.gz'
 grep "  $asset$" SHA256SUMS.txt | sha256sum -c -
 ```
 
 macOS 示例：
 
 ```bash
-asset='AgentBridge-v0.6.1-darwin-arm64.tar.gz'
+asset='AgentBridge-v0.7.0-darwin-arm64.tar.gz'
 expected=$(awk -v file="$asset" '$2 == file {print $1}' SHA256SUMS.txt)
 actual=$(shasum -a 256 "$asset" | awk '{print $1}')
 test -n "$expected" && test "$actual" = "$expected" || { echo 'SHA-256 校验失败，禁止安装' >&2; exit 1; }
@@ -149,7 +149,7 @@ chmod +x install.sh
 ~/.agentbridge/bin/agentbridge doctor
 ```
 
-压缩包通常已经保留执行权限；如果出现 `Permission denied`，重新执行 `chmod +x install.sh`。安装脚本会依次运行全局 `setup` 和 `doctor`；完成时应看到 `AgentBridge 0.6.1 installed in ...`、`Launcher: ...`、`Full uninstall: ...` 和重启提示。
+压缩包通常已经保留执行权限；如果出现 `Permission denied`，重新执行 `chmod +x install.sh`。安装脚本会依次运行全局 `setup` 和 `doctor`；完成时应看到 `AgentBridge 0.7.0 installed in ...`、`Launcher: ...`、`Full uninstall: ...` 和重启提示。
 
 ### 4. npm 安装（已有 Node.js 的开发者）
 
@@ -257,7 +257,7 @@ Claude 条目应位于用户级 `mcpServers.agentbridge`；Codex 条目应位于
 
 1. 完全退出并重新打开 Claude Code 和 Codex App/CLI，然后在两边打开同一个项目。
 2. 在各客户端的 MCP/工具列表中确认服务器名 `agentbridge` 已加载。客户端版本不同，入口可能显示为 MCP、Tools 或 Integrations。
-3. 应能看到七个工具：`ask_peer`、`reply_peer`、`get_discussion`、`list_discussions`、`close_discussion`、`cancel_discussion`、`retry_discussion`。
+3. 应能看到八个工具：`ask_peer`、`reply_peer`、`get_discussion`、`wait_discussion`、`list_discussions`、`close_discussion`、`cancel_discussion`、`retry_discussion`。
 4. 如果配置文件正确但工具没有出现，查看客户端自己的 MCP 启动错误；`doctor` 无法代替这一检查。
 
 #### 第四层：真实双向调用
@@ -396,7 +396,7 @@ AgentBridge 不会把代码或讨论上传到自己的云服务。实际模型�
 
 - 使用 Node 内置 `node:sqlite` 的 SQLite WAL 存储。
 - 双 MCP 进程共享讨论、消息、决定、审计事件、会话租约和 provider 原生会话 ID。
-- `ask_peer`、`reply_peer`、`get_discussion`、`list_discussions`、`close_discussion`、`cancel_discussion`、`retry_discussion` 七个 MCP 工具。
+- `ask_peer`、`reply_peer`、`get_discussion`、`wait_discussion`、`list_discussions`、`close_discussion`、`cancel_discussion`、`retry_discussion` 八个 MCP 工具。
 - Claude CLI、Codex CLI 和 Codex App Server 的会话 ID 按讨论持久化；MCP 重启后只续接当前 discussion 明确绑定的会话，不跨 discussion 复用未绑定或其他讨论的会话；续接失败时使用 SQLite 历史重建有界上下文。
 - 自动发现 Codex Desktop 自带的可执行程序，优先使用 App Server stdio 协议。
 - App Server 不可用时自动回退到 Codex CLI `exec --json` 和 `exec resume`。
@@ -616,7 +616,8 @@ node packages/cli/dist/index.js status .
 {
   "peer": "codex",
   "message": "请审查这个实现方案。",
-  "projectPath": "/project/path"
+  "projectPath": "/project/path",
+  "maxTurns": 12
 }
 ```
 
@@ -624,6 +625,7 @@ node packages/cli/dist/index.js status .
 - Codex 侧只能选择 `claude`。
 - `projectPath` 可省略，默认使用 MCP 进程当前工作目录。
 - 返回的 `discussionId` 用于后续所有操作。
+- `maxTurns` 可选，范围 1–50；默认 12，表示成功取得的 Provider 回复次数，而不是完整往返轮数。
 
 ### `reply_peer`
 
@@ -647,6 +649,20 @@ node packages/cli/dist/index.js status .
   "discussionId": "dsc_xxxxxxxxxxxx"
 }
 ```
+
+### `wait_discussion`
+
+等待异步派发产生新消息或退出 `QUEUED/RUNNING`，不会因等待超时改变讨论状态：
+
+```json
+{
+  "discussionId": "dsc_xxxxxxxxxxxx",
+  "timeoutMs": 30000,
+  "afterMessageId": "msg_xxxxxxxxxxxx"
+}
+```
+
+同一问题必须复用原 `discussionId`；不要为了轮询结果再次调用 `ask_peer`。`setup` 会为 Claude Code 和 Codex 安全安装 `agentbridge-collaboration` Skill，同名自定义或已修改 Skill 不会被覆盖。
 
 ### `list_discussions`
 
@@ -744,6 +760,7 @@ node packages/cli/dist/index.js <command> [path] [options]
 | `setup [path]` | 全局配置 MCP；可选 path 只用于预初始化一个项目 |
 | `doctor [path]` | 分项检查安装、项目登记、配置、数据库、启动命令和 provider；返回修复建议 |
 | `status [path]` | 显示会话、讨论和审计指标 |
+| `cleanup [path] --older-than-days N [--yes]` | 预览或删除过期的已完成/已取消讨论；无 `--yes` 时只预览 |
 | `register-session` | 手动登记 provider 原生会话 |
 | `version` | 显示当前程序版本 |
 | `update` | 从 GitHub Releases 检查稳定版更新，不安装 |
@@ -771,7 +788,7 @@ node packages/cli/dist/index.js register-session \
   --metadata '{"source":"manual"}'
 ```
 
-支持的会话状态为 `IDLE`、`BUSY`、`BRIDGE_OWNED` 和 `UNKNOWN`。
+支持的会话状态为 `IDLE`、`BUSY`、`BRIDGE_OWNED`、`ARCHIVED` 和 `UNKNOWN`。
 
 ## 环境变量
 
@@ -787,6 +804,9 @@ node packages/cli/dist/index.js register-session \
 | `AGENTBRIDGE_CODEX_MODEL` | Codex CLI 模型覆盖 | 使用 Codex 默认模型 |
 | `AGENTBRIDGE_CODEX_APP_COMMAND` | 仅用于 App Server 的可执行程序覆盖路径 | 未设置时自动发现 Desktop |
 | `AGENTBRIDGE_RECOVERY_MAX_AGE_MS` | 旧讨论恢复阈值 | 默认 30 分钟 |
+| `AGENTBRIDGE_MAX_TURNS` | 每场讨论的成功 Provider 回复上限 | 默认 12，范围 1–50 |
+| `AGENTBRIDGE_DISCUSSION_RETENTION_DAYS` | 启动时清理终态讨论 | 未设置或 `0` 表示永久保留；可选 1–3650 |
+| `AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE` | close/cancel 后尝试归档 Provider 原生会话 | 默认关闭；设为 `1` 启用，Provider 不支持时安全跳过 |
 
 不要把测试专用的 `AGENTBRIDGE_TEST_*` 变量用于生产配置。
 
@@ -1058,9 +1078,9 @@ npm run release:package
 3. 提交代码后创建与 `package.json` 完全一致的标签：
 
 ```bash
-git tag v0.6.1
+git tag v0.7.0
 git push origin main
-git push origin v0.6.1
+git push origin v0.7.0
 ```
 
 标签推送后，[GitHub Actions Release 工作流](.github/workflows/release.yml) 会再次执行构建和测试，然后分别在 Windows、Linux、macOS runner 上打包自带运行时的压缩包，生成 `SHA256SUMS.txt`，最后创建 GitHub Release。标签与 `package.json` 版本不一致时工作流会拒绝发布。

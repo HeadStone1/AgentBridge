@@ -4,9 +4,9 @@
 
 AgentBridge es un puente MCP local que permite que Claude Code y OpenAI Codex se hagan preguntas, respondan, reintenten, alcancen acuerdos y guarden el estado de cada conversación en una base de datos SQLite dentro del proyecto.
 
-> Versión de desarrollo actual: v0.6.1. AgentBridge se registra globalmente una sola vez; cada sesión detecta el proyecto activo y guarda su base SQLite dentro de ese proyecto.
+> Versión de desarrollo actual: v0.7.0. AgentBridge se registra globalmente una sola vez; cada sesión detecta el proyecto activo y guarda su base SQLite dentro de ese proyecto.
 
-> Verificación actual del código fuente: pasan la comprobación UTF-8, la compilación TypeScript y las 96 pruebas de 17 archivos. Una sesión nativa del proveedor solo se reanuda cuando está vinculada explícitamente a la misma conversación; una conversación nueva no hereda sesiones ajenas ni sesiones históricas sin vínculo. Estas pruebas automáticas no sustituyen la validación con proveedores reales: solo declare comunicación bidireccional después de llamadas `ask_peer` correctas de Claude → Codex y Codex → Claude.
+> Verificación actual del código fuente: pasan la comprobación UTF-8, la compilación TypeScript y las 102 pruebas de 18 archivos. Una sesión nativa del proveedor solo se reanuda cuando está vinculada explícitamente a la misma conversación; una conversación nueva no hereda sesiones ajenas ni sesiones históricas sin vínculo. Estas pruebas automáticas no sustituyen la validación con proveedores reales: solo declare comunicación bidireccional después de llamadas `ask_peer` correctas de Claude → Codex y Codex → Claude.
 
 ## Instalación rápida
 
@@ -32,9 +32,9 @@ No mezcle comandos de Release, npm y código fuente. Los paquetes para usuarios 
 
 Descargue `SHA256SUMS.txt` y el paquete de su plataforma:
 
-- Windows x64: `AgentBridge-v0.6.1-win32-x64.zip`
-- Linux x64: `AgentBridge-v0.6.1-linux-x64.tar.gz`
-- macOS Apple Silicon: `AgentBridge-v0.6.1-darwin-arm64.tar.gz`
+- Windows x64: `AgentBridge-v0.7.0-win32-x64.zip`
+- Linux x64: `AgentBridge-v0.7.0-linux-x64.tar.gz`
+- macOS Apple Silicon: `AgentBridge-v0.7.0-darwin-arm64.tar.gz`
 
 Linux ARM64 y macOS Intel requieren actualmente npm o instalación desde el código fuente.
 
@@ -117,7 +117,7 @@ Después de reiniciar ambos clientes, abra cualquier proyecto. La primera herram
 
 1. Ejecute `agentbridge doctor /ruta/absoluta`. Exija `ok: true`, todas las comprobaciones de instalación, proyecto, base de datos y configuración correctas, `providers.claudeCli: true` y el backend Codex solicitado.
 2. Revise `~/.claude.json` y `~/.codex/config.toml`. Claude debe usar `AGENTBRIDGE_AGENT=claude`, Codex debe usar `AGENTBRIDGE_AGENT=codex`, y ninguna entrada global debe fijar `AGENTBRIDGE_PROJECT_PATH`, `AGENTBRIDGE_DB_PATH` ni `cwd`.
-3. Reinicie ambos clientes y confirme que el servidor MCP `agentbridge` ofrece siete herramientas: `ask_peer`, `reply_peer`, `get_discussion`, `list_discussions`, `close_discussion`, `cancel_discussion` y `retry_discussion`.
+3. Reinicie ambos clientes y confirme que el servidor MCP `agentbridge` ofrece ocho herramientas: `ask_peer`, `reply_peer`, `get_discussion`, `wait_discussion`, `list_discussions`, `close_discussion`, `cancel_discussion` y `retry_discussion`.
 4. Realice una llamada real Claude→Codex y otra Codex→Claude con `ask_peer`. Compruebe el registro mediante `agentbridge status /ruta/absoluta`.
 
 `doctor` valida archivos, comandos y proveedores, pero no puede demostrar que una aplicación que ya estaba abierta haya recargado MCP. No declare éxito completo sin los pasos 3 y 4.
@@ -129,6 +129,7 @@ Después de reiniciar ambos clientes, abra cualquier proyecto. La primera herram
 | `setup [ruta]` | Configura globalmente ambos clientes; la ruta opcional solo preinicializa un proyecto |
 | `doctor [ruta]` | Diagnostica instalación, proyecto, base de datos, configuración y proveedores |
 | `status [ruta]` | Muestra sesiones, conversaciones y métricas |
+| `cleanup [ruta] --older-than-days N [--yes]` | Previsualiza o elimina conversaciones finalizadas antiguas |
 | `version` | Muestra la versión instalada |
 | `update` | Busca una versión estable sin modificar archivos |
 | `update --install` | Descarga, verifica e instala el último Release compatible |
@@ -158,6 +159,12 @@ agentbridge doctor
 ```
 
 Reinicie los dos clientes después de actualizar. Las instalaciones Release guardan versiones anteriores y permiten `agentbridge rollback`.
+
+## Flujo de discusión y retención
+
+`setup` instala de forma segura la Skill `agentbridge-collaboration` para Claude Code y Codex; nunca sobrescribe una Skill personalizada o modificada. Reutilice siempre el mismo `discussionId` y use `wait_discussion` cuando el envío esté `QUEUED` o `RUNNING`. `maxTurns` vale 12 de forma predeterminada y cuenta respuestas correctas del proveedor, no ciclos completos.
+
+SQLite conserva el historial indefinidamente por defecto. `cleanup` solo previsualiza salvo que se añada `--yes`, y únicamente elimina conversaciones `COMPLETED` o `CANCELLED`. `AGENTBRIDGE_DISCUSSION_RETENTION_DAYS=1..3650` activa la limpieza al iniciar. Las sesiones nativas se conservan salvo que `AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE=1`; un proveedor sin archivado se omite sin impedir el cierre.
 
 ## Copia de seguridad y desinstalación
 

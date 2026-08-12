@@ -24,6 +24,8 @@ describe('AgentBridge MCP server', () => {
 
     const tools = await client.listTools();
     const askTool = tools.tools.find((tool) => tool.name === 'ask_peer');
+    expect(tools.tools).toHaveLength(8);
+    expect(tools.tools.some((tool) => tool.name === 'wait_discussion')).toBe(true);
     expect(askTool?.inputSchema.properties?.peer).toEqual({
       type: 'string',
       enum: [peer],
@@ -32,12 +34,22 @@ describe('AgentBridge MCP server', () => {
 
     const result = await client.callTool({
       name: 'ask_peer',
-      arguments: { peer, message: `hello from ${agentType}` },
+      arguments: { peer, message: `hello from ${agentType}`, maxTurns: 12 },
     });
     expect(result.isError).not.toBe(true);
     expect(JSON.parse(result.content[0].type === 'text' ? result.content[0].text : '{}')).toMatchObject({
       peer,
       status: 'DISCUSSING',
+    });
+
+    const discussion = JSON.parse(result.content[0].type === 'text' ? result.content[0].text : '{}');
+    const waited = await client.callTool({
+      name: 'wait_discussion',
+      arguments: { discussionId: discussion.discussionId, timeoutMs: 1_000 },
+    });
+    expect(waited.isError).not.toBe(true);
+    expect(JSON.parse(waited.content[0].type === 'text' ? waited.content[0].text : '{}')).toMatchObject({
+      waitTimedOut: false,
     });
 
     await client.close();

@@ -47,7 +47,18 @@ async function createRuntime(projectPath: string): Promise<MCPRuntime> {
   const timeoutMs = readBoundedInteger('AGENTBRIDGE_TIMEOUT_MS', 120_000, 1_000, 600_000);
   const startupTimeoutMs = readBoundedInteger('AGENTBRIDGE_STARTUP_TIMEOUT_MS', 15_000, 1_000, 600_000);
   const maxDurationMs = readBoundedInteger('AGENTBRIDGE_MAX_DURATION_MS', 30 * 60 * 1_000, 1_000, 7 * 24 * 60 * 60 * 1_000);
-  const maxTurns = readBoundedInteger('AGENTBRIDGE_MAX_TURNS', 6, 1, 50);
+  const maxTurns = readBoundedInteger('AGENTBRIDGE_MAX_TURNS', 12, 1, 50);
+  const retentionDays = readBoundedInteger('AGENTBRIDGE_DISCUSSION_RETENTION_DAYS', 0, 0, 3650);
+  if (retentionDays > 0) {
+    const cleanup = storage.cleanupDiscussions(retentionDays, true);
+    audit.log({
+      traceId: `tr_cleanup_${Date.now()}`,
+      discussionId: null,
+      action: 'storage.cleanup',
+      agent: 'system',
+      metadata: cleanup,
+    });
+  }
   const recoveryAgeMs = Number.parseInt(process.env.AGENTBRIDGE_RECOVERY_MAX_AGE_MS ?? '', 10);
   const recovered = storage.recoverStaleDiscussions(
     Number.isInteger(recoveryAgeMs) && recoveryAgeMs > 0 ? recoveryAgeMs : undefined,
@@ -69,6 +80,7 @@ async function createRuntime(projectPath: string): Promise<MCPRuntime> {
       timeoutMs,
       maxDurationMs,
       asyncDispatch: readBoolean('AGENTBRIDGE_ASYNC_DISPATCH', true),
+      archiveSessionsOnClose: readBoolean('AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE', false),
     },
     {
       claude: new ClaudeConnector({ command: process.env.AGENTBRIDGE_CLAUDE_COMMAND, timeoutMs }),

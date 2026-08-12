@@ -1,5 +1,5 @@
 import type { Message } from '@agentbridge/protocol';
-import { isProviderError } from '@agentbridge/protocol';
+import { isProviderError, ProviderError } from '@agentbridge/protocol';
 import type { AgentConnector, PeerResponse, ProviderSessionKind } from './index.js';
 import { CodexAppServerConnector } from './codexAppServer.js';
 import { CodexConnector, type CodexConnectorOptions } from './codex.js';
@@ -74,19 +74,28 @@ export class CodexAutoConnector implements AgentConnector {
     const selected = await this.selectBackend();
     if (!selected) {
       const attempted = this.candidates.map((candidate) => candidate.command).join(', ') || '(none)';
-      throw new Error(
+      throw new ProviderError('UNAVAILABLE',
         `No usable Codex backend was found (mode: ${this.mode}; attempted: ${attempted}). `
         + 'Install Codex Desktop/CLI or set AGENTBRIDGE_CODEX_APP_COMMAND.',
+        { backend: `codex:${this.mode}` },
       );
     }
     try {
       return await selected.connector.sendAndWait(context);
     } catch (cause) {
-      if (selected.info.mode !== 'app-server' || this.mode !== 'auto' || !shouldFallback(cause)) throw cause;
+      if (selected.info.mode !== 'app-server' || this.mode !== 'auto' || !shouldFallback(cause)) {
+        throw withBackend(cause, selected.info);
+      }
       this.invalidateSelection();
       const fallback = await this.selectBackend(true, 'cli');
-      if (!fallback) throw cause;
-      const response = await fallback.connector.sendAndWait(context);
+      if (!fallback) throw withBackend(cause, selected.info);
+      let response: PeerResponse;
+      try {
+        response = await fallback.connector.sendAndWait(context);
+      } catch (fallbackCause) {
+        this.invalidateSelection();
+        throw withBackend(fallbackCause, fallback.info);
+      }
       return {
         ...response,
         backendSwitched: {
@@ -101,6 +110,13 @@ export class CodexAutoConnector implements AgentConnector {
   async cancel(discussionId: string): Promise<void> {
     const selected = await this.selectBackend();
     await selected?.connector.cancel?.(discussionId);
+  }
+
+  async archiveSession(sessionId: string, sessionKind?: ProviderSessionKind): Promise<boolean> {
+    if (sessionKind !== 'codex-app-server') return false;
+    const selected = await this.selectBackend();
+    if (selected?.info.mode !== 'app-server') return false;
+    return selected.connector.archiveSession?.(sessionId, sessionKind) ?? false;
   }
 
   async getSelection(): Promise<CodexBackendSelection | undefined> {
@@ -125,6 +141,7 @@ export class CodexAutoConnector implements AgentConnector {
   }
 
   private invalidateSelection(): void {
+    void this.selection?.then((selected) => selected?.connector.cancel?.(''));
     this.selection = undefined;
     this.selectionExpiresAt = 0;
   }
@@ -183,4 +200,20 @@ function shouldFallback(error: unknown): boolean {
   return !(isProviderError(error) && (
     error.ambiguous || ['AUTH', 'RATE_LIMIT', 'CANCELLED'].includes(error.code)
   ));
+}
+
+function withBackend(error: unknown, backend: CodexBackendSelection): Error {
+  const label = `${backend.mode}:${backend.label}`;
+  if (isProviderError(error)) {
+    return new ProviderError(error.code, error.message, {
+      retryable: error.retryable,
+      ambiguous: error.ambiguous,
+      backend: label,
+      cause: error,
+    });
+  }
+  return new ProviderError('FAILED', error instanceof Error ? error.message : String(error), {
+    backend: label,
+    cause: error,
+  });
 }

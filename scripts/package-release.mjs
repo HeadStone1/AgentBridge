@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -42,6 +43,7 @@ rmSync(output, { recursive: true, force: true });
 mkdirSync(join(output, 'app'), { recursive: true });
 mkdirSync(join(output, 'runtime'), { recursive: true });
 mkdirSync(join(output, 'bin'), { recursive: true });
+mkdirSync(join(output, 'skills'), { recursive: true });
 
 copyFileSync(join(root, 'release', 'agentbridge-cli.mjs'), join(output, 'app', 'agentbridge-cli.mjs'));
 copyFileSync(join(root, 'release', 'agentbridge-mcp.mjs'), join(output, 'app', 'agentbridge-mcp.mjs'));
@@ -50,6 +52,7 @@ for (const file of documentationFiles) {
 }
 copyFileSync(join(root, 'scripts', 'install.ps1'), join(output, 'install.ps1'));
 copyFileSync(join(root, 'scripts', 'install.sh'), join(output, 'install.sh'));
+copyDirectory(join(root, 'skills'), join(output, 'skills'));
 
 if (targetPlatform === 'win32') {
   copyFileSync(runtime, join(output, 'runtime', 'node.exe'));
@@ -84,4 +87,14 @@ function valueAfter(flag) {
   if (inline) return inline.slice(flag.length + 1);
   const index = process.argv.indexOf(flag);
   return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+function copyDirectory(source, target) {
+  mkdirSync(target, { recursive: true });
+  for (const entry of readdirSync(source, { withFileTypes: true })) {
+    const from = join(source, entry.name);
+    const to = join(target, entry.name);
+    if (entry.isDirectory()) copyDirectory(from, to);
+    else if (entry.isFile()) copyFileSync(from, to);
+  }
 }

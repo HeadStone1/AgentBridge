@@ -175,7 +175,13 @@ function runCli(args: string[], extraEnv: Record<string, string> = {}, cwd = rep
   const output = execFileSync(process.execPath, [cli, ...args], {
     cwd,
     encoding: 'utf8',
-    env: { ...process.env, ...extraEnv },
+    env: {
+      ...process.env,
+      AGENTBRIDGE_SKILL_HOME: dirname(extraEnv.AGENTBRIDGE_INSTALL_ROOT ?? cwd),
+      AGENTBRIDGE_CLAUDE_COMMAND: join(cwd, 'unavailable-claude'),
+      AGENTBRIDGE_CODEX_COMMAND: join(cwd, 'unavailable-codex'),
+      ...extraEnv,
+    },
     timeout: 30_000,
     windowsHide: true,
   });

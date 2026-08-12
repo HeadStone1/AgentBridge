@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
 // packages/cli/dist/index.js
-import { existsSync as existsSync7, readFileSync as readFileSync5, rmSync as rmSync4 } from "node:fs";
-import { join as join7, parse as parse2, resolve as resolve7 } from "node:path";
-import { homedir as homedir6 } from "node:os";
-import process6 from "node:process";
+import { existsSync as existsSync8, readFileSync as readFileSync6, rmSync as rmSync5 } from "node:fs";
+import { join as join8, parse as parse2, resolve as resolve8 } from "node:path";
+import { homedir as homedir7 } from "node:os";
+import process7 from "node:process";
 
 // packages/audit/dist/index.js
 var AuditService = class {
@@ -131,12 +131,14 @@ var ProviderError = class extends Error {
   code;
   retryable;
   ambiguous;
+  backend;
   constructor(code, message, options = {}) {
     super(message, options.cause === void 0 ? void 0 : { cause: options.cause });
     this.name = "ProviderError";
     this.code = code;
     this.retryable = options.retryable ?? (code !== "AUTH" && code !== "RATE_LIMIT" && code !== "CANCELLED");
     this.ambiguous = options.ambiguous ?? false;
+    this.backend = options.backend;
   }
 };
 var SessionBusyError = class extends Error {
@@ -289,7 +291,7 @@ function samePath(left, right) {
 }
 
 // packages/storage/dist/index.js
-var DEFAULT_MAX_TURNS = 6;
+var DEFAULT_MAX_TURNS = 12;
 var MAX_ALLOWED_TURNS = 50;
 var MAX_TEXT_LENGTH = 1e5;
 var SQLITE_STARTUP_TIMEOUT_MS = 5e3;
@@ -308,7 +310,7 @@ CREATE TABLE IF NOT EXISTS discussions (
   peer TEXT,
   current_turn INTEGER NOT NULL DEFAULT 0,
   round_count INTEGER NOT NULL DEFAULT 0,
-  max_turns INTEGER NOT NULL DEFAULT 6,
+  max_turns INTEGER NOT NULL DEFAULT 12,
   retry_count INTEGER NOT NULL DEFAULT 0,
   max_retries INTEGER NOT NULL DEFAULT 2,
   created_at TEXT NOT NULL,
@@ -317,6 +319,8 @@ CREATE TABLE IF NOT EXISTS discussions (
   conclusion TEXT,
   project_path TEXT,
   trace_id TEXT NOT NULL
+  ,stop_reason TEXT
+  ,last_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -436,6 +440,8 @@ var Storage = class {
     this.ensureColumn("discussions", "retry_count", "ALTER TABLE discussions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("discussions", "max_retries", "ALTER TABLE discussions ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 2");
     this.ensureColumn("discussions", "round_count", "ALTER TABLE discussions ADD COLUMN round_count INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("discussions", "stop_reason", "ALTER TABLE discussions ADD COLUMN stop_reason TEXT");
+    this.ensureColumn("discussions", "last_error", "ALTER TABLE discussions ADD COLUMN last_error TEXT");
     this.ensureColumn("messages", "provider_session_id", "ALTER TABLE messages ADD COLUMN provider_session_id TEXT");
   }
   ensureColumn(table, columnName, alterSql) {
@@ -510,6 +516,11 @@ var Storage = class {
       throw new Error(`Discussion ${id} not found`);
     this.db.prepare("UPDATE discussions SET dispatch_state = ?, waiting_for = ?, updated_at = ? WHERE id = ?").run(state, waitingFor, (/* @__PURE__ */ new Date()).toISOString(), id);
   }
+  updateDiscussionDiagnostic(id, stopReason, lastError = null) {
+    if (!this.getDiscussion(id))
+      throw new Error(`Discussion ${id} not found`);
+    this.db.prepare("UPDATE discussions SET stop_reason = ?, last_error = ?, updated_at = ? WHERE id = ?").run(stopReason, lastError ? JSON.stringify(lastError) : null, (/* @__PURE__ */ new Date()).toISOString(), id);
+  }
   incrementDiscussionRound(id) {
     const current = this.getDiscussion(id);
     if (!current)
@@ -531,6 +542,35 @@ var Storage = class {
     const query = projectPath ? "SELECT * FROM discussions WHERE project_path = ? ORDER BY created_at DESC" : "SELECT * FROM discussions ORDER BY created_at DESC";
     const rows = projectPath ? this.db.prepare(query).all(projectPath) : this.db.prepare(query).all();
     return rows.map(rowToDiscussion);
+  }
+  cleanupDiscussions(olderThanDays, execute = false) {
+    if (!Number.isInteger(olderThanDays) || olderThanDays < 1 || olderThanDays > 3650) {
+      throw new Error("olderThanDays must be an integer between 1 and 3650");
+    }
+    const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1e3).toISOString();
+    const rows = this.db.prepare(`SELECT id FROM discussions
+       WHERE status IN ('COMPLETED', 'CANCELLED')
+         AND COALESCE(ended_at, updated_at) <= ?
+       ORDER BY COALESCE(ended_at, updated_at) ASC`).all(cutoff);
+    const discussionIds = rows.map((row) => row.id);
+    if (execute && discussionIds.length > 0) {
+      this.transaction(() => {
+        const remove = (table) => {
+          const statement2 = this.db.prepare(`DELETE FROM ${table} WHERE discussion_id = ?`);
+          for (const id of discussionIds)
+            statement2.run(id);
+        };
+        remove("audit_events");
+        remove("agreements");
+        remove("decisions");
+        remove("messages");
+        remove("discussion_leases");
+        const statement = this.db.prepare("DELETE FROM discussions WHERE id = ?");
+        for (const id of discussionIds)
+          statement.run(id);
+      });
+    }
+    return { cutoff, count: discussionIds.length, discussionIds, deleted: execute };
   }
   recoverStaleDiscussions(maxAgeMs = 30 * 60 * 1e3) {
     if (!Number.isInteger(maxAgeMs) || maxAgeMs < 1e3 || maxAgeMs > 7 * 24 * 60 * 60 * 1e3) {
@@ -802,6 +842,9 @@ var Storage = class {
     const rows = projectPath ? this.db.prepare("SELECT * FROM agent_sessions WHERE project_path = ? ORDER BY last_seen_at DESC").all(projectPath) : this.db.prepare("SELECT * FROM agent_sessions ORDER BY last_seen_at DESC").all();
     return rows.map(rowToAgentSession);
   }
+  listSessionsForDiscussion(discussionId) {
+    return this.listSessions().filter((session) => session.metadata.discussionId === discussionId);
+  }
   updateSessionStatus(provider, sessionId, status2, metadata) {
     const current = this.getSession(provider, sessionId);
     if (!current)
@@ -846,8 +889,20 @@ function rowToDiscussion(row) {
     projectPath: row.project_path ?? resolveProjectPath(),
     traceId: row.trace_id,
     dispatchState: row.dispatch_state ?? null,
-    waitingFor: row.waiting_for ?? null
+    waitingFor: row.waiting_for ?? null,
+    stopReason: row.stop_reason ?? null,
+    lastError: parseJsonObject(row.last_error)
   };
+}
+function parseJsonObject(value) {
+  if (typeof value !== "string" || !value)
+    return null;
+  try {
+    const parsed = JSON.parse(value);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 function rowToMessage(row) {
   return {
@@ -1145,11 +1200,11 @@ function defaultGlobalCodexConfig() {
 }
 
 // packages/cli/dist/diagnostics.js
-import { accessSync, constants, existsSync as existsSync5, readFileSync as readFileSync3, statSync as statSync3 } from "node:fs";
-import { delimiter, isAbsolute as isAbsolute2, join as join5, resolve as resolve5 } from "node:path";
-import { homedir as homedir4 } from "node:os";
+import { accessSync, constants, existsSync as existsSync6, readFileSync as readFileSync4, statSync as statSync4 } from "node:fs";
+import { delimiter, isAbsolute as isAbsolute2, join as join6, resolve as resolve6 } from "node:path";
+import { homedir as homedir5 } from "node:os";
 import { spawn as spawn5 } from "node:child_process";
-import process4 from "node:process";
+import process5 from "node:process";
 
 // packages/connectors/dist/claude.js
 import { randomUUID as randomUUID3 } from "node:crypto";
@@ -1281,7 +1336,7 @@ function parseClaudeOutput(stdout) {
   }
 }
 function runProcess(command, args, cwd, timeoutMs, signal) {
-  return new Promise((resolve8, reject) => {
+  return new Promise((resolve9, reject) => {
     const child = spawn(command, args, {
       cwd,
       windowsHide: true,
@@ -1340,7 +1395,7 @@ function runProcess(command, args, cwd, timeoutMs, signal) {
       if (termination) {
         finish(() => reject(new ProviderError(termination.code, termination.message)));
       } else {
-        finish(() => resolve8({ exitCode, stdout, stderr }));
+        finish(() => resolve9({ exitCode, stdout, stderr }));
       }
     });
     if (signal?.aborted)
@@ -1479,7 +1534,7 @@ function isRecord2(value) {
   return typeof value === "object" && value !== null;
 }
 function runProcess2(command, args, cwd, timeoutMs, signal) {
-  return new Promise((resolve8, reject) => {
+  return new Promise((resolve9, reject) => {
     const child = spawn2(command, args, {
       cwd,
       windowsHide: true,
@@ -1538,7 +1593,7 @@ function runProcess2(command, args, cwd, timeoutMs, signal) {
       if (termination) {
         finish(() => reject(new ProviderError(termination.code, termination.message)));
       } else {
-        finish(() => resolve8({ exitCode, stdout, stderr }));
+        finish(() => resolve9({ exitCode, stdout, stderr }));
       }
     });
     if (signal?.aborted)
@@ -1599,7 +1654,11 @@ var CodexAppServerConnector = class {
   async isAvailable() {
     if (!this.command.trim())
       return false;
-    this.availability ??= probe(this.command, this.serverArgs);
+    this.availability ??= this.ensureServer().then(() => true).catch(() => {
+      this.closeServer();
+      this.availability = void 0;
+      return false;
+    });
     return this.availability;
   }
   async getAvailability() {
@@ -1684,11 +1743,23 @@ var CodexAppServerConnector = class {
     }
     await this.interruptTurn(discussionId);
   }
+  async archiveSession(sessionId) {
+    if (!await this.isAvailable())
+      return false;
+    try {
+      await this.request("thread/archive", { threadId: sessionId }, this.startupTimeoutMs);
+      return true;
+    } catch (cause) {
+      if (isUnsupportedMethod(cause))
+        return false;
+      throw cause;
+    }
+  }
   async runSerial(operation) {
     const previous = this.serial;
     let release;
-    this.serial = new Promise((resolve8) => {
-      release = resolve8;
+    this.serial = new Promise((resolve9) => {
+      release = resolve9;
     });
     await previous;
     try {
@@ -1796,7 +1867,7 @@ var CodexAppServerConnector = class {
       return Promise.reject(new ProviderError("UNAVAILABLE", "Codex App Server is not running"));
     }
     const id = this.nextRequestId++;
-    return new Promise((resolve8, reject) => {
+    return new Promise((resolve9, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new ProviderError("TIMEOUT", `Codex App Server request timed out: ${method}`));
@@ -1804,7 +1875,7 @@ var CodexAppServerConnector = class {
       this.pending.set(id, {
         resolve: (value) => {
           clearTimeout(timer);
-          resolve8(value);
+          resolve9(value);
         },
         reject: (error) => {
           clearTimeout(timer);
@@ -1848,6 +1919,8 @@ var CodexAppServerConnector = class {
           pending.reject(providerErrorFromMessage(message.error));
         else
           pending.resolve(isRecord3(message.result) ? message.result : {});
+      } else if (typeof message.method === "string" && message.id !== void 0) {
+        this.respondToServerRequest(message);
       } else if (typeof message.method === "string") {
         const waiter = this.eventWaiters.shift();
         if (waiter)
@@ -1857,14 +1930,23 @@ var CodexAppServerConnector = class {
       }
     }
   }
+  respondToServerRequest(message) {
+    if (!this.child || this.child.exitCode !== null || this.child.killed)
+      return;
+    const method = String(message.method);
+    const id = message.id;
+    const response = /approval/i.test(method) ? { id, result: { decision: "decline" } } : { id, error: { code: -32601, message: `AgentBridge cannot satisfy interactive request ${method}` } };
+    this.child.stdin.write(`${JSON.stringify(response)}
+`);
+  }
   nextEvent(timeoutMs) {
     const queued = this.events.shift();
     if (queued)
       return Promise.resolve(queued);
-    return new Promise((resolve8, reject) => {
+    return new Promise((resolve9, reject) => {
       const waiter = (event) => {
         clearTimeout(timer);
-        resolve8(event);
+        resolve9(event);
       };
       const timer = setTimeout(() => {
         const index = this.eventWaiters.indexOf(waiter);
@@ -1899,6 +1981,7 @@ var CodexAppServerConnector = class {
     const child = this.child;
     this.child = void 0;
     this.initialized = false;
+    this.availability = void 0;
     this.buffer = "";
     this.events.splice(0, this.events.length);
     if (child && child.exitCode === null) {
@@ -1920,23 +2003,6 @@ var CodexAppServerConnector = class {
     }
   }
 };
-async function probe(command, serverArgs) {
-  return new Promise((resolve8) => {
-    const child = spawn3(command, [...serverArgs, "app-server", "--help"], { windowsHide: true, shell: false });
-    const timer = setTimeout(() => {
-      child.kill();
-      resolve8(false);
-    }, 1e4);
-    child.once("error", () => {
-      clearTimeout(timer);
-      resolve8(false);
-    });
-    child.once("close", (code) => {
-      clearTimeout(timer);
-      resolve8(code === 0);
-    });
-  });
-}
 function readString(value) {
   return typeof value === "string" && value.length > 0 ? value : void 0;
 }
@@ -1995,6 +2061,10 @@ function isSessionLostError(error) {
   const text = error instanceof Error ? error.message : String(error);
   return /session|thread/i.test(text) && /not found|missing|lost|expired|invalid|unknown/i.test(text);
 }
+function isUnsupportedMethod(error) {
+  const text = error instanceof Error ? error.message : String(error);
+  return /method.*not found|unsupported|unknown method/i.test(text);
+}
 function redact(value) {
   return value.replace(/(token|password|api[_ -]?key)\s*[:=]\s*[^\s]+/gi, "$1=[REDACTED]").trim();
 }
@@ -2008,6 +2078,7 @@ function withStderr(error, stderrTail, ambiguous = false) {
     return new ProviderError(error.code, message, {
       retryable: error.retryable,
       ambiguous: error.ambiguous || ambiguous,
+      backend: error.backend,
       cause: error
     });
   }
@@ -2031,8 +2102,9 @@ function discoverCodexCommands(options = {}) {
   addEnvironmentCandidate(candidates, env.AGENTBRIDGE_CODEX_APP_COMMAND, "AGENTBRIDGE_CODEX_APP_COMMAND", "app-server");
   addEnvironmentCandidate(candidates, env.AGENTBRIDGE_CODEX_COMMAND, "AGENTBRIDGE_CODEX_COMMAND", "auto");
   addEnvironmentCandidate(candidates, env.CODEX_CLI_PATH, "CODEX_CLI_PATH", "auto");
-  if (candidates.length > 0)
+  if (candidates.some((candidate) => candidate.mode !== "app-server")) {
     return deduplicate(candidates, platform === "win32");
+  }
   if (platform === "win32") {
     const localAppData = env.LOCALAPPDATA;
     if (localAppData) {
@@ -2040,7 +2112,7 @@ function discoverCodexCommands(options = {}) {
       addPathCandidate(candidates, pathApi.join(desktopBin, "codex.exe"), "Codex Desktop (Windows)", pathExists);
       if (pathExists(desktopBin)) {
         try {
-          const versioned = readDirectory(desktopBin).filter((name) => /^codex-\d+(?:\.\d+)*\.exe$/i.test(name)).sort((left, right) => right.localeCompare(left));
+          const versioned = readDirectory(desktopBin).filter((name) => /^codex-\d+(?:\.\d+)*\.exe$/i.test(name)).sort(compareVersionedExecutables);
           for (const name of versioned) {
             addPathCandidate(candidates, pathApi.join(desktopBin, name), "Codex Desktop bundled runtime (Windows)", pathExists);
           }
@@ -2058,6 +2130,17 @@ function discoverCodexCommands(options = {}) {
   }
   candidates.push({ command: platform === "win32" ? "codex.exe" : "codex", source: "system", label: "PATH", mode: "auto" });
   return deduplicate(candidates, platform === "win32");
+}
+function compareVersionedExecutables(left, right) {
+  const parts = (value) => (value.match(/\d+(?:\.\d+)*/)?.[0] ?? "0").split(".").map(Number);
+  const a = parts(left);
+  const b = parts(right);
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    const difference = (b[index] ?? 0) - (a[index] ?? 0);
+    if (difference !== 0)
+      return difference;
+  }
+  return right.localeCompare(left);
 }
 function addEnvironmentCandidate(candidates, command, label, mode) {
   if (!command?.trim())
@@ -2107,18 +2190,25 @@ var CodexAutoConnector = class {
     const selected = await this.selectBackend();
     if (!selected) {
       const attempted = this.candidates.map((candidate) => candidate.command).join(", ") || "(none)";
-      throw new Error(`No usable Codex backend was found (mode: ${this.mode}; attempted: ${attempted}). Install Codex Desktop/CLI or set AGENTBRIDGE_CODEX_APP_COMMAND.`);
+      throw new ProviderError("UNAVAILABLE", `No usable Codex backend was found (mode: ${this.mode}; attempted: ${attempted}). Install Codex Desktop/CLI or set AGENTBRIDGE_CODEX_APP_COMMAND.`, { backend: `codex:${this.mode}` });
     }
     try {
       return await selected.connector.sendAndWait(context);
     } catch (cause) {
-      if (selected.info.mode !== "app-server" || this.mode !== "auto" || !shouldFallback(cause))
-        throw cause;
+      if (selected.info.mode !== "app-server" || this.mode !== "auto" || !shouldFallback(cause)) {
+        throw withBackend(cause, selected.info);
+      }
       this.invalidateSelection();
       const fallback = await this.selectBackend(true, "cli");
       if (!fallback)
-        throw cause;
-      const response = await fallback.connector.sendAndWait(context);
+        throw withBackend(cause, selected.info);
+      let response;
+      try {
+        response = await fallback.connector.sendAndWait(context);
+      } catch (fallbackCause) {
+        this.invalidateSelection();
+        throw withBackend(fallbackCause, fallback.info);
+      }
       return {
         ...response,
         backendSwitched: {
@@ -2132,6 +2222,14 @@ var CodexAutoConnector = class {
   async cancel(discussionId) {
     const selected = await this.selectBackend();
     await selected?.connector.cancel?.(discussionId);
+  }
+  async archiveSession(sessionId, sessionKind) {
+    if (sessionKind !== "codex-app-server")
+      return false;
+    const selected = await this.selectBackend();
+    if (selected?.info.mode !== "app-server")
+      return false;
+    return selected.connector.archiveSession?.(sessionId, sessionKind) ?? false;
   }
   async getSelection() {
     return (await this.selectBackend())?.info;
@@ -2150,6 +2248,7 @@ var CodexAutoConnector = class {
     return this.selection;
   }
   invalidateSelection() {
+    void this.selection?.then((selected) => selected?.connector.cancel?.(""));
     this.selection = void 0;
     this.selectionExpiresAt = 0;
   }
@@ -2201,6 +2300,21 @@ function readMode(value) {
 }
 function shouldFallback(error) {
   return !(isProviderError(error) && (error.ambiguous || ["AUTH", "RATE_LIMIT", "CANCELLED"].includes(error.code)));
+}
+function withBackend(error, backend) {
+  const label = `${backend.mode}:${backend.label}`;
+  if (isProviderError(error)) {
+    return new ProviderError(error.code, error.message, {
+      retryable: error.retryable,
+      ambiguous: error.ambiguous,
+      backend: label,
+      cause: error
+    });
+  }
+  return new ProviderError("FAILED", error instanceof Error ? error.message : String(error), {
+    backend: label,
+    cause: error
+  });
 }
 
 // packages/cli/dist/installation.js
@@ -2363,13 +2477,156 @@ function removalEnv(extra = {}) {
   };
 }
 
+// packages/cli/dist/skills.js
+import { createHash as createHash2 } from "node:crypto";
+import { copyFileSync as copyFileSync2, existsSync as existsSync5, mkdirSync as mkdirSync4, readFileSync as readFileSync3, readdirSync as readdirSync3, rmSync as rmSync3, statSync as statSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { dirname as dirname6, join as join5, relative as relative2, resolve as resolve5 } from "node:path";
+import { fileURLToPath } from "node:url";
+import process4 from "node:process";
+var SKILL_NAME = "agentbridge-collaboration";
+function installManagedSkills(version, env = process4.env, homeDirectory = skillHome(env)) {
+  const source = findSkillSource(env);
+  const sourceHash = hashDirectory(source);
+  const manifest = readManifest(env);
+  const targets = skillTargets(env, homeDirectory);
+  const results = targets.map((target) => {
+    const previous = manifest.targets.find((item) => samePath2(item.path, target));
+    if (existsSync5(target)) {
+      const existingHash = hashDirectory(target);
+      if (!previous || previous.hash !== existingHash) {
+        return { path: target, installed: false, conflict: true, reason: "existing skill is not an unmodified AgentBridge-managed copy" };
+      }
+      rmSync3(target, { recursive: true, force: true });
+    }
+    copyDirectory(source, target);
+    return { path: target, installed: true, conflict: false, hash: sourceHash, version };
+  });
+  manifest.targets = [
+    ...manifest.targets.filter((item) => !targets.some((target) => samePath2(item.path, target))),
+    ...results.filter((item) => item.installed).map((item) => ({ path: item.path, hash: sourceHash, version }))
+  ];
+  writeManifest(manifest, env);
+  return { source, sourceHash, targets: results };
+}
+function removeManagedSkills(env = process4.env) {
+  const manifest = readManifest(env);
+  const results = manifest.targets.map((target) => {
+    if (!existsSync5(target.path))
+      return { path: target.path, removed: false, reason: "missing" };
+    if (hashDirectory(target.path) !== target.hash) {
+      return { path: target.path, removed: false, reason: "modified skill preserved" };
+    }
+    rmSync3(target.path, { recursive: true, force: true });
+    return { path: target.path, removed: true };
+  });
+  manifest.targets = manifest.targets.filter((target) => existsSync5(target.path));
+  writeManifest(manifest, env);
+  return { targets: results };
+}
+function inspectManagedSkills(env = process4.env, homeDirectory = skillHome(env)) {
+  const manifest = readManifest(env);
+  const targets = skillTargets(env, homeDirectory).map((path) => {
+    const managed = manifest.targets.find((item) => samePath2(item.path, path));
+    const exists = existsSync5(path);
+    const hash = exists ? hashDirectory(path) : null;
+    return {
+      path,
+      exists,
+      managed: Boolean(managed),
+      custom: exists && !managed,
+      modified: Boolean(managed && hash !== managed.hash),
+      version: managed?.version ?? null
+    };
+  });
+  return { ok: targets.every((target) => target.exists), targets };
+}
+function findSkillSource(env) {
+  const moduleDirectory = dirname6(fileURLToPath(import.meta.url));
+  const candidates = [
+    env.AGENTBRIDGE_SKILL_SOURCE,
+    join5(moduleDirectory, "..", "skills", SKILL_NAME),
+    join5(moduleDirectory, "..", "..", "..", "skills", SKILL_NAME)
+  ].filter((value) => Boolean(value));
+  const source = candidates.map((candidate) => resolve5(candidate)).find((path) => existsSync5(join5(path, "SKILL.md")));
+  if (!source)
+    throw new Error(`Bundled ${SKILL_NAME} skill was not found`);
+  return source;
+}
+function skillTargets(env, homeDirectory) {
+  const claudeRoot = resolve5(env.CLAUDE_CONFIG_DIR ?? join5(homeDirectory, ".claude"));
+  const agentsRoot = resolve5(env.AGENTBRIDGE_AGENTS_DIR ?? join5(homeDirectory, ".agents"));
+  return [join5(claudeRoot, "skills", SKILL_NAME), join5(agentsRoot, "skills", SKILL_NAME)];
+}
+function skillHome(env) {
+  return resolve5(env.AGENTBRIDGE_SKILL_HOME ?? env.HOME ?? env.USERPROFILE ?? homedir4());
+}
+function manifestPath(env) {
+  return join5(registryRoot(env), "managed-skills.json");
+}
+function readManifest(env) {
+  const path = manifestPath(env);
+  if (!existsSync5(path))
+    return { version: 1, targets: [] };
+  try {
+    const value = JSON.parse(readFileSync3(path, "utf8"));
+    return value.version === 1 && Array.isArray(value.targets) ? value : { version: 1, targets: [] };
+  } catch {
+    return { version: 1, targets: [] };
+  }
+}
+function writeManifest(manifest, env) {
+  const path = manifestPath(env);
+  if (manifest.targets.length === 0) {
+    rmSync3(path, { force: true });
+    return;
+  }
+  mkdirSync4(dirname6(path), { recursive: true });
+  writeFileSync3(path, `${JSON.stringify(manifest, null, 2)}
+`, "utf8");
+}
+function copyDirectory(source, target) {
+  mkdirSync4(target, { recursive: true });
+  for (const entry of readdirSync3(source, { withFileTypes: true })) {
+    const from = join5(source, entry.name);
+    const to = join5(target, entry.name);
+    if (entry.isDirectory())
+      copyDirectory(from, to);
+    else if (entry.isFile())
+      copyFileSync2(from, to);
+  }
+}
+function hashDirectory(path) {
+  const hash = createHash2("sha256");
+  const visit = (directory) => {
+    for (const entry of readdirSync3(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const absolute = join5(directory, entry.name);
+      if (entry.isDirectory())
+        visit(absolute);
+      else if (entry.isFile()) {
+        hash.update(relative2(path, absolute).replace(/\\/g, "/"));
+        hash.update(readFileSync3(absolute));
+      }
+    }
+  };
+  if (!existsSync5(path) || !statSync3(path).isDirectory())
+    return "";
+  visit(path);
+  return hash.digest("hex");
+}
+function samePath2(left, right) {
+  const a = resolve5(left);
+  const b = resolve5(right);
+  return process4.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
 // packages/cli/dist/diagnostics.js
-async function runDoctor(projectPathValue, options = {}, env = process4.env) {
-  const projectPath = resolve5(projectPathValue);
-  const stateDir = join5(projectPath, ".agentbridge");
-  const projectFile = join5(stateDir, "project.json");
-  const dbPath = resolve5(env.AGENTBRIDGE_DB_PATH ?? join5(stateDir, "agentbridge.sqlite"));
-  const claudeConfig = String(options["claude-config"] ?? join5(homedir4(), ".claude.json"));
+async function runDoctor(projectPathValue, options = {}, env = process5.env) {
+  const projectPath = resolve6(projectPathValue);
+  const stateDir = join6(projectPath, ".agentbridge");
+  const projectFile = join6(stateDir, "project.json");
+  const dbPath = resolve6(env.AGENTBRIDGE_DB_PATH ?? join6(stateDir, "agentbridge.sqlite"));
+  const claudeConfig = String(options["claude-config"] ?? join6(homedir5(), ".claude.json"));
   const codexConfig = String(options["codex-config"] ?? defaultGlobalCodexConfig());
   const recommendations = [];
   const project = inspectProject(projectPath, projectFile);
@@ -2398,9 +2655,12 @@ async function runDoctor(projectPathValue, options = {}, env = process4.env) {
     recommendations.push("Install/login to Claude Code or set AGENTBRIDGE_CLAUDE_COMMAND.");
   if (!providers.codexSelectedBackend)
     recommendations.push("Install/login to Codex App or Codex CLI, or pass an explicit Codex command.");
+  const skills = inspectManagedSkills(env);
+  if (!skills.ok)
+    recommendations.push("Run setup again to install the AgentBridge collaboration skill for Claude and Codex.");
   const node = {
-    ok: isSupportedNode(process4.versions.node),
-    version: process4.versions.node,
+    ok: isSupportedNode(process5.versions.node),
+    version: process5.versions.node,
     required: ">=22.13.0",
     bundled: installation.mode === "release"
   };
@@ -2419,12 +2679,13 @@ async function runDoctor(projectPathValue, options = {}, env = process4.env) {
     configuration.codex.ok,
     providers.claudeCli,
     Boolean(providers.codexSelectedBackend),
-    providers.modeError === null
+    providers.modeError === null,
+    skills.ok
   ];
   const ok = requiredChecks.every(Boolean);
   return {
     ok,
-    platform: { os: process4.platform, arch: process4.arch },
+    platform: { os: process5.platform, arch: process5.arch },
     node,
     installation,
     project,
@@ -2432,6 +2693,7 @@ async function runDoctor(projectPathValue, options = {}, env = process4.env) {
     registry,
     configuration,
     providers,
+    skills,
     summary: {
       passed: requiredChecks.filter(Boolean).length,
       failed: requiredChecks.filter((value) => !value).length,
@@ -2442,14 +2704,14 @@ async function runDoctor(projectPathValue, options = {}, env = process4.env) {
   };
 }
 function inspectProject(projectPath, projectFile) {
-  const exists = existsSync5(projectPath) && safeIsDirectory(projectPath);
-  const initialized = existsSync5(projectFile);
+  const exists = existsSync6(projectPath) && safeIsDirectory(projectPath);
+  const initialized = existsSync6(projectFile);
   let metadataValid = false;
   let error = null;
   if (initialized) {
     try {
-      const value = JSON.parse(readFileSync3(projectFile, "utf8"));
-      metadataValid = typeof value.rootPath === "string" && samePath2(value.rootPath, projectPath);
+      const value = JSON.parse(readFileSync4(projectFile, "utf8"));
+      metadataValid = typeof value.rootPath === "string" && samePath3(value.rootPath, projectPath);
       if (!metadataValid)
         error = "project.json does not identify this project path";
     } catch (cause) {
@@ -2461,7 +2723,7 @@ function inspectProject(projectPath, projectFile) {
 function inspectDatabase(initialized, stateDir, dbPath) {
   if (!initialized) {
     try {
-      accessSync(resolve5(stateDir, ".."), constants.R_OK | constants.W_OK);
+      accessSync(resolve6(stateDir, ".."), constants.R_OK | constants.W_OK);
       return { ok: true, path: dbPath, exists: false, tested: false, autoInitialize: true };
     } catch (cause) {
       return { ok: false, path: dbPath, exists: false, tested: false, autoInitialize: true, error: errorMessage(cause) };
@@ -2469,23 +2731,23 @@ function inspectDatabase(initialized, stateDir, dbPath) {
   }
   try {
     accessSync(stateDir, constants.R_OK | constants.W_OK);
-    const existed = existsSync5(dbPath);
+    const existed = existsSync6(dbPath);
     const storage = new Storage(dbPath);
     try {
       storage.recoverExpiredSessionLeases();
     } finally {
       storage.close();
     }
-    return { ok: true, path: dbPath, exists: existed || existsSync5(dbPath), tested: true, readable: true, writable: true };
+    return { ok: true, path: dbPath, exists: existed || existsSync6(dbPath), tested: true, readable: true, writable: true };
   } catch (cause) {
-    return { ok: false, path: dbPath, exists: existsSync5(dbPath), tested: true, error: errorMessage(cause) };
+    return { ok: false, path: dbPath, exists: existsSync6(dbPath), tested: true, error: errorMessage(cause) };
   }
 }
 function inspectClaudeConfig(path) {
-  if (!existsSync5(path))
+  if (!existsSync6(path))
     return { ok: false, path, exists: false, configured: false, error: "configuration file is missing" };
   try {
-    const root = JSON.parse(readFileSync3(path, "utf8"));
+    const root = JSON.parse(readFileSync4(path, "utf8"));
     const server = root.mcpServers?.agentbridge;
     if (!server || typeof server.command !== "string") {
       return { ok: false, path, exists: true, configured: false, error: "global agentbridge server is missing" };
@@ -2511,10 +2773,10 @@ function inspectClaudeConfig(path) {
   }
 }
 function inspectCodexConfig(path) {
-  if (!existsSync5(path))
+  if (!existsSync6(path))
     return { ok: false, path, exists: false, configured: false, error: "configuration file is missing" };
   try {
-    const source = readFileSync3(path, "utf8");
+    const source = readFileSync4(path, "utf8");
     const section = extractTomlSection(source, "mcp_servers.agentbridge");
     if (!section)
       return { ok: false, path, exists: true, configured: false, error: "agentbridge section is missing" };
@@ -2554,36 +2816,40 @@ async function inspectProviders(options, env) {
   if (typeof options["codex-command"] === "string")
     discoveryEnv.AGENTBRIDGE_CODEX_COMMAND = options["codex-command"];
   const codexAuto = new CodexAutoConnector({ mode: codexMode, candidates: discoverCodexCommands({ env: discoveryEnv }) });
-  const [claudeCli, codexSelection, codexAppDetected] = await Promise.all([
-    safely(() => new ClaudeConnector({ command: env.AGENTBRIDGE_CLAUDE_COMMAND }).isAvailable(), false),
-    safely(() => codexAuto.getSelection(), null),
-    isProcessRunning("codex")
-  ]);
-  const codexCli = codexSelection ? await safely(() => new CodexConnector({ command: codexSelection.command }).isAvailable(), false) : false;
-  return {
-    claudeCli,
-    codexCli,
-    codexAppServer: codexSelection?.mode === "app-server",
-    codexSelectedBackend: codexSelection,
-    codexCandidates: codexAuto.getCandidates().map(({ command, source, label, mode }) => ({ command, source, label, mode })),
-    codexAppDetected,
-    requestedMode: codexMode,
-    modeError,
-    availability: {
-      claude: claudeCli ? "BACKGROUND" : "UNAVAILABLE",
-      codex: codexSelection ? "BACKGROUND" : "UNAVAILABLE"
-    },
-    note: "App Server is preferred. codexAppDetected is informational; AgentBridge capability-probes executables and does not attach to an open GUI process."
-  };
+  try {
+    const [claudeCli, codexSelection, codexAppDetected] = await Promise.all([
+      safely(() => new ClaudeConnector({ command: env.AGENTBRIDGE_CLAUDE_COMMAND }).isAvailable(), false),
+      safely(() => codexAuto.getSelection(), null),
+      isProcessRunning("codex")
+    ]);
+    const codexCli = codexSelection ? await safely(() => new CodexConnector({ command: codexSelection.command }).isAvailable(), false) : false;
+    return {
+      claudeCli,
+      codexCli,
+      codexAppServer: codexSelection?.mode === "app-server",
+      codexSelectedBackend: codexSelection,
+      codexCandidates: codexAuto.getCandidates().map(({ command, source, label, mode }) => ({ command, source, label, mode })),
+      codexAppDetected,
+      requestedMode: codexMode,
+      modeError,
+      availability: {
+        claude: claudeCli ? "BACKGROUND" : "UNAVAILABLE",
+        codex: codexSelection ? "BACKGROUND" : "UNAVAILABLE"
+      },
+      note: "App Server is preferred. codexAppDetected is informational; AgentBridge capability-probes executables and does not attach to an open GUI process."
+    };
+  } finally {
+    await codexAuto.cancel("");
+  }
 }
 function inspectRegistry(projectPath, env) {
   const path = registryPath(env);
   const projects = readProjectRegistry(env);
   let valid = true;
   let error = null;
-  if (existsSync5(path)) {
+  if (existsSync6(path)) {
     try {
-      const value = JSON.parse(readFileSync3(path, "utf8"));
+      const value = JSON.parse(readFileSync4(path, "utf8"));
       valid = value.version === 1 && Array.isArray(value.projects);
       if (!valid)
         error = "registry format is not supported";
@@ -2597,17 +2863,17 @@ function inspectRegistry(projectPath, env) {
     readable: true,
     valid,
     error,
-    registered: projects.some((item) => samePath2(item.projectPath, projectPath)),
+    registered: projects.some((item) => samePath3(item.projectPath, projectPath)),
     projectCount: projects.length
   };
 }
-function isCommandAvailable(command, env = process4.env) {
+function isCommandAvailable(command, env = process5.env) {
   if (isAbsolute2(command) || command.includes("/") || command.includes("\\"))
-    return existsSync5(resolve5(command));
-  const extensions = process4.platform === "win32" ? (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";") : [""];
+    return existsSync6(resolve6(command));
+  const extensions = process5.platform === "win32" ? (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";") : [""];
   return (env.PATH ?? "").split(delimiter).some((directory) => extensions.some((extension) => {
-    const candidate = join5(directory, process4.platform === "win32" && !command.toLowerCase().endsWith(extension.toLowerCase()) ? `${command}${extension}` : command);
-    return existsSync5(candidate);
+    const candidate = join6(directory, process5.platform === "win32" && !command.toLowerCase().endsWith(extension.toLowerCase()) ? `${command}${extension}` : command);
+    return existsSync6(candidate);
   }));
 }
 function extractTomlSection(source, name) {
@@ -2639,7 +2905,7 @@ function areEntryArgumentsAvailable(value) {
   if (typeof first !== "string" || first === "mcp")
     return typeof first === "string";
   const looksLikePath = isAbsolute2(first) || first.includes("/") || first.includes("\\") || /\.[cm]?js$/i.test(first);
-  return !looksLikePath || existsSync5(resolve5(first));
+  return !looksLikePath || existsSync6(resolve6(first));
 }
 function decodeTomlBasicString(value) {
   return value.replace(/\\(\\|"|b|f|n|r|t)/g, (match, escape) => ({
@@ -2654,7 +2920,7 @@ function decodeTomlBasicString(value) {
 }
 function safeIsDirectory(path) {
   try {
-    return statSync3(path).isDirectory();
+    return statSync4(path).isDirectory();
   } catch {
     return false;
   }
@@ -2676,8 +2942,8 @@ async function safely(operation, fallback) {
   }
 }
 function isProcessRunning(processName) {
-  const command = process4.platform === "win32" ? "tasklist" : "ps";
-  const args = process4.platform === "win32" ? ["/FO", "CSV", "/NH"] : ["-A", "-o", "comm="];
+  const command = process5.platform === "win32" ? "tasklist" : "ps";
+  const args = process5.platform === "win32" ? ["/FO", "CSV", "/NH"] : ["-A", "-o", "comm="];
   return new Promise((done) => {
     const child = spawn5(command, args, { windowsHide: true, shell: false });
     let output = "";
@@ -2703,20 +2969,20 @@ function isProcessRunning(processName) {
 function errorMessage(cause) {
   return cause instanceof Error ? cause.message : String(cause);
 }
-function samePath2(left, right) {
-  const a = resolve5(left);
-  const b = resolve5(right);
-  return process4.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+function samePath3(left, right) {
+  const a = resolve6(left);
+  const b = resolve6(right);
+  return process5.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
 // packages/cli/dist/releaseManager.js
-import { createHash as createHash2 } from "node:crypto";
-import { existsSync as existsSync6, mkdtempSync, readFileSync as readFileSync4, readdirSync as readdirSync3, rmSync as rmSync3, writeFileSync as writeFileSync3 } from "node:fs";
-import { homedir as homedir5, tmpdir } from "node:os";
-import { basename as basename3, join as join6, resolve as resolve6 } from "node:path";
+import { createHash as createHash3 } from "node:crypto";
+import { existsSync as existsSync7, mkdtempSync, readFileSync as readFileSync5, readdirSync as readdirSync4, rmSync as rmSync4, writeFileSync as writeFileSync4 } from "node:fs";
+import { homedir as homedir6, tmpdir } from "node:os";
+import { basename as basename3, join as join7, resolve as resolve7 } from "node:path";
 import { spawnSync } from "node:child_process";
-import process5 from "node:process";
-var CURRENT_VERSION = true ? "0.6.1" : readWorkspaceVersion();
+import process6 from "node:process";
+var CURRENT_VERSION = true ? "0.7.0" : readWorkspaceVersion();
 var DEFAULT_RELEASE_REPOSITORY = "HeadStone1/AgentBridge";
 function normalizeVersion(value) {
   return value.trim().replace(/^v/i, "").split("+", 1)[0];
@@ -2742,16 +3008,16 @@ function compareVersions(left, right) {
     return -1;
   return a.prerelease.localeCompare(b.prerelease, void 0, { numeric: true });
 }
-function releaseAssetName(version, platform = process5.platform, arch = process5.arch) {
+function releaseAssetName(version, platform = process6.platform, arch = process6.arch) {
   const extension = platform === "win32" ? "zip" : "tar.gz";
   return `AgentBridge-v${normalizeVersion(version)}-${platform}-${arch}.${extension}`;
 }
-function installRoot(env = process5.env) {
-  return resolve6(env.AGENTBRIDGE_INSTALL_ROOT ?? join6(homedir5(), ".agentbridge"));
+function installRoot(env = process6.env) {
+  return resolve7(env.AGENTBRIDGE_INSTALL_ROOT ?? join7(homedir6(), ".agentbridge"));
 }
 async function checkForUpdate(options = {}) {
   const channel = options.channel ?? "stable";
-  const repository = options.repository ?? process5.env.AGENTBRIDGE_RELEASE_REPOSITORY ?? DEFAULT_RELEASE_REPOSITORY;
+  const repository = options.repository ?? process6.env.AGENTBRIDGE_RELEASE_REPOSITORY ?? DEFAULT_RELEASE_REPOSITORY;
   const fetchImpl = options.fetchImpl ?? fetch;
   const endpoint = channel === "stable" ? `https://api.github.com/repos/${repository}/releases/latest` : `https://api.github.com/repos/${repository}/releases?per_page=20`;
   const response = await fetchImpl(endpoint, {
@@ -2804,14 +3070,14 @@ async function installUpdate(release, info) {
     throw new Error(`Release asset not found: ${info.assetName}`);
   if (!checksums)
     throw new Error("Release is missing SHA256SUMS.txt; refusing an unverified update");
-  const directory = mkdtempSync(join6(tmpdir(), "agentbridge-update-"));
+  const directory = mkdtempSync(join7(tmpdir(), "agentbridge-update-"));
   try {
-    const archivePath = join6(directory, asset.name);
-    const checksumPath = join6(directory, checksums.name);
+    const archivePath = join7(directory, asset.name);
+    const checksumPath = join7(directory, checksums.name);
     await download(asset.browser_download_url, archivePath);
     await download(checksums.browser_download_url, checksumPath);
-    verifyChecksum(archivePath, readFileSync4(checksumPath, "utf8"));
-    const extract = process5.platform === "win32" ? spawnSync("powershell.exe", [
+    verifyChecksum(archivePath, readFileSync5(checksumPath, "utf8"));
+    const extract = process6.platform === "win32" ? spawnSync("powershell.exe", [
       "-NoProfile",
       "-Command",
       "Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force",
@@ -2825,30 +3091,32 @@ async function installUpdate(release, info) {
     runInstaller(packageDirectory, installRoot());
     return { ...info, installed: true, message: `Installed AgentBridge ${info.latestVersion}. Restart Claude and Codex.` };
   } finally {
-    rmSync3(directory, { recursive: true, force: true });
+    rmSync4(directory, { recursive: true, force: true });
   }
 }
 function rollbackInstalledRelease(root = installRoot()) {
-  const currentFile = join6(root, "current");
-  const versionsDirectory = join6(root, "versions");
-  if (!existsSync6(currentFile) || !existsSync6(versionsDirectory)) {
+  const currentFile = join7(root, "current");
+  const versionsDirectory = join7(root, "versions");
+  if (!existsSync7(currentFile) || !existsSync7(versionsDirectory)) {
     throw new Error("AgentBridge is not installed in versioned Release mode");
   }
-  const current = readFileSync4(currentFile, "utf8").trim();
-  const versions = readdirSync3(versionsDirectory, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort(compareVersions);
+  const current = readFileSync5(currentFile, "utf8").trim();
+  const versions = readdirSync4(versionsDirectory, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort(compareVersions);
   const candidates = versions.filter((version) => compareVersions(version, current) < 0);
   const previous = candidates.at(-1);
   if (!previous)
     throw new Error(`No installed version older than ${current} is available`);
-  writeFileSync3(currentFile, `${previous}
+  writeFileSync4(currentFile, `${previous}
 `, "utf8");
-  return { previousVersion: current, currentVersion: previous, installRoot: root };
+  const skillSource = join7(versionsDirectory, previous, "skills", "agentbridge-collaboration");
+  const skills = existsSync7(join7(skillSource, "SKILL.md")) ? installManagedSkills(previous, { ...process6.env, AGENTBRIDGE_SKILL_SOURCE: skillSource }) : { skipped: true, reason: "selected release does not contain the collaboration skill" };
+  return { previousVersion: current, currentVersion: previous, installRoot: root, skills };
 }
 async function download(url, destination) {
   const response = await fetch(url, { headers: { "User-Agent": `AgentBridge/${CURRENT_VERSION}` }, redirect: "follow" });
   if (!response.ok)
     throw new Error(`Download failed: HTTP ${response.status}`);
-  writeFileSync3(destination, Buffer.from(await response.arrayBuffer()));
+  writeFileSync4(destination, Buffer.from(await response.arrayBuffer()));
 }
 function verifyChecksum(archivePath, checksumList) {
   const name = basename3(archivePath);
@@ -2856,30 +3124,30 @@ function verifyChecksum(archivePath, checksumList) {
   if (!line)
     throw new Error(`Checksum not found for ${name}`);
   const expected = line.trim().split(/\s+/, 1)[0].toLowerCase();
-  const actual = createHash2("sha256").update(readFileSync4(archivePath)).digest("hex");
+  const actual = createHash3("sha256").update(readFileSync5(archivePath)).digest("hex");
   if (actual !== expected)
     throw new Error(`Checksum verification failed for ${name}`);
 }
 function findPackageDirectory(directory) {
-  const directInstaller = process5.platform === "win32" ? "install.ps1" : "install.sh";
-  if (existsSync6(join6(directory, directInstaller)))
+  const directInstaller = process6.platform === "win32" ? "install.ps1" : "install.sh";
+  if (existsSync7(join7(directory, directInstaller)))
     return directory;
-  const child = readdirSync3(directory, { withFileTypes: true }).find((entry) => entry.isDirectory() && existsSync6(join6(directory, entry.name, directInstaller)));
+  const child = readdirSync4(directory, { withFileTypes: true }).find((entry) => entry.isDirectory() && existsSync7(join7(directory, entry.name, directInstaller)));
   if (!child)
     throw new Error(`Extracted release does not contain ${directInstaller}`);
-  return join6(directory, child.name);
+  return join7(directory, child.name);
 }
 function runInstaller(packageDirectory, targetRoot) {
-  const result = process5.platform === "win32" ? spawnSync("powershell.exe", [
+  const result = process6.platform === "win32" ? spawnSync("powershell.exe", [
     "-NoProfile",
     "-ExecutionPolicy",
     "Bypass",
     "-File",
-    join6(packageDirectory, "install.ps1"),
+    join7(packageDirectory, "install.ps1"),
     "-NoSetup",
     "-InstallRoot",
     targetRoot
-  ], { cwd: packageDirectory, stdio: "inherit", windowsHide: true }) : spawnSync("sh", [join6(packageDirectory, "install.sh"), "--no-setup", "--install-root", targetRoot], {
+  ], { cwd: packageDirectory, stdio: "inherit", windowsHide: true }) : spawnSync("sh", [join7(packageDirectory, "install.sh"), "--no-setup", "--install-root", targetRoot], {
     cwd: packageDirectory,
     stdio: "inherit"
   });
@@ -2892,7 +3160,7 @@ async function main(argv) {
   const command = argv[0] ?? "help";
   const { options, positional } = parseArgs(argv.slice(1));
   const projectArgument = options["project-path"] ?? positional[0];
-  const projectPath = resolve7(String(projectArgument ?? process6.cwd()));
+  const projectPath = resolve8(String(projectArgument ?? process7.cwd()));
   switch (command) {
     case "help":
       printHelp();
@@ -2908,6 +3176,9 @@ async function main(argv) {
       return;
     case "status":
       console.log(JSON.stringify(status(projectPath), null, 2));
+      return;
+    case "cleanup":
+      console.log(JSON.stringify(cleanup(projectPath, options), null, 2));
       return;
     case "doctor":
       console.log(JSON.stringify(await runDoctor(projectPath, options), null, 2));
@@ -2938,14 +3209,15 @@ function initProject(projectPath) {
 }
 function setupGlobal(projectPath, options) {
   const project = projectPath ? initProject(projectPath) : null;
-  const claudeConfig = String(options["claude-config"] ?? join7(homedir6(), ".claude.json"));
+  const skills = installManagedSkills(CURRENT_VERSION);
+  const claudeConfig = String(options["claude-config"] ?? join8(homedir7(), ".claude.json"));
   const codexConfig = String(options["codex-config"] ?? defaultGlobalCodexConfig());
   if (options["no-config"] === true) {
     const projects2 = projectPath ? registerProject({ projectPath, claudeConfig, codexConfig, scope: "global" }) : readProjectRegistry();
-    return { registrationMode: "global", project, configured: [], registeredProjects: projects2.length };
+    return { registrationMode: "global", project, configured: [], skills, registeredProjects: projects2.length };
   }
-  const releaseLauncher = process6.env.AGENTBRIDGE_LAUNCHER;
-  const mcpCommand = String(options["mcp-command"] ?? releaseLauncher ?? process6.execPath);
+  const releaseLauncher = process7.env.AGENTBRIDGE_LAUNCHER;
+  const mcpCommand = String(options["mcp-command"] ?? releaseLauncher ?? process7.execPath);
   const mcpEntry = String(options["mcp-entry"] ?? defaultMcpEntry());
   const sharedEnv = {
     AGENTBRIDGE_CLAUDE_CONFIG: claudeConfig,
@@ -2960,7 +3232,7 @@ function setupGlobal(projectPath, options) {
   if (typeof options["codex-mode"] === "string") {
     sharedEnv.AGENTBRIDGE_CODEX_MODE = parseCodexMode2(options["codex-mode"]);
   }
-  const args = releaseLauncher && mcpCommand === releaseLauncher ? ["mcp"] : mcpCommand === process6.execPath ? [mcpEntry] : [];
+  const args = releaseLauncher && mcpCommand === releaseLauncher ? ["mcp"] : mcpCommand === process7.execPath ? [mcpEntry] : [];
   const claudeServer = {
     command: mcpCommand,
     args,
@@ -2976,7 +3248,7 @@ function setupGlobal(projectPath, options) {
     configureClaudeGlobal(claudeConfig, claudeServer),
     configureCodexToml(codexConfig, codexServer)
   ];
-  const migratedCodexConfigs = legacyRegistrations.filter((item) => item.scope !== "global" && resolve7(item.codexConfig) !== resolve7(codexConfig)).map((item) => removeCodexToml(item.codexConfig));
+  const migratedCodexConfigs = legacyRegistrations.filter((item) => item.scope !== "global" && resolve8(item.codexConfig) !== resolve8(codexConfig)).map((item) => removeCodexToml(item.codexConfig));
   let projects = legacyRegistrations;
   for (const registration of legacyRegistrations) {
     projects = registerProject({
@@ -2998,11 +3270,24 @@ function setupGlobal(projectPath, options) {
     },
     configured,
     migratedCodexConfigs,
-    registeredProjects: projects.length
+    registeredProjects: projects.length,
+    skills
   };
 }
+function cleanup(projectPath, options) {
+  const value = options["older-than-days"];
+  if (typeof value !== "string")
+    throw new Error("--older-than-days is required");
+  const olderThanDays = Number.parseInt(value, 10);
+  const storage = openStorage(projectPath);
+  try {
+    return storage.cleanupDiscussions(olderThanDays, options.yes === true);
+  } finally {
+    storage.close();
+  }
+}
 function defaultMcpEntry() {
-  return resolveMcpEntry(process6.argv[1]);
+  return resolveMcpEntry(process7.argv[1]);
 }
 function registerSession(options, projectPath) {
   const provider = String(options.provider ?? "");
@@ -3053,7 +3338,7 @@ async function update(options) {
 function uninstallProject(projectPath, confirmed, options) {
   if (!confirmed)
     throw new Error("Refusing to remove local state without --yes");
-  const claudeConfig = String(options["claude-config"] ?? join7(homedir6(), ".claude.json"));
+  const claudeConfig = String(options["claude-config"] ?? join8(homedir7(), ".claude.json"));
   const registration = readProjectRegistry().find((item) => projectPathKey(item.projectPath) === projectPathKey(projectPath));
   const codexConfig = String(options["codex-config"] ?? registration?.codexConfig ?? defaultGlobalCodexConfig());
   return removeProject(registration ?? { projectPath, claudeConfig, codexConfig, scope: "global" }, true);
@@ -3066,14 +3351,14 @@ function uninstallAll(confirmed, options) {
   if (removeProgram && installation.mode === "source") {
     throw new Error("Cannot automatically remove a source checkout. Run uninstall-all --yes without --remove-program, then delete the repository yourself.");
   }
-  const defaultClaudeConfig = String(options["claude-config"] ?? join7(homedir6(), ".claude.json"));
+  const defaultClaudeConfig = String(options["claude-config"] ?? join8(homedir7(), ".claude.json"));
   const defaultCodexGlobalConfig = String(options["codex-config"] ?? defaultGlobalCodexConfig());
   const registrations = readProjectRegistry();
   const byPath = /* @__PURE__ */ new Map();
   for (const registration of registrations)
     byPath.set(projectPathKey(registration.projectPath), registration);
   for (const discoveredPath of listClaudeAgentBridgeProjects(defaultClaudeConfig)) {
-    const projectPath = resolve7(discoveredPath);
+    const projectPath = resolve8(discoveredPath);
     const key = projectPathKey(projectPath);
     if (!byPath.has(key)) {
       byPath.set(key, {
@@ -3099,17 +3384,18 @@ function uninstallAll(confirmed, options) {
     }
   }
   const globalConfigTargets = /* @__PURE__ */ new Map();
-  globalConfigTargets.set(`${resolve7(defaultClaudeConfig)}\0${resolve7(defaultCodexGlobalConfig)}`, {
+  globalConfigTargets.set(`${resolve8(defaultClaudeConfig)}\0${resolve8(defaultCodexGlobalConfig)}`, {
     claudeConfig: defaultClaudeConfig,
     codexConfig: defaultCodexGlobalConfig
   });
   for (const registration of registrations.filter((item) => item.scope === "global")) {
-    globalConfigTargets.set(`${resolve7(registration.claudeConfig)}\0${resolve7(registration.codexConfig)}`, registration);
+    globalConfigTargets.set(`${resolve8(registration.claudeConfig)}\0${resolve8(registration.codexConfig)}`, registration);
   }
   const globalConfigs = [...globalConfigTargets.values()].flatMap((target) => [
     removeClaudeGlobal(target.claudeConfig),
     removeCodexToml(target.codexConfig)
   ]);
+  const skills = removeManagedSkills();
   let program = null;
   if (removeProgram && errors.length === 0) {
     if (installation.mode === "npm")
@@ -3123,6 +3409,7 @@ function uninstallAll(confirmed, options) {
     removedProjects: projects.length,
     projects,
     globalConfigs,
+    skills,
     errors,
     program,
     complete: errors.length === 0,
@@ -3130,8 +3417,8 @@ function uninstallAll(confirmed, options) {
   };
 }
 function removeProject(registration, updateRegistry) {
-  const projectPath = resolve7(registration.projectPath);
-  const stateDir = resolve7(projectPath, ".agentbridge");
+  const projectPath = resolve8(registration.projectPath);
+  const stateDir = resolve8(projectPath, ".agentbridge");
   if (stateDir === parse2(stateDir).root || stateDir === projectPath) {
     throw new Error(`Refusing to remove an unsafe state path: ${stateDir}`);
   }
@@ -3143,14 +3430,14 @@ function removeProject(registration, updateRegistry) {
   const removed = [];
   if (sharedInstallRoot) {
     for (const name of ["project.json", "agentbridge.sqlite", "agentbridge.sqlite-wal", "agentbridge.sqlite-shm"]) {
-      const path = join7(stateDir, name);
-      if (existsSync7(path)) {
-        rmSync4(path, { force: true });
+      const path = join8(stateDir, name);
+      if (existsSync8(path)) {
+        rmSync5(path, { force: true });
         removed.push(path);
       }
     }
-  } else if (existsSync7(stateDir)) {
-    rmSync4(stateDir, { recursive: true, force: true });
+  } else if (existsSync8(stateDir)) {
+    rmSync5(stateDir, { recursive: true, force: true });
     removed.push(stateDir);
   }
   if (updateRegistry)
@@ -3163,18 +3450,18 @@ function parseCodexMode2(value) {
   throw new Error("--codex-mode must be auto, app-server, or cli");
 }
 function projectPathKey(value) {
-  const path = resolve7(value);
-  return process6.platform === "win32" ? path.toLowerCase() : path;
+  const path = resolve8(value);
+  return process7.platform === "win32" ? path.toLowerCase() : path;
 }
 function openStorage(projectPath) {
-  const dbPath = process6.env.AGENTBRIDGE_DB_PATH ?? join7(projectPath, ".agentbridge", "agentbridge.sqlite");
+  const dbPath = process7.env.AGENTBRIDGE_DB_PATH ?? join8(projectPath, ".agentbridge", "agentbridge.sqlite");
   return new Storage(dbPath);
 }
 function readProject(projectPath) {
-  const projectFile = join7(projectPath, ".agentbridge", "project.json");
-  if (!existsSync7(projectFile))
+  const projectFile = join8(projectPath, ".agentbridge", "project.json");
+  if (!existsSync8(projectFile))
     return null;
-  return JSON.parse(readFileSync5(projectFile, "utf8"));
+  return JSON.parse(readFileSync6(projectFile, "utf8"));
 }
 function parseArgs(args) {
   const options = {};
@@ -3206,6 +3493,7 @@ function printHelp() {
     "  setup [path]                Register MCP globally once; optional path initializes one project",
     "  register-session             Register a provider-native session",
     "  status [path]               Show sessions, discussions, and metrics",
+    "  cleanup [path]              Preview/delete old completed discussions",
     "  doctor [path]               Diagnose install, config, database, and providers",
     "  version                     Show the installed AgentBridge version",
     "  update [--install]          Check GitHub Releases; install only with --install",
@@ -3229,11 +3517,12 @@ function printHelp() {
     "  --codex-command PATH        Override Codex executable (auto/CLI)",
     "  --channel stable|beta       Select the update channel (default: stable)",
     "  --remove-program            With uninstall-all, remove installed program files",
+    "  --older-than-days N         Cleanup cutoff (1-3650 days); add --yes to delete",
     "  --claude-config PATH",
     "  --codex-config PATH"
   ].join("\n"));
 }
-main(process6.argv.slice(2)).catch((error) => {
+main(process7.argv.slice(2)).catch((error) => {
   console.error(error instanceof Error ? error.message : String(error));
-  process6.exitCode = 1;
+  process7.exitCode = 1;
 });

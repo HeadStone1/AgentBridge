@@ -6,6 +6,8 @@ import type {
   Discussion,
   DiscussionStatus,
   DispatchState,
+  DiscussionError,
+  DiscussionStopReason,
   Message,
   MessageRole,
   SessionStatus,
@@ -30,6 +32,7 @@ export interface StoragePort {
   getDiscussion(id: string): Discussion | null;
   updateDiscussionStatus(id: string, status: DiscussionStatus, extra?: Partial<Discussion>): void;
   updateDiscussionDispatch(id: string, state: DispatchState | null, waitingFor?: AgentType | null): void;
+  updateDiscussionDiagnostic(id: string, stopReason: DiscussionStopReason | null, lastError?: DiscussionError | null): void;
   incrementDiscussionRound(id: string): Discussion;
   incrementRetry(id: string): Discussion;
   createMessage(data: {
@@ -80,6 +83,7 @@ export interface StoragePort {
   recoverExpiredSessionLeases(now?: Date): number;
   recoverStaleDiscussions(maxAgeMs?: number): Discussion[];
   pruneSessions(maxAgeMs?: number): number;
+  cleanupDiscussions(olderThanDays: number, execute?: boolean): { cutoff: string; count: number; discussionIds: string[]; deleted: boolean };
   appendAudit(event: Omit<AuditEvent, 'id' | 'timestamp'>): AuditEvent;
   getAuditLog(discussionId?: string, limit?: number): AuditEvent[];
 
@@ -101,4 +105,5 @@ export interface StoragePort {
     discussionId: string,
     projectPath: string,
   ): AgentSession | null;
+  listSessionsForDiscussion(discussionId: string): AgentSession[];
 }

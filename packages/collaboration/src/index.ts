@@ -11,6 +11,7 @@ import type {
   CloseDiscussionOutput,
   CancelDiscussionOutput,
   RetryDiscussionOutput,
+  WaitDiscussionOutput,
 } from '@agentbridge/protocol';
 import {
   canRetry,
@@ -28,6 +29,7 @@ export interface CollaborationConfig {
   maxDurationMs?: number;
   maxTotalMessageChars?: number;
   asyncDispatch?: boolean;
+  archiveSessionsOnClose?: boolean;
 }
 
 export type ConnectorRegistry = Partial<Record<AgentType, AgentConnector>>;
@@ -46,6 +48,7 @@ export class CollaborationService {
   private readonly maxDurationMs: number;
   private readonly maxTotalMessageChars: number;
   private readonly asyncDispatch: boolean;
+  private readonly archiveSessionsOnClose: boolean;
   private readonly connectors: ConnectorRegistry;
   private readonly ownerId = `collaboration:${process.pid}:${randomUUID()}`;
   private readonly inFlight = new Map<string, InFlightOperation>();
@@ -60,11 +63,15 @@ export class CollaborationService {
   ) {
     this.storage = storage;
     this.audit = audit;
-    this.maxTurns = config.maxTurns ?? 6;
+    this.maxTurns = config.maxTurns ?? 12;
     this.timeoutMs = config.timeoutMs ?? 120_000;
     this.maxDurationMs = config.maxDurationMs ?? 30 * 60 * 1_000;
     this.maxTotalMessageChars = config.maxTotalMessageChars ?? 500_000;
     this.asyncDispatch = config.asyncDispatch ?? false;
+    this.archiveSessionsOnClose = config.archiveSessionsOnClose ?? false;
+    if (!Number.isInteger(this.maxTurns) || this.maxTurns < 1 || this.maxTurns > 50) {
+      throw new Error('maxTurns must be an integer between 1 and 50');
+    }
     if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1_000 || this.timeoutMs > 600_000) {
       throw new Error('timeoutMs must be an integer between 1000 and 600000');
     }
@@ -88,6 +95,9 @@ export class CollaborationService {
   }): Promise<AskPeerOutput> {
     const projectPath = resolveProjectPath(params.projectPath);
     const maxTurns = params.maxTurns ?? this.maxTurns;
+    if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 50) {
+      throw new Error('maxTurns must be an integer between 1 and 50');
+    }
     assertParticipants(params.driver, params.peer);
     assertText(params.initialMessage, 'message');
     if (params.initialMessage.length > this.maxTotalMessageChars) {
@@ -168,7 +178,19 @@ export class CollaborationService {
     }
     this.ensureNoDispatchInFlight(params.discussionId);
     this.ensureWithinBudget(discussion, params.reply);
-    const overRoundBudget = discussion.roundCount >= discussion.maxTurns;
+    if (discussion.roundCount >= discussion.maxTurns) {
+      this.storage.updateDiscussionStatus(params.discussionId, 'NEEDS_USER_DECISION');
+      this.storage.updateDiscussionDiagnostic(params.discussionId, 'MAX_TURNS');
+      this.storage.updateDiscussionDispatch(params.discussionId, 'FAILED', null);
+      this.audit.log({
+        traceId: discussion.traceId,
+        discussionId: params.discussionId,
+        action: 'discussion.max_turns',
+        agent: params.sender,
+        metadata: { roundCount: discussion.roundCount, maxTurns: discussion.maxTurns },
+      });
+      throw new Error(`Discussion ${params.discussionId} reached its provider response limit (${discussion.maxTurns})`);
+    }
 
     const receiver = params.sender === discussion.driver ? discussion.peer : discussion.driver;
     this.ensureProviderNotLeased(receiver, discussion.projectPath);
@@ -196,18 +218,6 @@ export class CollaborationService {
         agent: params.sender,
         metadata: { messageId: message.id, role: 'response' },
       });
-
-      if (overRoundBudget) {
-        this.storage.updateDiscussionStatus(params.discussionId, 'TIMEOUT');
-        this.audit.log({
-          traceId: discussion.traceId,
-          discussionId: params.discussionId,
-          action: 'discussion.timeout',
-          agent: params.sender,
-          metadata: { roundCount: discussion.roundCount, maxTurns: discussion.maxTurns, messageId: message.id },
-        });
-        return { messageId: message.id, status: 'TIMEOUT' };
-      }
 
       this.storage.updateDiscussionStatus(params.discussionId, 'DISCUSSING');
       this.queueDispatch(params.discussionId, receiver);
@@ -249,7 +259,41 @@ export class CollaborationService {
       discussion,
       messages: this.storage.getMessages(discussionId),
       decision: this.storage.getDecisionByDiscussion(discussionId),
+      providerSessions: this.storage.listSessionsForDiscussion(discussionId).map((session) => ({
+        provider: session.provider,
+        sessionId: session.sessionId,
+        kind: typeof session.metadata.sessionKind === 'string' ? session.metadata.sessionKind : null,
+        status: session.status,
+        lastSeenAt: session.lastSeenAt,
+      })),
     };
+  }
+
+  async waitForDiscussion(
+    discussionId: string,
+    timeoutMs = 30_000,
+    afterMessageId?: string,
+  ): Promise<WaitDiscussionOutput> {
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 120_000) {
+      throw new Error('timeoutMs must be an integer between 1000 and 120000');
+    }
+    const deadline = Date.now() + timeoutMs;
+    const initialMessages = this.storage.getMessages(discussionId);
+    const wakeAfterMessageId = afterMessageId ?? initialMessages.at(-1)?.id;
+    while (true) {
+      const snapshot = await this.getDiscussion(discussionId);
+      const lastMessageId = snapshot.messages.at(-1)?.id ?? null;
+      const hasNewMessage = wakeAfterMessageId
+        ? this.storage.getMessages(discussionId, wakeAfterMessageId).length > 0
+        : false;
+      const settled = isTerminal(snapshot.discussion.status)
+        || isPaused(snapshot.discussion.status)
+        || (snapshot.discussion.dispatchState !== 'QUEUED' && snapshot.discussion.dispatchState !== 'RUNNING');
+      if (hasNewMessage || settled) return { ...snapshot, waitTimedOut: false, lastMessageId };
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return { ...snapshot, waitTimedOut: true, lastMessageId };
+      await new Promise((resolve) => setTimeout(resolve, Math.min(200, remaining)));
+    }
   }
 
   async closeDiscussion(params: {
@@ -471,6 +515,7 @@ export class CollaborationService {
         agent: params.agent,
         metadata: {},
       });
+      this.archiveDiscussionSessions(discussion.id);
       return { discussionId: discussion.id, status: 'CANCELLED' };
     } finally {
       this.cancellationRequests.delete(params.discussionId);
@@ -773,6 +818,7 @@ export class CollaborationService {
     } catch (cause) {
       try {
         this.storage.updateDiscussionDispatch(discussionId, 'FAILED', null);
+        this.storage.updateDiscussionDiagnostic(discussionId, 'PROVIDER_ERROR', diagnosticFromError(cause, receiver, trackedSession?.metadata.sessionKind));
       } catch {
         // Preserve the provider error if persistence is unavailable during failure handling.
       }
@@ -851,6 +897,7 @@ export class CollaborationService {
   }
 
   private queueDispatch(discussionId: string, receiver: AgentType): void {
+    this.storage.updateDiscussionDiagnostic(discussionId, null, null);
     this.storage.updateDiscussionDispatch(discussionId, 'QUEUED', receiver);
   }
 
@@ -918,6 +965,7 @@ export class CollaborationService {
     const elapsed = Date.now() - Date.parse(discussion.createdAt);
     if (elapsed > this.maxDurationMs) {
       this.storage.updateDiscussionStatus(discussion.id, 'TIMEOUT', { endedAt: new Date().toISOString() });
+      this.storage.updateDiscussionDiagnostic(discussion.id, 'MAX_DURATION');
       this.audit.log({
         traceId: this.storage.getDiscussion(discussion.id)?.traceId ?? `tr_${discussion.id}`,
         discussionId: discussion.id,
@@ -931,6 +979,7 @@ export class CollaborationService {
       .reduce((total, message) => total + message.content.length, 0);
     if (currentLength + extraContent.length > this.maxTotalMessageChars) {
       this.storage.updateDiscussionStatus(discussion.id, 'TIMEOUT', { endedAt: new Date().toISOString() });
+      this.storage.updateDiscussionDiagnostic(discussion.id, 'MESSAGE_BUDGET');
       this.audit.log({
         traceId: this.storage.getDiscussion(discussion.id)?.traceId ?? `tr_${discussion.id}`,
         discussionId: discussion.id,
@@ -977,7 +1026,34 @@ export class CollaborationService {
       agent: 'system',
       metadata: { decisionId: decision.id },
     });
+    this.archiveDiscussionSessions(discussion.id);
     return { discussionId: discussion.id, status: 'COMPLETED', decisionId: decision.id };
+  }
+
+  private archiveDiscussionSessions(discussionId: string): void {
+    if (!this.archiveSessionsOnClose) return;
+    for (const session of this.storage.listSessionsForDiscussion(discussionId)) {
+      const connector = this.connectors[session.provider];
+      const kind = readProviderSessionKind(session.metadata.sessionKind);
+      void Promise.resolve(connector?.archiveSession?.(session.sessionId, kind) ?? false)
+        .then((archived) => {
+          if (archived) this.storage.updateSessionStatus(session.provider, session.sessionId, 'ARCHIVED', session.metadata);
+          this.audit.log({
+            traceId: this.storage.getDiscussion(discussionId)?.traceId ?? `tr_${discussionId}`,
+            discussionId,
+            action: archived ? 'session.archived' : 'session.archive_unsupported',
+            agent: session.provider,
+            metadata: { sessionId: session.sessionId, sessionKind: kind ?? null },
+          });
+        })
+        .catch((cause) => this.audit.log({
+          traceId: this.storage.getDiscussion(discussionId)?.traceId ?? `tr_${discussionId}`,
+          discussionId,
+          action: 'session.archive_failed',
+          agent: session.provider,
+          metadata: { sessionId: session.sessionId, error: redactDiagnostic(cause instanceof Error ? cause.message : String(cause)) },
+        }));
+    }
   }
 }
 
@@ -1047,9 +1123,10 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, onTimeout?
   }
 }
 
-function classifyFailure(cause: unknown): 'FAILED' | 'PEER_BUSY' | 'TIMEOUT' | 'CANCELLED' {
+function classifyFailure(cause: unknown): 'FAILED' | 'PEER_BUSY' | 'TIMEOUT' | 'CANCELLED' | 'NEEDS_USER_DECISION' {
   if (cause instanceof SessionBusyError) return 'PEER_BUSY';
   if (isProviderError(cause)) {
+    if (cause.ambiguous) return 'NEEDS_USER_DECISION';
     if (cause.code === 'BUSY' || cause.code === 'UNAVAILABLE') return 'PEER_BUSY';
     if (cause.code === 'TIMEOUT') return 'TIMEOUT';
     if (cause.code === 'CANCELLED') return 'CANCELLED';
@@ -1058,6 +1135,26 @@ function classifyFailure(cause: unknown): 'FAILED' | 'PEER_BUSY' | 'TIMEOUT' | '
   if (message.includes('busy') || message.includes('not available')) return 'PEER_BUSY';
   if (message.includes('timed out') || message.includes('timeout') || message.includes('duration')) return 'TIMEOUT';
   return 'FAILED';
+}
+
+function diagnosticFromError(cause: unknown, receiver: AgentType, backend: unknown) {
+  const message = redactDiagnostic(cause instanceof Error ? cause.message : String(cause));
+  return {
+    code: isProviderError(cause) ? cause.code : 'FAILED',
+    message,
+    backend: isProviderError(cause) && cause.backend
+      ? cause.backend
+      : typeof backend === 'string' ? backend : receiver,
+    retryable: isProviderError(cause) ? cause.retryable : true,
+    ambiguous: isProviderError(cause) ? cause.ambiguous : false,
+    at: new Date().toISOString(),
+  };
+}
+
+function redactDiagnostic(value: string): string {
+  return value
+    .replace(/(token|password|api[_ -]?key)\s*[:=]\s*[^\s;]+/gi, '$1=[REDACTED]')
+    .slice(0, 4_096);
 }
 
 async function waitForCompletion(promise: Promise<void>, timeoutMs: number): Promise<boolean> {

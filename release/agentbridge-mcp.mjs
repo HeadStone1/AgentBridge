@@ -7047,12 +7047,14 @@ var ProviderError = class extends Error {
   code;
   retryable;
   ambiguous;
+  backend;
   constructor(code, message, options = {}) {
     super(message, options.cause === void 0 ? void 0 : { cause: options.cause });
     this.name = "ProviderError";
     this.code = code;
     this.retryable = options.retryable ?? (code !== "AUTH" && code !== "RATE_LIMIT" && code !== "CANCELLED");
     this.ambiguous = options.ambiguous ?? false;
+    this.backend = options.backend;
   }
 };
 var SessionBusyError = class extends Error {
@@ -7080,6 +7082,7 @@ var CollaborationService = class {
   maxDurationMs;
   maxTotalMessageChars;
   asyncDispatch;
+  archiveSessionsOnClose;
   connectors;
   ownerId = `collaboration:${process.pid}:${randomUUID()}`;
   inFlight = /* @__PURE__ */ new Map();
@@ -7088,11 +7091,15 @@ var CollaborationService = class {
   constructor(storage, audit, config2 = {}, connectors = {}) {
     this.storage = storage;
     this.audit = audit;
-    this.maxTurns = config2.maxTurns ?? 6;
+    this.maxTurns = config2.maxTurns ?? 12;
     this.timeoutMs = config2.timeoutMs ?? 12e4;
     this.maxDurationMs = config2.maxDurationMs ?? 30 * 60 * 1e3;
     this.maxTotalMessageChars = config2.maxTotalMessageChars ?? 5e5;
     this.asyncDispatch = config2.asyncDispatch ?? false;
+    this.archiveSessionsOnClose = config2.archiveSessionsOnClose ?? false;
+    if (!Number.isInteger(this.maxTurns) || this.maxTurns < 1 || this.maxTurns > 50) {
+      throw new Error("maxTurns must be an integer between 1 and 50");
+    }
     if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1e3 || this.timeoutMs > 6e5) {
       throw new Error("timeoutMs must be an integer between 1000 and 600000");
     }
@@ -7107,6 +7114,9 @@ var CollaborationService = class {
   async initiateDiscussion(params) {
     const projectPath = resolveProjectPath(params.projectPath);
     const maxTurns = params.maxTurns ?? this.maxTurns;
+    if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 50) {
+      throw new Error("maxTurns must be an integer between 1 and 50");
+    }
     assertParticipants(params.driver, params.peer);
     assertText(params.initialMessage, "message");
     if (params.initialMessage.length > this.maxTotalMessageChars) {
@@ -7177,7 +7187,19 @@ var CollaborationService = class {
     }
     this.ensureNoDispatchInFlight(params.discussionId);
     this.ensureWithinBudget(discussion, params.reply);
-    const overRoundBudget = discussion.roundCount >= discussion.maxTurns;
+    if (discussion.roundCount >= discussion.maxTurns) {
+      this.storage.updateDiscussionStatus(params.discussionId, "NEEDS_USER_DECISION");
+      this.storage.updateDiscussionDiagnostic(params.discussionId, "MAX_TURNS");
+      this.storage.updateDiscussionDispatch(params.discussionId, "FAILED", null);
+      this.audit.log({
+        traceId: discussion.traceId,
+        discussionId: params.discussionId,
+        action: "discussion.max_turns",
+        agent: params.sender,
+        metadata: { roundCount: discussion.roundCount, maxTurns: discussion.maxTurns }
+      });
+      throw new Error(`Discussion ${params.discussionId} reached its provider response limit (${discussion.maxTurns})`);
+    }
     const receiver = params.sender === discussion.driver ? discussion.peer : discussion.driver;
     this.ensureProviderNotLeased(receiver, discussion.projectPath);
     this.storage.acquireDiscussionLease({
@@ -7203,17 +7225,6 @@ var CollaborationService = class {
         agent: params.sender,
         metadata: { messageId: message.id, role: "response" }
       });
-      if (overRoundBudget) {
-        this.storage.updateDiscussionStatus(params.discussionId, "TIMEOUT");
-        this.audit.log({
-          traceId: discussion.traceId,
-          discussionId: params.discussionId,
-          action: "discussion.timeout",
-          agent: params.sender,
-          metadata: { roundCount: discussion.roundCount, maxTurns: discussion.maxTurns, messageId: message.id }
-        });
-        return { messageId: message.id, status: "TIMEOUT" };
-      }
       this.storage.updateDiscussionStatus(params.discussionId, "DISCUSSING");
       this.queueDispatch(params.discussionId, receiver);
       const previousMessages = this.storage.getMessages(params.discussionId).slice(0, -1);
@@ -7241,8 +7252,35 @@ var CollaborationService = class {
     return {
       discussion,
       messages: this.storage.getMessages(discussionId),
-      decision: this.storage.getDecisionByDiscussion(discussionId)
+      decision: this.storage.getDecisionByDiscussion(discussionId),
+      providerSessions: this.storage.listSessionsForDiscussion(discussionId).map((session) => ({
+        provider: session.provider,
+        sessionId: session.sessionId,
+        kind: typeof session.metadata.sessionKind === "string" ? session.metadata.sessionKind : null,
+        status: session.status,
+        lastSeenAt: session.lastSeenAt
+      }))
     };
+  }
+  async waitForDiscussion(discussionId, timeoutMs = 3e4, afterMessageId) {
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1e3 || timeoutMs > 12e4) {
+      throw new Error("timeoutMs must be an integer between 1000 and 120000");
+    }
+    const deadline = Date.now() + timeoutMs;
+    const initialMessages = this.storage.getMessages(discussionId);
+    const wakeAfterMessageId = afterMessageId ?? initialMessages.at(-1)?.id;
+    while (true) {
+      const snapshot = await this.getDiscussion(discussionId);
+      const lastMessageId = snapshot.messages.at(-1)?.id ?? null;
+      const hasNewMessage = wakeAfterMessageId ? this.storage.getMessages(discussionId, wakeAfterMessageId).length > 0 : false;
+      const settled = isTerminal(snapshot.discussion.status) || isPaused(snapshot.discussion.status) || snapshot.discussion.dispatchState !== "QUEUED" && snapshot.discussion.dispatchState !== "RUNNING";
+      if (hasNewMessage || settled)
+        return { ...snapshot, waitTimedOut: false, lastMessageId };
+      const remaining = deadline - Date.now();
+      if (remaining <= 0)
+        return { ...snapshot, waitTimedOut: true, lastMessageId };
+      await new Promise((resolve4) => setTimeout(resolve4, Math.min(200, remaining)));
+    }
   }
   async closeDiscussion(params) {
     assertText(params.conclusion, "conclusion");
@@ -7426,6 +7464,7 @@ var CollaborationService = class {
         agent: params.agent,
         metadata: {}
       });
+      this.archiveDiscussionSessions(discussion.id);
       return { discussionId: discussion.id, status: "CANCELLED" };
     } finally {
       this.cancellationRequests.delete(params.discussionId);
@@ -7697,6 +7736,7 @@ var CollaborationService = class {
     } catch (cause) {
       try {
         this.storage.updateDiscussionDispatch(discussionId, "FAILED", null);
+        this.storage.updateDiscussionDiagnostic(discussionId, "PROVIDER_ERROR", diagnosticFromError(cause, receiver, trackedSession?.metadata.sessionKind));
       } catch {
       }
       this.audit.log({
@@ -7762,6 +7802,7 @@ var CollaborationService = class {
     });
   }
   queueDispatch(discussionId, receiver) {
+    this.storage.updateDiscussionDiagnostic(discussionId, null, null);
     this.storage.updateDiscussionDispatch(discussionId, "QUEUED", receiver);
   }
   startBackgroundAgreementConfirmation(discussionId, agent, otherAgent, conclusion, decisionHash, prompt, previousMessages) {
@@ -7811,6 +7852,7 @@ var CollaborationService = class {
     const elapsed = Date.now() - Date.parse(discussion.createdAt);
     if (elapsed > this.maxDurationMs) {
       this.storage.updateDiscussionStatus(discussion.id, "TIMEOUT", { endedAt: (/* @__PURE__ */ new Date()).toISOString() });
+      this.storage.updateDiscussionDiagnostic(discussion.id, "MAX_DURATION");
       this.audit.log({
         traceId: this.storage.getDiscussion(discussion.id)?.traceId ?? `tr_${discussion.id}`,
         discussionId: discussion.id,
@@ -7823,6 +7865,7 @@ var CollaborationService = class {
     const currentLength = this.storage.getMessages(discussion.id).reduce((total, message) => total + message.content.length, 0);
     if (currentLength + extraContent.length > this.maxTotalMessageChars) {
       this.storage.updateDiscussionStatus(discussion.id, "TIMEOUT", { endedAt: (/* @__PURE__ */ new Date()).toISOString() });
+      this.storage.updateDiscussionDiagnostic(discussion.id, "MESSAGE_BUDGET");
       this.audit.log({
         traceId: this.storage.getDiscussion(discussion.id)?.traceId ?? `tr_${discussion.id}`,
         discussionId: discussion.id,
@@ -7864,7 +7907,33 @@ var CollaborationService = class {
       agent: "system",
       metadata: { decisionId: decision.id }
     });
+    this.archiveDiscussionSessions(discussion.id);
     return { discussionId: discussion.id, status: "COMPLETED", decisionId: decision.id };
+  }
+  archiveDiscussionSessions(discussionId) {
+    if (!this.archiveSessionsOnClose)
+      return;
+    for (const session of this.storage.listSessionsForDiscussion(discussionId)) {
+      const connector = this.connectors[session.provider];
+      const kind = readProviderSessionKind(session.metadata.sessionKind);
+      void Promise.resolve(connector?.archiveSession?.(session.sessionId, kind) ?? false).then((archived) => {
+        if (archived)
+          this.storage.updateSessionStatus(session.provider, session.sessionId, "ARCHIVED", session.metadata);
+        this.audit.log({
+          traceId: this.storage.getDiscussion(discussionId)?.traceId ?? `tr_${discussionId}`,
+          discussionId,
+          action: archived ? "session.archived" : "session.archive_unsupported",
+          agent: session.provider,
+          metadata: { sessionId: session.sessionId, sessionKind: kind ?? null }
+        });
+      }).catch((cause) => this.audit.log({
+        traceId: this.storage.getDiscussion(discussionId)?.traceId ?? `tr_${discussionId}`,
+        discussionId,
+        action: "session.archive_failed",
+        agent: session.provider,
+        metadata: { sessionId: session.sessionId, error: redactDiagnostic(cause instanceof Error ? cause.message : String(cause)) }
+      }));
+    }
   }
 };
 function buildAgreementPrompt(conclusion, decisionHash) {
@@ -7932,6 +8001,8 @@ function classifyFailure(cause) {
   if (cause instanceof SessionBusyError)
     return "PEER_BUSY";
   if (isProviderError(cause)) {
+    if (cause.ambiguous)
+      return "NEEDS_USER_DECISION";
     if (cause.code === "BUSY" || cause.code === "UNAVAILABLE")
       return "PEER_BUSY";
     if (cause.code === "TIMEOUT")
@@ -7945,6 +8016,20 @@ function classifyFailure(cause) {
   if (message.includes("timed out") || message.includes("timeout") || message.includes("duration"))
     return "TIMEOUT";
   return "FAILED";
+}
+function diagnosticFromError(cause, receiver, backend) {
+  const message = redactDiagnostic(cause instanceof Error ? cause.message : String(cause));
+  return {
+    code: isProviderError(cause) ? cause.code : "FAILED",
+    message,
+    backend: isProviderError(cause) && cause.backend ? cause.backend : typeof backend === "string" ? backend : receiver,
+    retryable: isProviderError(cause) ? cause.retryable : true,
+    ambiguous: isProviderError(cause) ? cause.ambiguous : false,
+    at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function redactDiagnostic(value) {
+  return value.replace(/(token|password|api[_ -]?key)\s*[:=]\s*[^\s;]+/gi, "$1=[REDACTED]").slice(0, 4096);
 }
 async function waitForCompletion(promise, timeoutMs) {
   let timer;
@@ -8409,7 +8494,11 @@ var CodexAppServerConnector = class {
   async isAvailable() {
     if (!this.command.trim())
       return false;
-    this.availability ??= probe(this.command, this.serverArgs);
+    this.availability ??= this.ensureServer().then(() => true).catch(() => {
+      this.closeServer();
+      this.availability = void 0;
+      return false;
+    });
     return this.availability;
   }
   async getAvailability() {
@@ -8493,6 +8582,18 @@ var CodexAppServerConnector = class {
       return;
     }
     await this.interruptTurn(discussionId);
+  }
+  async archiveSession(sessionId) {
+    if (!await this.isAvailable())
+      return false;
+    try {
+      await this.request("thread/archive", { threadId: sessionId }, this.startupTimeoutMs);
+      return true;
+    } catch (cause) {
+      if (isUnsupportedMethod(cause))
+        return false;
+      throw cause;
+    }
   }
   async runSerial(operation) {
     const previous = this.serial;
@@ -8658,6 +8759,8 @@ var CodexAppServerConnector = class {
           pending.reject(providerErrorFromMessage(message.error));
         else
           pending.resolve(isRecord2(message.result) ? message.result : {});
+      } else if (typeof message.method === "string" && message.id !== void 0) {
+        this.respondToServerRequest(message);
       } else if (typeof message.method === "string") {
         const waiter = this.eventWaiters.shift();
         if (waiter)
@@ -8666,6 +8769,15 @@ var CodexAppServerConnector = class {
           this.events.push(message);
       }
     }
+  }
+  respondToServerRequest(message) {
+    if (!this.child || this.child.exitCode !== null || this.child.killed)
+      return;
+    const method = String(message.method);
+    const id2 = message.id;
+    const response = /approval/i.test(method) ? { id: id2, result: { decision: "decline" } } : { id: id2, error: { code: -32601, message: `AgentBridge cannot satisfy interactive request ${method}` } };
+    this.child.stdin.write(`${JSON.stringify(response)}
+`);
   }
   nextEvent(timeoutMs) {
     const queued = this.events.shift();
@@ -8709,6 +8821,7 @@ var CodexAppServerConnector = class {
     const child = this.child;
     this.child = void 0;
     this.initialized = false;
+    this.availability = void 0;
     this.buffer = "";
     this.events.splice(0, this.events.length);
     if (child && child.exitCode === null) {
@@ -8730,23 +8843,6 @@ var CodexAppServerConnector = class {
     }
   }
 };
-async function probe(command, serverArgs) {
-  return new Promise((resolve4) => {
-    const child = spawn3(command, [...serverArgs, "app-server", "--help"], { windowsHide: true, shell: false });
-    const timer = setTimeout(() => {
-      child.kill();
-      resolve4(false);
-    }, 1e4);
-    child.once("error", () => {
-      clearTimeout(timer);
-      resolve4(false);
-    });
-    child.once("close", (code) => {
-      clearTimeout(timer);
-      resolve4(code === 0);
-    });
-  });
-}
 function readString(value) {
   return typeof value === "string" && value.length > 0 ? value : void 0;
 }
@@ -8805,6 +8901,10 @@ function isSessionLostError(error3) {
   const text2 = error3 instanceof Error ? error3.message : String(error3);
   return /session|thread/i.test(text2) && /not found|missing|lost|expired|invalid|unknown/i.test(text2);
 }
+function isUnsupportedMethod(error3) {
+  const text2 = error3 instanceof Error ? error3.message : String(error3);
+  return /method.*not found|unsupported|unknown method/i.test(text2);
+}
 function redact(value) {
   return value.replace(/(token|password|api[_ -]?key)\s*[:=]\s*[^\s]+/gi, "$1=[REDACTED]").trim();
 }
@@ -8818,6 +8918,7 @@ function withStderr(error3, stderrTail, ambiguous = false) {
     return new ProviderError(error3.code, message, {
       retryable: error3.retryable,
       ambiguous: error3.ambiguous || ambiguous,
+      backend: error3.backend,
       cause: error3
     });
   }
@@ -8841,8 +8942,9 @@ function discoverCodexCommands(options = {}) {
   addEnvironmentCandidate(candidates, env.AGENTBRIDGE_CODEX_APP_COMMAND, "AGENTBRIDGE_CODEX_APP_COMMAND", "app-server");
   addEnvironmentCandidate(candidates, env.AGENTBRIDGE_CODEX_COMMAND, "AGENTBRIDGE_CODEX_COMMAND", "auto");
   addEnvironmentCandidate(candidates, env.CODEX_CLI_PATH, "CODEX_CLI_PATH", "auto");
-  if (candidates.length > 0)
+  if (candidates.some((candidate) => candidate.mode !== "app-server")) {
     return deduplicate(candidates, platform === "win32");
+  }
   if (platform === "win32") {
     const localAppData = env.LOCALAPPDATA;
     if (localAppData) {
@@ -8850,7 +8952,7 @@ function discoverCodexCommands(options = {}) {
       addPathCandidate(candidates, pathApi.join(desktopBin, "codex.exe"), "Codex Desktop (Windows)", pathExists);
       if (pathExists(desktopBin)) {
         try {
-          const versioned = readDirectory(desktopBin).filter((name) => /^codex-\d+(?:\.\d+)*\.exe$/i.test(name)).sort((left, right) => right.localeCompare(left));
+          const versioned = readDirectory(desktopBin).filter((name) => /^codex-\d+(?:\.\d+)*\.exe$/i.test(name)).sort(compareVersionedExecutables);
           for (const name of versioned) {
             addPathCandidate(candidates, pathApi.join(desktopBin, name), "Codex Desktop bundled runtime (Windows)", pathExists);
           }
@@ -8868,6 +8970,17 @@ function discoverCodexCommands(options = {}) {
   }
   candidates.push({ command: platform === "win32" ? "codex.exe" : "codex", source: "system", label: "PATH", mode: "auto" });
   return deduplicate(candidates, platform === "win32");
+}
+function compareVersionedExecutables(left, right) {
+  const parts = (value) => (value.match(/\d+(?:\.\d+)*/)?.[0] ?? "0").split(".").map(Number);
+  const a = parts(left);
+  const b = parts(right);
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    const difference = (b[index] ?? 0) - (a[index] ?? 0);
+    if (difference !== 0)
+      return difference;
+  }
+  return right.localeCompare(left);
 }
 function addEnvironmentCandidate(candidates, command, label, mode) {
   if (!command?.trim())
@@ -8917,18 +9030,25 @@ var CodexAutoConnector = class {
     const selected = await this.selectBackend();
     if (!selected) {
       const attempted = this.candidates.map((candidate) => candidate.command).join(", ") || "(none)";
-      throw new Error(`No usable Codex backend was found (mode: ${this.mode}; attempted: ${attempted}). Install Codex Desktop/CLI or set AGENTBRIDGE_CODEX_APP_COMMAND.`);
+      throw new ProviderError("UNAVAILABLE", `No usable Codex backend was found (mode: ${this.mode}; attempted: ${attempted}). Install Codex Desktop/CLI or set AGENTBRIDGE_CODEX_APP_COMMAND.`, { backend: `codex:${this.mode}` });
     }
     try {
       return await selected.connector.sendAndWait(context);
     } catch (cause) {
-      if (selected.info.mode !== "app-server" || this.mode !== "auto" || !shouldFallback(cause))
-        throw cause;
+      if (selected.info.mode !== "app-server" || this.mode !== "auto" || !shouldFallback(cause)) {
+        throw withBackend(cause, selected.info);
+      }
       this.invalidateSelection();
       const fallback = await this.selectBackend(true, "cli");
       if (!fallback)
-        throw cause;
-      const response = await fallback.connector.sendAndWait(context);
+        throw withBackend(cause, selected.info);
+      let response;
+      try {
+        response = await fallback.connector.sendAndWait(context);
+      } catch (fallbackCause) {
+        this.invalidateSelection();
+        throw withBackend(fallbackCause, fallback.info);
+      }
       return {
         ...response,
         backendSwitched: {
@@ -8942,6 +9062,14 @@ var CodexAutoConnector = class {
   async cancel(discussionId) {
     const selected = await this.selectBackend();
     await selected?.connector.cancel?.(discussionId);
+  }
+  async archiveSession(sessionId, sessionKind) {
+    if (sessionKind !== "codex-app-server")
+      return false;
+    const selected = await this.selectBackend();
+    if (selected?.info.mode !== "app-server")
+      return false;
+    return selected.connector.archiveSession?.(sessionId, sessionKind) ?? false;
   }
   async getSelection() {
     return (await this.selectBackend())?.info;
@@ -8960,6 +9088,7 @@ var CodexAutoConnector = class {
     return this.selection;
   }
   invalidateSelection() {
+    void this.selection?.then((selected) => selected?.connector.cancel?.(""));
     this.selection = void 0;
     this.selectionExpiresAt = 0;
   }
@@ -9011,6 +9140,21 @@ function readMode(value) {
 }
 function shouldFallback(error3) {
   return !(isProviderError(error3) && (error3.ambiguous || ["AUTH", "RATE_LIMIT", "CANCELLED"].includes(error3.code)));
+}
+function withBackend(error3, backend) {
+  const label = `${backend.mode}:${backend.label}`;
+  if (isProviderError(error3)) {
+    return new ProviderError(error3.code, error3.message, {
+      retryable: error3.retryable,
+      ambiguous: error3.ambiguous,
+      backend: label,
+      cause: error3
+    });
+  }
+  return new ProviderError("FAILED", error3 instanceof Error ? error3.message : String(error3), {
+    backend: label,
+    cause: error3
+  });
 }
 
 // packages/storage/dist/index.js
@@ -9142,7 +9286,7 @@ function samePath(left, right) {
 }
 
 // packages/storage/dist/index.js
-var DEFAULT_MAX_TURNS = 6;
+var DEFAULT_MAX_TURNS = 12;
 var MAX_ALLOWED_TURNS = 50;
 var MAX_TEXT_LENGTH = 1e5;
 var SQLITE_STARTUP_TIMEOUT_MS = 5e3;
@@ -9161,7 +9305,7 @@ CREATE TABLE IF NOT EXISTS discussions (
   peer TEXT,
   current_turn INTEGER NOT NULL DEFAULT 0,
   round_count INTEGER NOT NULL DEFAULT 0,
-  max_turns INTEGER NOT NULL DEFAULT 6,
+  max_turns INTEGER NOT NULL DEFAULT 12,
   retry_count INTEGER NOT NULL DEFAULT 0,
   max_retries INTEGER NOT NULL DEFAULT 2,
   created_at TEXT NOT NULL,
@@ -9170,6 +9314,8 @@ CREATE TABLE IF NOT EXISTS discussions (
   conclusion TEXT,
   project_path TEXT,
   trace_id TEXT NOT NULL
+  ,stop_reason TEXT
+  ,last_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -9289,6 +9435,8 @@ var Storage = class {
     this.ensureColumn("discussions", "retry_count", "ALTER TABLE discussions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("discussions", "max_retries", "ALTER TABLE discussions ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 2");
     this.ensureColumn("discussions", "round_count", "ALTER TABLE discussions ADD COLUMN round_count INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("discussions", "stop_reason", "ALTER TABLE discussions ADD COLUMN stop_reason TEXT");
+    this.ensureColumn("discussions", "last_error", "ALTER TABLE discussions ADD COLUMN last_error TEXT");
     this.ensureColumn("messages", "provider_session_id", "ALTER TABLE messages ADD COLUMN provider_session_id TEXT");
   }
   ensureColumn(table, columnName, alterSql) {
@@ -9363,6 +9511,11 @@ var Storage = class {
       throw new Error(`Discussion ${id2} not found`);
     this.db.prepare("UPDATE discussions SET dispatch_state = ?, waiting_for = ?, updated_at = ? WHERE id = ?").run(state, waitingFor, (/* @__PURE__ */ new Date()).toISOString(), id2);
   }
+  updateDiscussionDiagnostic(id2, stopReason, lastError = null) {
+    if (!this.getDiscussion(id2))
+      throw new Error(`Discussion ${id2} not found`);
+    this.db.prepare("UPDATE discussions SET stop_reason = ?, last_error = ?, updated_at = ? WHERE id = ?").run(stopReason, lastError ? JSON.stringify(lastError) : null, (/* @__PURE__ */ new Date()).toISOString(), id2);
+  }
   incrementDiscussionRound(id2) {
     const current = this.getDiscussion(id2);
     if (!current)
@@ -9384,6 +9537,35 @@ var Storage = class {
     const query = projectPath ? "SELECT * FROM discussions WHERE project_path = ? ORDER BY created_at DESC" : "SELECT * FROM discussions ORDER BY created_at DESC";
     const rows = projectPath ? this.db.prepare(query).all(projectPath) : this.db.prepare(query).all();
     return rows.map(rowToDiscussion);
+  }
+  cleanupDiscussions(olderThanDays, execute = false) {
+    if (!Number.isInteger(olderThanDays) || olderThanDays < 1 || olderThanDays > 3650) {
+      throw new Error("olderThanDays must be an integer between 1 and 3650");
+    }
+    const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1e3).toISOString();
+    const rows = this.db.prepare(`SELECT id FROM discussions
+       WHERE status IN ('COMPLETED', 'CANCELLED')
+         AND COALESCE(ended_at, updated_at) <= ?
+       ORDER BY COALESCE(ended_at, updated_at) ASC`).all(cutoff);
+    const discussionIds = rows.map((row) => row.id);
+    if (execute && discussionIds.length > 0) {
+      this.transaction(() => {
+        const remove = (table) => {
+          const statement2 = this.db.prepare(`DELETE FROM ${table} WHERE discussion_id = ?`);
+          for (const id2 of discussionIds)
+            statement2.run(id2);
+        };
+        remove("audit_events");
+        remove("agreements");
+        remove("decisions");
+        remove("messages");
+        remove("discussion_leases");
+        const statement = this.db.prepare("DELETE FROM discussions WHERE id = ?");
+        for (const id2 of discussionIds)
+          statement.run(id2);
+      });
+    }
+    return { cutoff, count: discussionIds.length, discussionIds, deleted: execute };
   }
   recoverStaleDiscussions(maxAgeMs = 30 * 60 * 1e3) {
     if (!Number.isInteger(maxAgeMs) || maxAgeMs < 1e3 || maxAgeMs > 7 * 24 * 60 * 60 * 1e3) {
@@ -9655,6 +9837,9 @@ var Storage = class {
     const rows = projectPath ? this.db.prepare("SELECT * FROM agent_sessions WHERE project_path = ? ORDER BY last_seen_at DESC").all(projectPath) : this.db.prepare("SELECT * FROM agent_sessions ORDER BY last_seen_at DESC").all();
     return rows.map(rowToAgentSession);
   }
+  listSessionsForDiscussion(discussionId) {
+    return this.listSessions().filter((session) => session.metadata.discussionId === discussionId);
+  }
   updateSessionStatus(provider, sessionId, status, metadata) {
     const current = this.getSession(provider, sessionId);
     if (!current)
@@ -9699,8 +9884,20 @@ function rowToDiscussion(row) {
     projectPath: row.project_path ?? resolveProjectPath(),
     traceId: row.trace_id,
     dispatchState: row.dispatch_state ?? null,
-    waitingFor: row.waiting_for ?? null
+    waitingFor: row.waiting_for ?? null,
+    stopReason: row.stop_reason ?? null,
+    lastError: parseJsonObject(row.last_error)
   };
+}
+function parseJsonObject(value) {
+  if (typeof value !== "string" || !value)
+    return null;
+  try {
+    const parsed = JSON.parse(value);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 function rowToMessage(row) {
   return {
@@ -20957,7 +21154,8 @@ function buildTools(agentType2) {
         properties: {
           peer: { type: "string", enum: [peer], description: "The agent to discuss with" },
           message: { type: "string", description: "Proposal or question for the peer" },
-          projectPath: { type: "string", description: "Project path; defaults to the current working directory" }
+          projectPath: { type: "string", description: "Project path; defaults to the current working directory" },
+          maxTurns: { type: "integer", minimum: 1, maximum: 50, description: "Maximum successful provider responses (default: 12)" }
         },
         required: ["peer", "message"]
       }
@@ -20980,6 +21178,19 @@ function buildTools(agentType2) {
       inputSchema: {
         type: "object",
         properties: { discussionId: { type: "string", description: "Discussion ID" } },
+        required: ["discussionId"]
+      }
+    },
+    {
+      name: "wait_discussion",
+      description: "Wait for an asynchronous discussion to receive a new message or leave its queued/running state without changing discussion status.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          discussionId: { type: "string", description: "Discussion ID" },
+          timeoutMs: { type: "integer", minimum: 1e3, maximum: 12e4, description: "Long-poll timeout in milliseconds (default: 30000)" },
+          afterMessageId: { type: "string", description: "Wake when a newer message exists" }
+        },
         required: ["discussionId"]
       }
     },
@@ -21039,10 +21250,16 @@ function createServer(resolveRuntime2, options) {
     ask: external_exports.object({
       peer: external_exports.literal(opposite(agentType2)),
       message: text,
-      projectPath: external_exports.string().trim().min(1).max(4096).optional()
+      projectPath: external_exports.string().trim().min(1).max(4096).optional(),
+      maxTurns: external_exports.number().int().min(1).max(50).optional()
     }),
     reply: external_exports.object({ discussionId: id, message: text }),
     get: external_exports.object({ discussionId: id }),
+    wait: external_exports.object({
+      discussionId: id,
+      timeoutMs: external_exports.number().int().min(1e3).max(12e4).optional(),
+      afterMessageId: id.optional()
+    }),
     list: external_exports.object({ projectPath: external_exports.string().trim().min(1).max(4096).optional() }),
     close: external_exports.object({ discussionId: id, conclusion: text }),
     cancel: external_exports.object({ discussionId: id }),
@@ -21072,7 +21289,8 @@ function createServer(resolveRuntime2, options) {
             topic: input.message.slice(0, 100),
             initialMessage: input.message,
             projectPath: runtime.projectPath ?? input.projectPath,
-            traceId: `tr_${randomUUID5()}`
+            traceId: `tr_${randomUUID5()}`,
+            maxTurns: input.maxTurns
           });
           return ok(result);
         }
@@ -21089,6 +21307,11 @@ function createServer(resolveRuntime2, options) {
           const input = parse3(schemas.get, args);
           const runtime = await resolveRuntime2(void 0, server);
           return ok(await runtime.collaboration.getDiscussion(input.discussionId));
+        }
+        case "wait_discussion": {
+          const input = parse3(schemas.wait, args);
+          const runtime = await resolveRuntime2(void 0, server);
+          return ok(await runtime.collaboration.waitForDiscussion(input.discussionId, input.timeoutMs, input.afterMessageId));
         }
         case "list_discussions": {
           const input = parse3(schemas.list, args);
@@ -21179,7 +21402,18 @@ async function createRuntime(projectPath) {
   const timeoutMs = readBoundedInteger("AGENTBRIDGE_TIMEOUT_MS", 12e4, 1e3, 6e5);
   const startupTimeoutMs = readBoundedInteger("AGENTBRIDGE_STARTUP_TIMEOUT_MS", 15e3, 1e3, 6e5);
   const maxDurationMs = readBoundedInteger("AGENTBRIDGE_MAX_DURATION_MS", 30 * 60 * 1e3, 1e3, 7 * 24 * 60 * 60 * 1e3);
-  const maxTurns = readBoundedInteger("AGENTBRIDGE_MAX_TURNS", 6, 1, 50);
+  const maxTurns = readBoundedInteger("AGENTBRIDGE_MAX_TURNS", 12, 1, 50);
+  const retentionDays = readBoundedInteger("AGENTBRIDGE_DISCUSSION_RETENTION_DAYS", 0, 0, 3650);
+  if (retentionDays > 0) {
+    const cleanup = storage.cleanupDiscussions(retentionDays, true);
+    audit.log({
+      traceId: `tr_cleanup_${Date.now()}`,
+      discussionId: null,
+      action: "storage.cleanup",
+      agent: "system",
+      metadata: cleanup
+    });
+  }
   const recoveryAgeMs = Number.parseInt(process.env.AGENTBRIDGE_RECOVERY_MAX_AGE_MS ?? "", 10);
   const recovered = storage.recoverStaleDiscussions(Number.isInteger(recoveryAgeMs) && recoveryAgeMs > 0 ? recoveryAgeMs : void 0);
   for (const discussion of recovered) {
@@ -21195,7 +21429,8 @@ async function createRuntime(projectPath) {
     maxTurns,
     timeoutMs,
     maxDurationMs,
-    asyncDispatch: readBoolean("AGENTBRIDGE_ASYNC_DISPATCH", true)
+    asyncDispatch: readBoolean("AGENTBRIDGE_ASYNC_DISPATCH", true),
+    archiveSessionsOnClose: readBoolean("AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE", false)
   }, {
     claude: new ClaudeConnector({ command: process.env.AGENTBRIDGE_CLAUDE_COMMAND, timeoutMs }),
     codex: new CodexAutoConnector({

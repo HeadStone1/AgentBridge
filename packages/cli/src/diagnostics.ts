@@ -7,6 +7,7 @@ import { ClaudeConnector, CodexAutoConnector, CodexConnector, discoverCodexComma
 import { Storage } from '@agentbridge/storage';
 import { defaultGlobalCodexConfig } from './paths.js';
 import { detectInstallation, readProjectRegistry, registryPath } from './installation.js';
+import { inspectManagedSkills } from './skills.js';
 
 export interface DoctorOptions {
   'codex-mode'?: string | boolean;
@@ -50,6 +51,8 @@ export async function runDoctor(
   const providers = await inspectProviders(options, env);
   if (!providers.claudeCli) recommendations.push('Install/login to Claude Code or set AGENTBRIDGE_CLAUDE_COMMAND.');
   if (!providers.codexSelectedBackend) recommendations.push('Install/login to Codex App or Codex CLI, or pass an explicit Codex command.');
+  const skills = inspectManagedSkills(env);
+  if (!skills.ok) recommendations.push('Run setup again to install the AgentBridge collaboration skill for Claude and Codex.');
 
   const node = {
     ok: isSupportedNode(process.versions.node),
@@ -73,6 +76,7 @@ export async function runDoctor(
     providers.claudeCli,
     Boolean(providers.codexSelectedBackend),
     providers.modeError === null,
+    skills.ok,
   ];
   const ok = requiredChecks.every(Boolean);
   return {
@@ -85,6 +89,7 @@ export async function runDoctor(
     registry,
     configuration,
     providers,
+    skills,
     summary: {
       passed: requiredChecks.filter(Boolean).length,
       failed: requiredChecks.filter((value) => !value).length,
@@ -210,15 +215,16 @@ async function inspectProviders(options: DoctorOptions, env: NodeJS.ProcessEnv):
   if (typeof options['codex-app-command'] === 'string') discoveryEnv.AGENTBRIDGE_CODEX_APP_COMMAND = options['codex-app-command'];
   if (typeof options['codex-command'] === 'string') discoveryEnv.AGENTBRIDGE_CODEX_COMMAND = options['codex-command'];
   const codexAuto = new CodexAutoConnector({ mode: codexMode, candidates: discoverCodexCommands({ env: discoveryEnv }) });
-  const [claudeCli, codexSelection, codexAppDetected] = await Promise.all([
-    safely(() => new ClaudeConnector({ command: env.AGENTBRIDGE_CLAUDE_COMMAND }).isAvailable(), false),
-    safely(() => codexAuto.getSelection(), null),
-    isProcessRunning('codex'),
-  ]);
-  const codexCli = codexSelection
-    ? await safely(() => new CodexConnector({ command: codexSelection.command }).isAvailable(), false)
-    : false;
-  return {
+  try {
+    const [claudeCli, codexSelection, codexAppDetected] = await Promise.all([
+      safely(() => new ClaudeConnector({ command: env.AGENTBRIDGE_CLAUDE_COMMAND }).isAvailable(), false),
+      safely(() => codexAuto.getSelection(), null),
+      isProcessRunning('codex'),
+    ]);
+    const codexCli = codexSelection
+      ? await safely(() => new CodexConnector({ command: codexSelection.command }).isAvailable(), false)
+      : false;
+    return {
     claudeCli,
     codexCli,
     codexAppServer: codexSelection?.mode === 'app-server',
@@ -232,7 +238,10 @@ async function inspectProviders(options: DoctorOptions, env: NodeJS.ProcessEnv):
       codex: codexSelection ? 'BACKGROUND' : 'UNAVAILABLE',
     },
     note: 'App Server is preferred. codexAppDetected is informational; AgentBridge capability-probes executables and does not attach to an open GUI process.',
-  };
+    };
+  } finally {
+    await codexAuto.cancel('');
+  }
 }
 
 function inspectRegistry(projectPath: string, env: NodeJS.ProcessEnv): Record<string, unknown> {

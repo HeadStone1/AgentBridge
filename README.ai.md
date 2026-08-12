@@ -4,7 +4,7 @@
 
 This document is written for an AI coding agent that has been asked to deploy, upgrade, diagnose, or remove AgentBridge on a user's machine. Preserve the user's data and existing MCP configuration. Do not report success until the verification gates below pass.
 
-> Current v0.6.1 source verification: the UTF-8 check, TypeScript build, and all 96 tests across 17 test files pass. This is repository-level evidence only. It does not prove that the user's authenticated Claude and Codex providers can communicate; Gates 3 and 4 remain mandatory for a live deployment.
+> Current v0.7.0 source verification must include the UTF-8 check, TypeScript build, complete test suite, and package smoke tests before release.
 
 ## Mission and invariants
 
@@ -239,11 +239,12 @@ Claude must use `AGENTBRIDGE_AGENT=claude`; Codex must use `AGENTBRIDGE_AGENT=co
 
 ### Gate 3: client MCP tool lists
 
-After a full restart, inspect the MCP/Tools/Integrations view in both clients. Require an `agentbridge` server and these seven tools:
+After a full restart, inspect the MCP/Tools/Integrations view in both clients. Require an `agentbridge` server and these eight tools:
 
 - `ask_peer`
 - `reply_peer`
 - `get_discussion`
+- `wait_discussion`
 - `list_discussions`
 - `close_discussion`
 - `cancel_discussion`
@@ -288,6 +289,7 @@ Only report end-to-end success after both directions work and the discussions ap
 | Git `dubious ownership` in source mode | Repository owner differs from current user | Add only the verified repository path to Git's safe-directory list; never whitelist an untrusted tree |
 | Old archive behaves differently | Obsolete v0.3 package or cached asset | Remove the obsolete archive and obtain the versioned asset plus matching checksum from Releases |
 | Doctor passes but collaboration fails | Doctor is not a live client handshake | Complete Gates 3 and 4 and inspect each client's MCP/provider logs |
+| Many duplicate Provider sessions | A new discussion was created while the previous dispatch was pending | Reuse its `discussionId` and call `wait_discussion`; optionally enable native archival on close |
 
 ## Updates and rollback
 
@@ -321,6 +323,12 @@ node packages/cli/dist/index.js setup
 ```
 
 Never use a destructive Git reset to hide unknown local changes.
+
+## v0.7 discussion controls
+
+`setup` installs the managed `agentbridge-collaboration` Skill into the Claude and Codex user Skill locations. It must not overwrite a custom or modified same-name Skill. Use `wait_discussion` for bounded SQLite-backed long polling; a wait timeout never changes discussion status. The default `maxTurns=12` counts successful Provider responses.
+
+Discussion records are permanent by default. `agentbridge cleanup <project> --older-than-days N` previews eligible terminal rows; `--yes` performs the transaction. `AGENTBRIDGE_DISCUSSION_RETENTION_DAYS` enables opt-in startup cleanup, and `AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE=1` enables best-effort native archival. Tests and automation must set a temporary `AGENTBRIDGE_SKILL_HOME` and must never write real Claude/Codex user directories.
 
 ## Backup and uninstall
 
