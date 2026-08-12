@@ -12,6 +12,26 @@ const cliFixture = resolve(fileURLToPath(new URL('../fixtures/fake-codex.mjs', i
 const runtimeFailureFixture = resolve(fileURLToPath(new URL('../fixtures/fake-codex-app-server-runtime-failure.mjs', import.meta.url)));
 
 describe('Codex GUI-first backend selection', () => {
+  it('discovers the official Codex CLI installed as an AgentBridge dependency', () => {
+    const entrypoint = 'C:\\Users\\fixture\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js';
+
+    const candidates = discoverCodexCommands({
+      platform: 'win32',
+      env: { LOCALAPPDATA: 'C:\\Users\\fixture\\AppData\\Local' },
+      homeDirectory: 'C:\\Users\\fixture',
+      pathExists: () => false,
+      resolveBundledCodexEntrypoint: () => entrypoint,
+    });
+
+    expect(candidates[0]).toMatchObject({
+      command: process.execPath,
+      args: [entrypoint],
+      source: 'bundled',
+      label: 'AgentBridge bundled official Codex CLI',
+      mode: 'auto',
+    });
+  });
+
   it('discovers the executable bundled with Codex Desktop on Windows', () => {
     const directory = 'C:\\Users\\fixture\\AppData\\Local';
     const desktopBin = win32.join(directory, 'OpenAI', 'Codex', 'bin');
@@ -27,6 +47,7 @@ describe('Codex GUI-first backend selection', () => {
       readDirectory: (path) => path === desktopBin
         ? ['codex.exe', 'codex-26.1.0.exe', 'codex-command-runner.exe']
         : [],
+      resolveBundledCodexEntrypoint: () => undefined,
     });
 
     expect(candidates[0]).toMatchObject({

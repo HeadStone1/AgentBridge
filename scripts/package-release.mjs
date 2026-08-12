@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -28,11 +29,17 @@ const documentationFiles = [
   'LICENSE_HISTORY.md',
   'COMMERCIAL_LICENSE.md',
 ];
+const codexPlatformPackage = codexPlatformPackageName(targetPlatform, targetArch);
+const codexPackageRoot = join(root, 'node_modules', '@openai', 'codex');
+const codexPlatformPackageRoot = join(root, 'node_modules', '@openai', codexPlatformPackage);
 
 for (const required of [
   join(root, 'release', 'agentbridge-cli.mjs'),
   join(root, 'release', 'agentbridge-mcp.mjs'),
   ...documentationFiles.map((file) => join(root, file)),
+  join(codexPackageRoot, 'package.json'),
+  join(codexPackageRoot, 'bin', 'codex.js'),
+  join(codexPlatformPackageRoot, 'package.json'),
   runtime,
 ]) {
   if (!existsSync(required)) throw new Error(`Required release input not found: ${required}`);
@@ -42,6 +49,7 @@ rmSync(output, { recursive: true, force: true });
 mkdirSync(join(output, 'app'), { recursive: true });
 mkdirSync(join(output, 'runtime'), { recursive: true });
 mkdirSync(join(output, 'bin'), { recursive: true });
+mkdirSync(join(output, 'skills'), { recursive: true });
 
 copyFileSync(join(root, 'release', 'agentbridge-cli.mjs'), join(output, 'app', 'agentbridge-cli.mjs'));
 copyFileSync(join(root, 'release', 'agentbridge-mcp.mjs'), join(output, 'app', 'agentbridge-mcp.mjs'));
@@ -50,6 +58,9 @@ for (const file of documentationFiles) {
 }
 copyFileSync(join(root, 'scripts', 'install.ps1'), join(output, 'install.ps1'));
 copyFileSync(join(root, 'scripts', 'install.sh'), join(output, 'install.sh'));
+copyDirectory(join(root, 'skills'), join(output, 'skills'));
+copyDirectory(codexPackageRoot, join(output, 'app', 'node_modules', '@openai', 'codex'));
+copyDirectory(codexPlatformPackageRoot, join(output, 'app', 'node_modules', '@openai', codexPlatformPackage));
 
 if (targetPlatform === 'win32') {
   copyFileSync(runtime, join(output, 'runtime', 'node.exe'));
@@ -84,4 +95,29 @@ function valueAfter(flag) {
   if (inline) return inline.slice(flag.length + 1);
   const index = process.argv.indexOf(flag);
   return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+function copyDirectory(source, target) {
+  mkdirSync(target, { recursive: true });
+  for (const entry of readdirSync(source, { withFileTypes: true })) {
+    const from = join(source, entry.name);
+    const to = join(target, entry.name);
+    if (entry.isDirectory()) copyDirectory(from, to);
+    else if (entry.isFile()) copyFileSync(from, to);
+  }
+}
+
+function codexPlatformPackageName(targetPlatform, targetArch) {
+  const key = `${targetPlatform}-${targetArch}`;
+  const names = {
+    'win32-x64': 'codex-win32-x64',
+    'win32-arm64': 'codex-win32-arm64',
+    'linux-x64': 'codex-linux-x64',
+    'linux-arm64': 'codex-linux-arm64',
+    'darwin-x64': 'codex-darwin-x64',
+    'darwin-arm64': 'codex-darwin-arm64',
+  };
+  const name = names[key];
+  if (!name) throw new Error(`Unsupported Codex release target: ${key}`);
+  return name;
 }

@@ -16,6 +16,7 @@ New-Item -ItemType Directory -Force -Path $VersionRoot, $BinRoot | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $PackageRoot 'app') -Destination $VersionRoot -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $PackageRoot 'runtime') -Destination $VersionRoot -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $PackageRoot 'skills') -Destination $VersionRoot -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $PackageRoot 'release.json') -Destination $VersionRoot -Force
 Copy-Item -LiteralPath (Join-Path $PackageRoot 'LICENSE') -Destination $VersionRoot -Force
 Copy-Item -LiteralPath (Join-Path $PackageRoot 'bin\agentbridge.cmd') -Destination (Join-Path $BinRoot 'agentbridge.cmd') -Force

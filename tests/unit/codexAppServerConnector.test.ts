@@ -7,6 +7,7 @@ const fixture = resolve(fileURLToPath(new URL('../fixtures/fake-codex-app-server
 const failureFixture = resolve(fileURLToPath(new URL('../fixtures/fake-codex-app-server-failure.mjs', import.meta.url)));
 const missingStatusFixture = resolve(fileURLToPath(new URL('../fixtures/fake-codex-app-server-missing-status.mjs', import.meta.url)));
 const postTurnFailureFixture = resolve(fileURLToPath(new URL('../fixtures/fake-codex-app-server-post-turn-failure.mjs', import.meta.url)));
+const requestFixture = resolve(fileURLToPath(new URL('../fixtures/fake-codex-app-server-request.mjs', import.meta.url)));
 
 describe('CodexAppServerConnector', () => {
   it('starts one App Server and resumes its thread', async () => {
@@ -85,5 +86,31 @@ describe('CodexAppServerConnector', () => {
       discussionId: 'dsc_post_turn_failure',
     })).rejects.toMatchObject({ code: 'FAILED', ambiguous: true });
     await connector.cancel?.();
+  });
+
+  it('denies server approval requests instead of hanging', async () => {
+    const connector = new CodexAppServerConnector({
+      command: process.execPath,
+      serverArgs: [requestFixture],
+      timeoutMs: 5_000,
+    });
+    try {
+      await expect(connector.sendAndWait({
+        projectPath: process.cwd(),
+        prompt: 'request handling',
+        discussionId: 'dsc_server_request',
+      })).resolves.toMatchObject({ content: 'request handled' });
+    } finally {
+      await connector.cancel?.();
+    }
+  });
+
+  it('archives App Server threads when supported', async () => {
+    const connector = new CodexAppServerConnector({ command: process.execPath, serverArgs: [fixture], timeoutMs: 5_000 });
+    try {
+      expect(await connector.archiveSession('thread_fake_app_server')).toBe(true);
+    } finally {
+      await connector.cancel?.();
+    }
   });
 });

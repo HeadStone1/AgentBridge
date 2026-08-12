@@ -1,12 +1,13 @@
+import { createRequire } from 'node:module';
 import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { posix, win32 } from 'node:path';
+import { dirname, join, posix, win32 } from 'node:path';
 
 export type CodexBackendMode = 'auto' | 'app-server' | 'cli';
 
 export interface CodexCommandCandidate {
   command: string;
-  source: 'environment' | 'desktop' | 'system';
+  source: 'environment' | 'bundled' | 'desktop' | 'system';
   label: string;
   mode: CodexBackendMode;
   /** Arguments placed before `app-server` or `exec` (primarily for wrappers/tests). */
@@ -19,6 +20,7 @@ export interface CodexDiscoveryOptions {
   homeDirectory?: string;
   pathExists?: (path: string) => boolean;
   readDirectory?: (path: string) => string[];
+  resolveBundledCodexEntrypoint?: () => string | undefined;
 }
 
 /**
@@ -39,10 +41,22 @@ export function discoverCodexCommands(options: CodexDiscoveryOptions = {}): Code
   addEnvironmentCandidate(candidates, env.AGENTBRIDGE_CODEX_COMMAND, 'AGENTBRIDGE_CODEX_COMMAND', 'auto');
   addEnvironmentCandidate(candidates, env.CODEX_CLI_PATH, 'CODEX_CLI_PATH', 'auto');
 
-  // Explicit paths are authoritative overrides. Besides making configuration
-  // predictable, this lets locked-down/test environments intentionally
-  // disable Desktop and PATH discovery with a known-unavailable command.
-  if (candidates.length > 0) return deduplicate(candidates, platform === 'win32');
+  // Explicit CLI-capable paths remain authoritative. An App Server-only
+  // override still permits independent CLI discovery for safe fallback.
+  if (candidates.some((candidate) => candidate.mode !== 'app-server')) {
+    return deduplicate(candidates, platform === 'win32');
+  }
+
+  const bundledEntrypoint = (options.resolveBundledCodexEntrypoint ?? resolveBundledCodexEntrypoint)();
+  if (bundledEntrypoint) {
+    candidates.push({
+      command: process.execPath,
+      args: [bundledEntrypoint],
+      source: 'bundled',
+      label: 'AgentBridge bundled official Codex CLI',
+      mode: 'auto',
+    });
+  }
 
   if (platform === 'win32') {
     const localAppData = env.LOCALAPPDATA;
@@ -53,7 +67,7 @@ export function discoverCodexCommands(options: CodexDiscoveryOptions = {}): Code
         try {
           const versioned = readDirectory(desktopBin)
             .filter((name) => /^codex-\d+(?:\.\d+)*\.exe$/i.test(name))
-            .sort((left, right) => right.localeCompare(left));
+            .sort(compareVersionedExecutables);
           for (const name of versioned) {
             addPathCandidate(candidates, pathApi.join(desktopBin, name), 'Codex Desktop bundled runtime (Windows)', pathExists);
           }
@@ -83,6 +97,28 @@ export function discoverCodexCommands(options: CodexDiscoveryOptions = {}): Code
 
   candidates.push({ command: platform === 'win32' ? 'codex.exe' : 'codex', source: 'system', label: 'PATH', mode: 'auto' });
   return deduplicate(candidates, platform === 'win32');
+}
+
+function resolveBundledCodexEntrypoint(): string | undefined {
+  try {
+    const require = createRequire(import.meta.url);
+    const packageJson = require.resolve('@openai/codex/package.json');
+    const entrypoint = join(dirname(packageJson), 'bin', 'codex.js');
+    return existsSync(entrypoint) ? entrypoint : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function compareVersionedExecutables(left: string, right: string): number {
+  const parts = (value: string) => (value.match(/\d+(?:\.\d+)*/)?.[0] ?? '0').split('.').map(Number);
+  const a = parts(left);
+  const b = parts(right);
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    const difference = (b[index] ?? 0) - (a[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return right.localeCompare(left);
 }
 
 function addEnvironmentCandidate(

@@ -1,6 +1,6 @@
 {
   "name": "agentbridge",
-  "version": "0.6.1",
+  "version": "0.7.1",
   "private": true,
   "license": "PolyForm-Noncommercial-1.0.0",
   "author": "HeadStone1",
@@ -32,5 +32,8 @@
   },
   "devDependencies": {
     "esbuild": "^0.21.5"
+  },
+  "dependencies": {
+    "@openai/codex": "0.147.0"
   }
 }

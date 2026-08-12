@@ -13,13 +13,15 @@ export class ProviderError extends Error {
   readonly code: ProviderErrorCode;
   readonly retryable: boolean;
   readonly ambiguous: boolean;
+  readonly backend?: string;
 
-  constructor(code: ProviderErrorCode, message: string, options: { retryable?: boolean; ambiguous?: boolean; cause?: unknown } = {}) {
+  constructor(code: ProviderErrorCode, message: string, options: { retryable?: boolean; ambiguous?: boolean; backend?: string; cause?: unknown } = {}) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
     this.name = 'ProviderError';
     this.code = code;
     this.retryable = options.retryable ?? (code !== 'AUTH' && code !== 'RATE_LIMIT' && code !== 'CANCELLED');
     this.ambiguous = options.ambiguous ?? false;
+    this.backend = options.backend;
   }
 }
 

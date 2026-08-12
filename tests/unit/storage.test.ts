@@ -21,7 +21,7 @@ describe('Storage', () => {
       expect(d.driver).toBe('claude');
       expect(d.currentTurn).toBe(0);
       expect(d.roundCount).toBe(0);
-      expect(d.maxTurns).toBe(6);
+      expect(d.maxTurns).toBe(12);
     });
 
     it('retrieves a discussion by id', () => {
@@ -124,6 +124,22 @@ describe('Storage', () => {
 
       const projectDiscussions = storage.listDiscussions('/project');
       expect(projectDiscussions).toHaveLength(2);
+    });
+
+    it('cleans only expired completed or cancelled discussions', () => {
+      const completed = storage.createDiscussion({ topic: 'completed', driver: 'claude', traceId: 'tr_completed' });
+      storage.updateDiscussionStatus(completed.id, 'DISCUSSING');
+      storage.updateDiscussionStatus(completed.id, 'CANCELLED', { endedAt: '2000-01-01T00:00:00.000Z' });
+      storage.createMessage({ discussionId: completed.id, sender: 'claude', receiver: 'codex', role: 'proposal', content: 'old' });
+      const paused = storage.createDiscussion({ topic: 'paused', driver: 'claude', traceId: 'tr_paused' });
+      storage.updateDiscussionStatus(paused.id, 'DISCUSSING');
+      storage.updateDiscussionStatus(paused.id, 'NEEDS_USER_DECISION');
+
+      expect(storage.cleanupDiscussions(1)).toMatchObject({ count: 1, deleted: false });
+      expect(storage.getDiscussion(completed.id)).not.toBeNull();
+      expect(storage.cleanupDiscussions(1, true)).toMatchObject({ count: 1, deleted: true });
+      expect(storage.getDiscussion(completed.id)).toBeNull();
+      expect(storage.getDiscussion(paused.id)).not.toBeNull();
     });
   });
 

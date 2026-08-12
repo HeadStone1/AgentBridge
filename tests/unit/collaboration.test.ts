@@ -254,7 +254,7 @@ describe('CollaborationService', () => {
     budgetStorage.close();
   });
 
-  it('persists a max-round reply before pausing the discussion', async () => {
+  it('rejects an unsent reply after the provider response limit', async () => {
     const roundStorage = new Storage(':memory:');
     const roundCollaboration = new CollaborationService(
       roundStorage,
@@ -277,14 +277,17 @@ describe('CollaborationService', () => {
       traceId: 'tr_round_limit',
     });
 
-    const reply = await roundCollaboration.replyToDiscussion({
+    await expect(roundCollaboration.replyToDiscussion({
       discussionId: started.discussionId,
       sender: 'claude',
-      reply: 'must be retained',
+      reply: 'must not be retained',
+    })).rejects.toThrow('provider response limit');
+    expect(roundStorage.getDiscussion(started.discussionId)).toMatchObject({
+      status: 'NEEDS_USER_DECISION',
+      stopReason: 'MAX_TURNS',
     });
-    expect(reply.status).toBe('TIMEOUT');
     expect(roundStorage.getDiscussion(started.discussionId)?.roundCount).toBe(1);
-    expect(roundStorage.getMessages(started.discussionId).at(-1)?.content).toBe('must be retained');
+    expect(roundStorage.getMessages(started.discussionId).some((message) => message.content === 'must not be retained')).toBe(false);
     await expect(roundCollaboration.retryDiscussion({
       discussionId: started.discussionId,
       agent: 'claude',

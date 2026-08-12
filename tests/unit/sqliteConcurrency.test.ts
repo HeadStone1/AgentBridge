@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { Worker } from 'node:worker_threads';
 import { describe, expect, it } from 'vitest';
 import { Storage } from '@agentbridge/storage';
+import { AuditService } from '@agentbridge/audit';
+import { CollaborationService } from '@agentbridge/collaboration';
 
 describe('SQLite dual-process safety', () => {
   it('waits for a startup write lock before enabling WAL', async () => {
@@ -138,6 +140,38 @@ describe('SQLite dual-process safety', () => {
 
       expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
       expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    } finally {
+      first.close();
+      second.close();
+      rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+    }
+  });
+
+  it('wakes a discussion wait from a second SQLite connection', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'agentbridge-wait-'));
+    const dbPath = join(directory, 'shared.sqlite');
+    const first = new Storage(dbPath);
+    const second = new Storage(dbPath);
+    const collaboration = new CollaborationService(first, new AuditService(first));
+    try {
+      const discussion = first.createDiscussion({
+        topic: 'cross process wait', driver: 'claude', peer: 'codex', projectPath: directory, traceId: 'tr_cross_wait',
+      });
+      first.updateDiscussionStatus(discussion.id, 'DISCUSSING');
+      const initial = first.createMessage({
+        discussionId: discussion.id, sender: 'claude', receiver: 'codex', role: 'proposal', content: 'wait for peer',
+      });
+      first.updateDiscussionDispatch(discussion.id, 'RUNNING', 'codex');
+      const waiting = collaboration.waitForDiscussion(discussion.id, 3_000, initial.id);
+      setTimeout(() => {
+        second.createMessage({
+          discussionId: discussion.id, sender: 'codex', receiver: 'claude', role: 'response', content: 'arrived from another connection',
+        });
+        second.updateDiscussionDispatch(discussion.id, 'COMPLETED', null);
+      }, 100);
+      const result = await waiting;
+      expect(result.waitTimedOut).toBe(false);
+      expect(result.messages.at(-1)?.content).toBe('arrived from another connection');
     } finally {
       first.close();
       second.close();

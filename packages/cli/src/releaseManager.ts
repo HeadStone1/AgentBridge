@@ -4,6 +4,7 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import process from 'node:process';
+import { installManagedSkills } from './skills.js';
 
 declare const __AGENTBRIDGE_VERSION__: string;
 
@@ -188,7 +189,11 @@ export function rollbackInstalledRelease(root = installRoot()): Record<string, u
   const previous = candidates.at(-1);
   if (!previous) throw new Error(`No installed version older than ${current} is available`);
   writeFileSync(currentFile, `${previous}\n`, 'utf8');
-  return { previousVersion: current, currentVersion: previous, installRoot: root };
+  const skillSource = join(versionsDirectory, previous, 'skills', 'agentbridge-collaboration');
+  const skills = existsSync(join(skillSource, 'SKILL.md'))
+    ? installManagedSkills(previous, { ...process.env, AGENTBRIDGE_SKILL_SOURCE: skillSource })
+    : { skipped: true, reason: 'selected release does not contain the collaboration skill' };
+  return { previousVersion: current, currentVersion: previous, installRoot: root, skills };
 }
 
 async function download(url: string, destination: string): Promise<void> {

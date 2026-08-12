@@ -20,6 +20,7 @@ import {
 } from './mcpConfig.js';
 import { defaultCodexConfig, defaultGlobalCodexConfig, resolveMcpEntry } from './paths.js';
 import { runDoctor } from './diagnostics.js';
+import { installManagedSkills, removeManagedSkills } from './skills.js';
 import {
   cleanupEmptyRegistryRoot,
   assertUpdateSupported,
@@ -62,6 +63,9 @@ async function main(argv: string[]): Promise<void> {
     case 'status':
       console.log(JSON.stringify(status(projectPath), null, 2));
       return;
+    case 'cleanup':
+      console.log(JSON.stringify(cleanup(projectPath, options), null, 2));
+      return;
     case 'doctor':
       console.log(JSON.stringify(await runDoctor(projectPath, options), null, 2));
       return;
@@ -93,13 +97,14 @@ function initProject(projectPath: string): Record<string, unknown> {
 
 function setupGlobal(projectPath: string | undefined, options: Options): Record<string, unknown> {
   const project = projectPath ? initProject(projectPath) : null;
+  const skills = installManagedSkills(CURRENT_VERSION);
   const claudeConfig = String(options['claude-config'] ?? join(homedir(), '.claude.json'));
   const codexConfig = String(options['codex-config'] ?? defaultGlobalCodexConfig());
   if (options['no-config'] === true) {
     const projects = projectPath
       ? registerProject({ projectPath, claudeConfig, codexConfig, scope: 'global' })
       : readProjectRegistry();
-    return { registrationMode: 'global', project, configured: [], registeredProjects: projects.length };
+    return { registrationMode: 'global', project, configured: [], skills, registeredProjects: projects.length };
   }
 
   const releaseLauncher = process.env.AGENTBRIDGE_LAUNCHER;
@@ -160,7 +165,20 @@ function setupGlobal(projectPath: string | undefined, options: Options): Record<
     configured,
     migratedCodexConfigs,
     registeredProjects: projects.length,
+    skills,
   };
+}
+
+function cleanup(projectPath: string, options: Options): Record<string, unknown> {
+  const value = options['older-than-days'];
+  if (typeof value !== 'string') throw new Error('--older-than-days is required');
+  const olderThanDays = Number.parseInt(value, 10);
+  const storage = openStorage(projectPath);
+  try {
+    return storage.cleanupDiscussions(olderThanDays, options.yes === true);
+  } finally {
+    storage.close();
+  }
 }
 
 function defaultMcpEntry(): string {
@@ -273,6 +291,7 @@ function uninstallAll(confirmed: boolean, options: Options): Record<string, unkn
     removeClaudeGlobal(target.claudeConfig),
     removeCodexToml(target.codexConfig),
   ]);
+  const skills = removeManagedSkills();
   let program: unknown = null;
   if (removeProgram && errors.length === 0) {
     if (installation.mode === 'npm') cleanupEmptyRegistryRoot();
@@ -284,6 +303,7 @@ function uninstallAll(confirmed: boolean, options: Options): Record<string, unkn
     removedProjects: projects.length,
     projects,
     globalConfigs,
+    skills,
     errors,
     program,
     complete: errors.length === 0,
@@ -374,6 +394,7 @@ function printHelp(): void {
     '  setup [path]                Register MCP globally once; optional path initializes one project',
     '  register-session             Register a provider-native session',
     '  status [path]               Show sessions, discussions, and metrics',
+    '  cleanup [path]              Preview/delete old completed discussions',
     '  doctor [path]               Diagnose install, config, database, and providers',
     '  version                     Show the installed AgentBridge version',
     '  update [--install]          Check GitHub Releases; install only with --install',
@@ -397,6 +418,7 @@ function printHelp(): void {
     '  --codex-command PATH        Override Codex executable (auto/CLI)',
     '  --channel stable|beta       Select the update channel (default: stable)',
     '  --remove-program            With uninstall-all, remove installed program files',
+    '  --older-than-days N         Cleanup cutoff (1-3650 days); add --yes to delete',
     '  --claude-config PATH',
     '  --codex-config PATH',
   ].join('\n'));

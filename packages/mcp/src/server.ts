@@ -47,6 +47,7 @@ function buildTools(agentType: AgentType): Tool[] {
           peer: { type: 'string', enum: [peer], description: 'The agent to discuss with' },
           message: { type: 'string', description: 'Proposal or question for the peer' },
           projectPath: { type: 'string', description: 'Project path; defaults to the current working directory' },
+          maxTurns: { type: 'integer', minimum: 1, maximum: 50, description: 'Maximum successful provider responses (default: 12)' },
         },
         required: ['peer', 'message'],
       },
@@ -69,6 +70,19 @@ function buildTools(agentType: AgentType): Tool[] {
       inputSchema: {
         type: 'object',
         properties: { discussionId: { type: 'string', description: 'Discussion ID' } },
+        required: ['discussionId'],
+      },
+    },
+    {
+      name: 'wait_discussion',
+      description: 'Wait for an asynchronous discussion to receive a new message or leave its queued/running state without changing discussion status.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          discussionId: { type: 'string', description: 'Discussion ID' },
+          timeoutMs: { type: 'integer', minimum: 1000, maximum: 120000, description: 'Long-poll timeout in milliseconds (default: 30000)' },
+          afterMessageId: { type: 'string', description: 'Wake when a newer message exists' },
+        },
         required: ['discussionId'],
       },
     },
@@ -143,9 +157,15 @@ function createServer(resolveRuntime: MCPRuntimeResolver, options: MCPServerOpti
       peer: z.literal(opposite(agentType)),
       message: text,
       projectPath: z.string().trim().min(1).max(4096).optional(),
+      maxTurns: z.number().int().min(1).max(50).optional(),
     }),
     reply: z.object({ discussionId: id, message: text }),
     get: z.object({ discussionId: id }),
+    wait: z.object({
+      discussionId: id,
+      timeoutMs: z.number().int().min(1_000).max(120_000).optional(),
+      afterMessageId: id.optional(),
+    }),
     list: z.object({ projectPath: z.string().trim().min(1).max(4096).optional() }),
     close: z.object({ discussionId: id, conclusion: text }),
     cancel: z.object({ discussionId: id }),
@@ -183,6 +203,7 @@ function createServer(resolveRuntime: MCPRuntimeResolver, options: MCPServerOpti
             initialMessage: input.message,
             projectPath: runtime.projectPath ?? input.projectPath,
             traceId: `tr_${randomUUID()}`,
+            maxTurns: input.maxTurns,
           });
           return ok(result);
         }
@@ -199,6 +220,15 @@ function createServer(resolveRuntime: MCPRuntimeResolver, options: MCPServerOpti
           const input = parse(schemas.get, args);
           const runtime = await resolveRuntime(undefined, server);
           return ok(await runtime.collaboration.getDiscussion(input.discussionId));
+        }
+        case 'wait_discussion': {
+          const input = parse(schemas.wait, args);
+          const runtime = await resolveRuntime(undefined, server);
+          return ok(await runtime.collaboration.waitForDiscussion(
+            input.discussionId,
+            input.timeoutMs,
+            input.afterMessageId,
+          ));
         }
         case 'list_discussions': {
           const input = parse(schemas.list, args);

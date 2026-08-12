@@ -1,0 +1,6 @@
+interface:
+  display_name: "AgentBridge Collaboration"
+  short_description: "Coordinate structured peer discussions"
+  default_prompt: "Use $agentbridge-collaboration to get a structured peer review."
+policy:
+  allow_implicit_invocation: true

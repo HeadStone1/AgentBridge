@@ -33,6 +33,8 @@ for await (const line of input) {
       item: { type: 'agentMessage', text: `app response ${turnNumber}` },
     });
     notify('turn/completed', { threadId, turnId, turn: { id: turnId, status: 'completed' } });
+  } else if (request.method === 'thread/archive') {
+    write(request.id, {});
   } else if (request.method === 'turn/interrupt') {
     write(request.id, {});
   } else {

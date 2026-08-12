@@ -13,6 +13,8 @@ import type {
   MessageRole,
   AgentSession,
   SessionStatus,
+  DiscussionError,
+  DiscussionStopReason,
 } from '@agentbridge/protocol';
 import { canTransition, resolveProjectPath, SessionBusyError } from '@agentbridge/protocol';
 
@@ -27,7 +29,7 @@ export {
 } from './registry.js';
 export type { RegisteredProject } from './registry.js';
 
-const DEFAULT_MAX_TURNS = 6;
+const DEFAULT_MAX_TURNS = 12;
 const MAX_ALLOWED_TURNS = 50;
 const MAX_TEXT_LENGTH = 100_000;
 const SQLITE_STARTUP_TIMEOUT_MS = 5_000;
@@ -62,7 +64,7 @@ CREATE TABLE IF NOT EXISTS discussions (
   peer TEXT,
   current_turn INTEGER NOT NULL DEFAULT 0,
   round_count INTEGER NOT NULL DEFAULT 0,
-  max_turns INTEGER NOT NULL DEFAULT 6,
+  max_turns INTEGER NOT NULL DEFAULT 12,
   retry_count INTEGER NOT NULL DEFAULT 0,
   max_retries INTEGER NOT NULL DEFAULT 2,
   created_at TEXT NOT NULL,
@@ -71,6 +73,8 @@ CREATE TABLE IF NOT EXISTS discussions (
   conclusion TEXT,
   project_path TEXT,
   trace_id TEXT NOT NULL
+  ,stop_reason TEXT
+  ,last_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -196,6 +200,8 @@ export class Storage {
     this.ensureColumn('discussions', 'retry_count', 'ALTER TABLE discussions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('discussions', 'max_retries', 'ALTER TABLE discussions ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 2');
     this.ensureColumn('discussions', 'round_count', 'ALTER TABLE discussions ADD COLUMN round_count INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('discussions', 'stop_reason', 'ALTER TABLE discussions ADD COLUMN stop_reason TEXT');
+    this.ensureColumn('discussions', 'last_error', 'ALTER TABLE discussions ADD COLUMN last_error TEXT');
     this.ensureColumn('messages', 'provider_session_id', 'ALTER TABLE messages ADD COLUMN provider_session_id TEXT');
   }
 
@@ -292,6 +298,16 @@ export class Storage {
       .run(state, waitingFor, new Date().toISOString(), id);
   }
 
+  updateDiscussionDiagnostic(
+    id: string,
+    stopReason: DiscussionStopReason | null,
+    lastError: DiscussionError | null = null,
+  ): void {
+    if (!this.getDiscussion(id)) throw new Error(`Discussion ${id} not found`);
+    this.db.prepare('UPDATE discussions SET stop_reason = ?, last_error = ?, updated_at = ? WHERE id = ?')
+      .run(stopReason, lastError ? JSON.stringify(lastError) : null, new Date().toISOString(), id);
+  }
+
   incrementDiscussionRound(id: string): Discussion {
     const current = this.getDiscussion(id);
     if (!current) throw new Error(`Discussion ${id} not found`);
@@ -321,6 +337,41 @@ export class Storage {
       : 'SELECT * FROM discussions ORDER BY created_at DESC';
     const rows = (projectPath ? this.db.prepare(query).all(projectPath) : this.db.prepare(query).all()) as Record<string, unknown>[];
     return rows.map(rowToDiscussion);
+  }
+
+  cleanupDiscussions(olderThanDays: number, execute = false): {
+    cutoff: string;
+    count: number;
+    discussionIds: string[];
+    deleted: boolean;
+  } {
+    if (!Number.isInteger(olderThanDays) || olderThanDays < 1 || olderThanDays > 3650) {
+      throw new Error('olderThanDays must be an integer between 1 and 3650');
+    }
+    const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1_000).toISOString();
+    const rows = this.db.prepare(
+      `SELECT id FROM discussions
+       WHERE status IN ('COMPLETED', 'CANCELLED')
+         AND COALESCE(ended_at, updated_at) <= ?
+       ORDER BY COALESCE(ended_at, updated_at) ASC`,
+    ).all(cutoff) as Array<{ id: string }>;
+    const discussionIds = rows.map((row) => row.id);
+    if (execute && discussionIds.length > 0) {
+      this.transaction(() => {
+        const remove = (table: string) => {
+          const statement = this.db.prepare(`DELETE FROM ${table} WHERE discussion_id = ?`);
+          for (const id of discussionIds) statement.run(id);
+        };
+        remove('audit_events');
+        remove('agreements');
+        remove('decisions');
+        remove('messages');
+        remove('discussion_leases');
+        const statement = this.db.prepare('DELETE FROM discussions WHERE id = ?');
+        for (const id of discussionIds) statement.run(id);
+      });
+    }
+    return { cutoff, count: discussionIds.length, discussionIds, deleted: execute };
   }
 
   recoverStaleDiscussions(maxAgeMs = 30 * 60 * 1_000): Discussion[] {
@@ -762,6 +813,10 @@ export class Storage {
     return (rows as Record<string, unknown>[]).map(rowToAgentSession);
   }
 
+  listSessionsForDiscussion(discussionId: string): AgentSession[] {
+    return this.listSessions().filter((session) => session.metadata.discussionId === discussionId);
+  }
+
   updateSessionStatus(
     provider: AgentType,
     sessionId: string,
@@ -828,7 +883,21 @@ function rowToDiscussion(row: Record<string, unknown>): Discussion {
     traceId: row.trace_id as string,
     dispatchState: (row.dispatch_state as DispatchState | null) ?? null,
     waitingFor: (row.waiting_for as AgentType | null) ?? null,
+    stopReason: (row.stop_reason as DiscussionStopReason | null) ?? null,
+    lastError: parseJsonObject(row.last_error) as unknown as DiscussionError | null,
   };
+}
+
+function parseJsonObject(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== 'string' || !value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function rowToMessage(row: Record<string, unknown>): Message {
