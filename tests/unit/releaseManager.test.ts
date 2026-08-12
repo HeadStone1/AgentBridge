@@ -13,7 +13,7 @@ import {
 
 describe('Release management', () => {
   it('reads the workspace release version during development', () => {
-    expect(CURRENT_VERSION).toBe('0.7.1');
+    expect(CURRENT_VERSION).toBe('0.7.2');
   });
 
   it('normalizes and compares stable and prerelease versions', () => {

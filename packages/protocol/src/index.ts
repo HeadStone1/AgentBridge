@@ -13,6 +13,7 @@ export function resolveProjectPath(
 }
 
 export type AgentType = 'claude' | 'codex';
+export type SessionPolicy = 'auto' | 'reuse' | 'fresh';
 export type SessionStatus = 'IDLE' | 'BUSY' | 'BRIDGE_OWNED' | 'ARCHIVED' | 'UNKNOWN';
 export type PeerAvailability = 'INTERACTIVE' | 'BACKGROUND' | 'UNAVAILABLE';
 export type DispatchState = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED';
@@ -74,6 +75,8 @@ export interface Discussion {
   endedAt: string | null;
   conclusion: string | null;
   projectPath: string;
+  /** Project-scoped collaboration session used to reuse provider-native sessions. */
+  collaborationSessionId: string | null;
   traceId: string;
   /** Persisted provider-dispatch lifecycle, independent from discussion status. */
   dispatchState: DispatchState | null;
@@ -121,10 +124,24 @@ export interface AskPeerInput {
   projectPath?: string;
   /** Maximum successful provider responses for this discussion. */
   maxTurns?: number;
+  /** Provider-session reuse policy; defaults to the service's auto policy. */
+  sessionPolicy?: SessionPolicy;
+}
+
+export interface CollaborationSession {
+  id: string;
+  projectPath: string;
+  status: 'ACTIVE' | 'ARCHIVED';
+  policy: SessionPolicy;
+  claudeSessionId: string | null;
+  codexSessionId: string | null;
+  createdAt: string;
+  lastSeenAt: string;
 }
 
 export interface AskPeerOutput {
   discussionId: string;
+  collaborationSessionId?: string | null;
   peer: AgentType;
   messageId: string;
   status: DiscussionStatus;
