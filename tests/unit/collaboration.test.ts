@@ -178,6 +178,45 @@ describe('CollaborationService', () => {
     connectedStorage.close();
   });
 
+  it('reuses provider sessions across discussions by default and creates fresh sessions on request', async () => {
+    const calls: Array<{ provider: string; sessionId?: string; discussionId: string }> = [];
+    const connectedStorage = new Storage(':memory:');
+    const connectedCollaboration = new CollaborationService(
+      connectedStorage,
+      new AuditService(connectedStorage),
+      { timeoutMs: 5_000 },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async (context) => {
+            calls.push({ provider: 'codex', sessionId: context.providerSessionId, discussionId: context.discussionId });
+            return { content: 'response', duration: 1, providerSessionId: 'shared-codex', providerSessionKind: 'codex-cli' };
+          },
+        },
+      },
+    );
+    const first = await connectedCollaboration.initiateDiscussion({
+      driver: 'claude', peer: 'codex', topic: 'first', initialMessage: 'one', projectPath: '/project', traceId: 'tr_reuse_1',
+    });
+    const second = await connectedCollaboration.initiateDiscussion({
+      driver: 'claude', peer: 'codex', topic: 'second', initialMessage: 'two', projectPath: '/project', traceId: 'tr_reuse_2',
+    });
+    const fresh = await connectedCollaboration.initiateDiscussion({
+      driver: 'claude', peer: 'codex', topic: 'fresh', initialMessage: 'three', projectPath: '/project', traceId: 'tr_reuse_3', sessionPolicy: 'fresh',
+    });
+
+    expect(connectedStorage.getDiscussion(first.discussionId)?.collaborationSessionId)
+      .toBe(connectedStorage.getDiscussion(second.discussionId)?.collaborationSessionId);
+    expect(connectedStorage.getDiscussion(fresh.discussionId)?.collaborationSessionId)
+      .not.toBe(connectedStorage.getDiscussion(first.discussionId)?.collaborationSessionId);
+    expect(calls.map((call) => call.sessionId)).toEqual([undefined, 'shared-codex', undefined]);
+    expect((await connectedCollaboration.getDiscussion(first.discussionId)).providerSessions.map((session) => session.sessionId))
+      .toEqual(['shared-codex']);
+    connectedStorage.close();
+  });
+
   it('marks an unavailable peer as PEER_BUSY and releases the lease', async () => {
     const peerStorage = new Storage(':memory:');
     const peerCollaboration = new CollaborationService(

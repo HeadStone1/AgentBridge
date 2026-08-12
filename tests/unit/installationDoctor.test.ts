@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, type ExecFileSyncError } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -103,11 +103,13 @@ describe('system installation and diagnostics', () => {
   it('doctor returns structured failures and does not create a missing project', () => {
     const root = temporaryDirectory();
     const missingProject = join(root, 'missing-project');
-    const output = runCli([
+    const result = runCliResult([
       'doctor', missingProject,
       '--claude-config', join(root, 'claude.json'),
       '--codex-config', join(root, 'codex.toml'),
     ], { AGENTBRIDGE_INSTALL_ROOT: join(root, 'registry') });
+    expect(result.status).toBe(1);
+    const output = result.output;
     expect(output.ok).toBe(false);
     expect(output.project).toMatchObject({ exists: false, initialized: false });
     expect(output.database).toMatchObject({ ok: false, tested: false });
@@ -140,11 +142,13 @@ describe('system installation and diagnostics', () => {
     expect(registrations).toHaveLength(2);
     expect(registrations.every((item) => item.scope === 'global' && item.codexConfig === resolve(codexConfig))).toBe(true);
 
-    const doctor = runCli([
+    const doctorResult = runCliResult([
       'doctor', join(root, 'project-a'),
       '--claude-config', claudeConfig,
       '--codex-config', codexConfig,
     ], env);
+    expect(doctorResult.status).toBe(1);
+    const doctor = doctorResult.output;
     expect(doctor.project).toMatchObject({ exists: true, initialized: true, metadataValid: true });
     expect(doctor.database).toMatchObject({ ok: true, tested: true });
     expect(doctor.registry).toMatchObject({ registered: true, projectCount: 2 });
@@ -171,19 +175,30 @@ function temporaryDirectory(): string {
 }
 
 function runCli(args: string[], extraEnv: Record<string, string> = {}, cwd = repositoryRoot): any {
+  const result = runCliResult(args, extraEnv, cwd);
+  if (result.status !== 0) throw new Error(`CLI exited with ${result.status}`);
+  return result.output;
+}
+
+function runCliResult(args: string[], extraEnv: Record<string, string> = {}, cwd = repositoryRoot): { status: number; output: any } {
   const cli = join(repositoryRoot, 'packages', 'cli', 'dist', 'index.js');
-  const output = execFileSync(process.execPath, [cli, ...args], {
-    cwd,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      AGENTBRIDGE_SKILL_HOME: dirname(extraEnv.AGENTBRIDGE_INSTALL_ROOT ?? cwd),
-      AGENTBRIDGE_CLAUDE_COMMAND: join(cwd, 'unavailable-claude'),
-      AGENTBRIDGE_CODEX_COMMAND: join(cwd, 'unavailable-codex'),
-      ...extraEnv,
-    },
-    timeout: 30_000,
-    windowsHide: true,
-  });
-  return JSON.parse(output);
+  try {
+    const output = execFileSync(process.execPath, [cli, ...args], {
+      cwd,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        AGENTBRIDGE_SKILL_HOME: dirname(extraEnv.AGENTBRIDGE_INSTALL_ROOT ?? cwd),
+        AGENTBRIDGE_CLAUDE_COMMAND: join(cwd, 'unavailable-claude'),
+        AGENTBRIDGE_CODEX_COMMAND: join(cwd, 'unavailable-codex'),
+        ...extraEnv,
+      },
+      timeout: 30_000,
+      windowsHide: true,
+    });
+    return { status: 0, output: JSON.parse(output) };
+  } catch (cause) {
+    const error = cause as ExecFileSyncError & { stdout?: string };
+    return { status: typeof error.status === 'number' ? error.status : 1, output: JSON.parse(String(error.stdout ?? '')) };
+  }
 }

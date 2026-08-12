@@ -11,6 +11,8 @@ import type {
   Message,
   MessageRole,
   SessionStatus,
+  SessionPolicy,
+  CollaborationSession,
 } from '@agentbridge/protocol';
 
 /**
@@ -28,7 +30,27 @@ export interface StoragePort {
     traceId: string;
     maxTurns?: number;
     maxRetries?: number;
+    collaborationSessionId?: string;
   }): Discussion;
+  createCollaborationSession(data: {
+    projectPath: string;
+    policy?: SessionPolicy;
+  }): CollaborationSession;
+  getOrCreateCollaborationSession(data: {
+    projectPath: string;
+    policy?: Exclude<SessionPolicy, 'fresh'>;
+  }): CollaborationSession;
+  getCollaborationSession(id: string): CollaborationSession | null;
+  getSessionForCollaboration(
+    provider: AgentType,
+    collaborationSessionId: string,
+    projectPath: string,
+  ): AgentSession | null;
+  bindProviderSession(data: {
+    collaborationSessionId: string;
+    provider: AgentType;
+    sessionId: string;
+  }): void;
   getDiscussion(id: string): Discussion | null;
   updateDiscussionStatus(id: string, status: DiscussionStatus, extra?: Partial<Discussion>): void;
   updateDiscussionDispatch(id: string, state: DispatchState | null, waitingFor?: AgentType | null): void;
