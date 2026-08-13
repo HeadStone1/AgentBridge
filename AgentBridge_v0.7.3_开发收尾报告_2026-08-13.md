@@ -1,8 +1,8 @@
 # AgentBridge v0.7.3 开发收尾报告
 
-日期：2026-08-13  
-分支：`agent/v0.7.3-robustness-audit`  
-基线提交：`ade8f831924e8f9384d0daee170206821a233bfa`  
+日期：2026-08-13
+分支：`agent/v0.7.3-robustness-audit`
+基线提交：`ade8f831924e8f9384d0daee170206821a233bfa`
 版本：`0.7.3`
 
 ## 1. 结论
