@@ -23,7 +23,7 @@ The following conditions are mandatory:
 5. Runtime data remains project-scoped. AgentBridge resolves the active root from an explicit/legacy project environment, `CLAUDE_PROJECT_DIR`, MCP `roots/list`, or the MCP process working directory. `ask_peer.projectPath` is the explicit fallback.
 6. Choose exactly one installation method: GitHub Release, npm, or source. Do not mix launchers from different methods.
 7. Do not delete a source checkout, project database, configuration, or system installation without explicit user approval.
-8. Treat provider sessions as discussion-scoped. Resume only a session explicitly linked to the current discussion; never reuse an unbound historical session or a session belonging to another discussion.
+8. Treat provider sessions as project-scoped AgentBridge resources. `auto/reuse` may resume only a live AgentBridge-owned session bound to the same project's collaboration session; `fresh` must remain isolated. Never reuse an unbound historical or superseded session.
 
 ## Ask or discover before changing anything
 
@@ -328,7 +328,9 @@ Never use a destructive Git reset to hide unknown local changes.
 
 ## v0.7 discussion controls
 
-`setup` installs the managed `agentbridge-collaboration` Skill into the Claude and Codex user Skill locations. It must not overwrite a custom or modified same-name Skill. Use `wait_discussion` for bounded SQLite-backed long polling; a wait timeout never changes discussion status. The default `maxTurns=12` counts successful Provider responses.
+`setup` installs four managed Skills into the Claude and Codex user Skill locations: `agentbridge-collaboration` for routing/lifecycle, `agentbridge-peer-review` for bounded finding-driven reviews, `agentbridge-debug` for reproducible root-cause work, and `agentbridge-decision-debate` for high-impact tradeoff debates. It must not overwrite a custom or modified same-name Skill.
+
+`ask_peer.mode` accepts `review`, `discussion`, or `deep-discussion`, with default successful-response ceilings of 3, 12, and 20. An explicit `maxTurns` overrides the mode default but remains a safety ceiling rather than a target. Each peer response must end in one exact convergence signal; AgentBridge persists it as `lastSignal` and pauses on `NEEDS_USER_DECISION`. Use `wait_discussion` for bounded SQLite-backed long polling; a wait timeout never changes discussion status.
 
 Discussion records are permanent by default. `agentbridge cleanup <project> --older-than-days N` previews eligible terminal rows; `--yes` performs the transaction. `AGENTBRIDGE_DISCUSSION_RETENTION_DAYS` enables opt-in startup cleanup, and `AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE=1` enables best-effort native archival. Tests and automation must set a temporary `AGENTBRIDGE_SKILL_HOME` and must never write real Claude/Codex user directories.
 

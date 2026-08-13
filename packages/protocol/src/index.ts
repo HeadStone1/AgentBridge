@@ -14,10 +14,24 @@ export function resolveProjectPath(
 
 export type AgentType = 'claude' | 'codex';
 export type SessionPolicy = 'auto' | 'reuse' | 'fresh';
+export const DISCUSSION_MODES = ['review', 'discussion', 'deep-discussion'] as const;
+export type DiscussionMode = (typeof DISCUSSION_MODES)[number];
+export type DiscussionSignal = 'CONTINUE' | 'READY_TO_CLOSE' | 'NEEDS_USER_DECISION';
+export const DEFAULT_DISCUSSION_MODE: DiscussionMode = 'discussion';
+export const DEFAULT_MAX_TURNS_BY_MODE: Readonly<Record<DiscussionMode, number>> = {
+  review: 3,
+  discussion: 12,
+  'deep-discussion': 20,
+};
 export type SessionStatus = 'IDLE' | 'BUSY' | 'BRIDGE_OWNED' | 'ARCHIVED' | 'UNKNOWN';
 export type PeerAvailability = 'INTERACTIVE' | 'BACKGROUND' | 'UNAVAILABLE';
 export type DispatchState = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED';
-export type DiscussionStopReason = 'MAX_TURNS' | 'MAX_DURATION' | 'MESSAGE_BUDGET' | 'PROVIDER_ERROR';
+export type DiscussionStopReason =
+  | 'MAX_TURNS'
+  | 'MAX_DURATION'
+  | 'MESSAGE_BUDGET'
+  | 'PROVIDER_ERROR'
+  | 'PEER_REQUESTED_USER_DECISION';
 
 export interface DiscussionError {
   code: string;
@@ -62,6 +76,8 @@ export interface Message {
 export interface Discussion {
   id: string;
   topic: string;
+  /** Persisted behavior contract controlling evidence, challenge, and convergence depth. */
+  mode: DiscussionMode;
   status: DiscussionStatus;
   driver: AgentType; // Who initiated this discussion
   peer: AgentType;
@@ -82,6 +98,8 @@ export interface Discussion {
   dispatchState: DispatchState | null;
   /** Agent expected to receive or act on the current dispatch, when applicable. */
   waitingFor: AgentType | null;
+  /** Latest machine-readable convergence signal returned by a peer. */
+  lastSignal: DiscussionSignal | null;
   stopReason: DiscussionStopReason | null;
   lastError: DiscussionError | null;
 }
@@ -122,6 +140,8 @@ export interface AskPeerInput {
   peer: AgentType;
   message: string;
   projectPath?: string;
+  /** Discussion behavior contract; defaults to discussion. */
+  mode?: DiscussionMode;
   /** Maximum successful provider responses for this discussion. */
   maxTurns?: number;
   /** Provider-session reuse policy; defaults to the service's auto policy. */
@@ -143,6 +163,8 @@ export interface AskPeerOutput {
   discussionId: string;
   collaborationSessionId?: string | null;
   peer: AgentType;
+  mode: DiscussionMode;
+  maxTurns: number;
   messageId: string;
   status: DiscussionStatus;
   dispatchState?: DispatchState;
@@ -213,7 +235,7 @@ export interface CancelDiscussionOutput {
 
 export interface RetryDiscussionOutput {
   discussionId: string;
-  status: 'DISCUSSING';
+  status: 'DISCUSSING' | 'NEEDS_USER_DECISION';
   retryCount: number;
   dispatchState?: DispatchState;
   peerResponse?: Message;

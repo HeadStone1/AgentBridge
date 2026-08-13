@@ -217,6 +217,106 @@ describe('CollaborationService', () => {
     connectedStorage.close();
   });
 
+  it('keeps fresh discussions isolated while reusing their own provider session across turns', async () => {
+    const freshStorage = new Storage(':memory:');
+    const calls: Array<{ discussionId: string; providerSessionId?: string }> = [];
+    let created = 0;
+    const service = new CollaborationService(
+      freshStorage,
+      new AuditService(freshStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async (context) => {
+            calls.push({ discussionId: context.discussionId, providerSessionId: context.providerSessionId });
+            const providerSessionId = context.providerSessionId ?? `fresh-codex-${++created}`;
+            return { content: 'fresh response', duration: 1, providerSessionId, providerSessionKind: 'codex-cli' };
+          },
+        },
+      },
+    );
+
+    const first = await service.initiateDiscussion({
+      driver: 'claude', peer: 'codex', topic: 'fresh first', initialMessage: 'one',
+      projectPath: '/fresh-project', traceId: 'tr_fresh_first', sessionPolicy: 'fresh',
+    });
+    await service.replyToDiscussion({
+      discussionId: first.discussionId,
+      sender: 'claude',
+      reply: 'continue the isolated room',
+    });
+    const second = await service.initiateDiscussion({
+      driver: 'claude', peer: 'codex', topic: 'fresh second', initialMessage: 'two',
+      projectPath: '/fresh-project', traceId: 'tr_fresh_second', sessionPolicy: 'fresh',
+    });
+
+    expect(calls).toEqual([
+      { discussionId: first.discussionId, providerSessionId: undefined },
+      { discussionId: first.discussionId, providerSessionId: 'fresh-codex-1' },
+      { discussionId: second.discussionId, providerSessionId: undefined },
+    ]);
+    expect(created).toBe(2);
+    freshStorage.close();
+  });
+
+  it('does not archive a shared collaboration session when one discussion closes', async () => {
+    const sharedStorage = new Storage(':memory:');
+    const archived: string[] = [];
+    const calls: Array<string | undefined> = [];
+    const service = new CollaborationService(
+      sharedStorage,
+      new AuditService(sharedStorage),
+      { archiveSessionsOnClose: true },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async (context) => {
+            calls.push(context.providerSessionId);
+            return {
+              content: 'shared response',
+              duration: 1,
+              providerSessionId: context.providerSessionId ?? 'shared-thread',
+              providerSessionKind: 'codex-app-server',
+            };
+          },
+          archiveSession: async (sessionId) => {
+            archived.push(sessionId);
+            return true;
+          },
+        },
+      },
+    );
+    const first = await service.initiateDiscussion({
+      driver: 'claude', peer: 'codex', topic: 'shared first', initialMessage: 'one',
+      projectPath: '/shared-project', traceId: 'tr_shared_first',
+    });
+    const second = await service.initiateDiscussion({
+      driver: 'claude', peer: 'codex', topic: 'shared second', initialMessage: 'two',
+      projectPath: '/shared-project', traceId: 'tr_shared_second',
+    });
+
+    await service.cancelDiscussion({ discussionId: second.discussionId, agent: 'claude' });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await service.replyToDiscussion({
+      discussionId: first.discussionId,
+      sender: 'claude',
+      reply: 'continue first discussion',
+    });
+
+    expect(archived).toEqual([]);
+    expect(calls).toEqual([undefined, 'shared-thread', 'shared-thread']);
+    expect(sharedStorage.getSession('codex', 'shared-thread')?.status).toBe('IDLE');
+    expect(sharedStorage.getAuditLog(second.discussionId).some((event) => (
+      event.action === 'session.archive_shared_skipped'
+    ))).toBe(true);
+    sharedStorage.close();
+  });
+
   it('marks an unavailable peer as PEER_BUSY and releases the lease', async () => {
     const peerStorage = new Storage(':memory:');
     const peerCollaboration = new CollaborationService(
@@ -614,5 +714,121 @@ describe('CollaborationService', () => {
     expect(fallbackStorage.getSession('codex', 'thread_new_cli')?.status).toBe('IDLE');
     expect(fallbackStorage.getSession('codex', 'thread_new_cli')?.metadata.sessionKind).toBe('codex-cli');
     fallbackStorage.close();
+  });
+
+  it.each([
+    ['review', 3],
+    ['discussion', 12],
+    ['deep-discussion', 20],
+  ] as const)('persists %s mode with its default safety ceiling', async (mode, maxTurns) => {
+    const modeStorage = new Storage(':memory:');
+    const prompts: string[] = [];
+    const service = new CollaborationService(
+      modeStorage,
+      new AuditService(modeStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => {
+            prompts.push(prompt);
+            return { content: 'reviewed\n[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE]', duration: 1 };
+          },
+        },
+      },
+    );
+
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: `${mode} defaults`,
+      initialMessage: 'Inspect this decision.',
+      traceId: `tr_${mode}`,
+      mode,
+    });
+
+    expect(started).toMatchObject({ mode, maxTurns });
+    expect(modeStorage.getDiscussion(started.discussionId)).toMatchObject({ mode, maxTurns });
+    expect(prompts[0]).toContain(`mode: ${mode}`);
+    expect(prompts[0]).toContain(`0/${maxTurns}`);
+    expect(modeStorage.getAuditLog(started.discussionId).find((event) => event.action === 'peer.response')?.metadata)
+      .toMatchObject({ mode, signal: 'READY_TO_CLOSE' });
+    modeStorage.close();
+  });
+
+  it('lets an explicit service ceiling override mode defaults', async () => {
+    const configuredStorage = new Storage(':memory:');
+    const service = new CollaborationService(configuredStorage, new AuditService(configuredStorage), { maxTurns: 7 });
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'configured ceiling',
+      initialMessage: 'Review with a service ceiling.',
+      traceId: 'tr_configured_ceiling',
+      mode: 'review',
+    });
+    expect(started.maxTurns).toBe(7);
+    expect(configuredStorage.getDiscussion(started.discussionId)?.maxTurns).toBe(7);
+    configuredStorage.close();
+  });
+
+  it('pauses safely when the peer returns a user-owned decision signal', async () => {
+    const signalStorage = new Storage(':memory:');
+    let attempts = 0;
+    const service = new CollaborationService(
+      signalStorage,
+      new AuditService(signalStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            attempts += 1;
+            return {
+              content: attempts === 1
+                ? 'Choose whether downtime is acceptable.\n[AGENTBRIDGE_SIGNAL: NEEDS_USER_DECISION]'
+                : 'Use the online migration.\n[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE]',
+              duration: 1,
+            };
+          },
+        },
+      },
+    );
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'user-owned risk',
+      initialMessage: 'Choose a migration strategy.',
+      traceId: 'tr_user_signal',
+      mode: 'deep-discussion',
+    });
+
+    expect(started.status).toBe('NEEDS_USER_DECISION');
+    expect(signalStorage.getDiscussion(started.discussionId)).toMatchObject({
+      status: 'NEEDS_USER_DECISION',
+      dispatchState: 'COMPLETED',
+      lastSignal: 'NEEDS_USER_DECISION',
+      stopReason: 'PEER_REQUESTED_USER_DECISION',
+    });
+    const resumed = await service.replyToDiscussion({
+      discussionId: started.discussionId,
+      sender: 'claude',
+      reply: 'Downtime is not acceptable; use an online path.',
+    });
+    expect(resumed.status).toBe('DISCUSSING');
+    expect(signalStorage.getDiscussion(started.discussionId)).toMatchObject({
+      status: 'DISCUSSING',
+      lastSignal: 'READY_TO_CLOSE',
+      stopReason: null,
+    });
+    expect(signalStorage.getAuditLog(started.discussionId).some((event) => (
+      event.action === 'discussion.user_decision_resumed'
+      && event.metadata.previousStopReason === 'PEER_REQUESTED_USER_DECISION'
+    ))).toBe(true);
+    signalStorage.close();
   });
 });

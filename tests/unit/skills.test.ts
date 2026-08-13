@@ -9,7 +9,7 @@ const temporaryDirectories: string[] = [];
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 afterEach(() => temporaryDirectories.splice(0).forEach((path) => rmSync(path, { recursive: true, force: true })));
 
-describe('managed collaboration skill', () => {
+describe('managed AgentBridge skills', () => {
   it('installs, detects modification, and preserves modified copies', () => {
     const root = temporaryDirectory();
     const env = {
@@ -19,14 +19,24 @@ describe('managed collaboration skill', () => {
     };
     const installed = installManagedSkills('0.7.0', env);
     expect((installed.targets as any[]).every((target) => target.installed)).toBe(true);
+    expect((installed.skills as any[]).map((skill) => skill.name)).toEqual([
+      'agentbridge-collaboration',
+      'agentbridge-debug',
+      'agentbridge-decision-debate',
+      'agentbridge-peer-review',
+    ]);
+    expect(installed.targets).toHaveLength(8);
     expect(inspectManagedSkills(env).ok).toBe(true);
 
     const claudeSkill = join(env.AGENTBRIDGE_SKILL_HOME, '.claude', 'skills', 'agentbridge-collaboration', 'SKILL.md');
     writeFileSync(claudeSkill, `${readFileSync(claudeSkill, 'utf8')}\ncustom edit\n`);
-    expect(inspectManagedSkills(env).targets[0]).toMatchObject({ modified: true });
+    expect(inspectManagedSkills(env).targets.find((target) => target.path === dirname(claudeSkill)))
+      .toMatchObject({ skill: 'agentbridge-collaboration', modified: true });
     const removed = removeManagedSkills(env);
-    expect((removed.targets as any[])[0]).toMatchObject({ removed: false, reason: 'modified skill preserved' });
+    expect((removed.targets as any[]).find((target) => target.path === dirname(claudeSkill)))
+      .toMatchObject({ removed: false, reason: 'modified skill preserved' });
     expect(existsSync(claudeSkill)).toBe(true);
+    expect(existsSync(join(env.AGENTBRIDGE_SKILL_HOME, '.agents', 'skills', 'agentbridge-peer-review'))).toBe(false);
   });
 
   it('does not overwrite a pre-existing custom skill', () => {
@@ -41,6 +51,7 @@ describe('managed collaboration skill', () => {
       AGENTBRIDGE_SKILL_SOURCE: join(repositoryRoot, 'skills', 'agentbridge-collaboration'),
     });
     expect((result.targets as any[]).find((target) => target.path === custom)).toMatchObject({ conflict: true });
+    expect((result.targets as any[]).filter((target) => target.installed)).toHaveLength(7);
     expect(readFileSync(join(custom, 'SKILL.md'), 'utf8')).toBe('custom');
   });
 });

@@ -31,14 +31,20 @@ describe('AgentBridge MCP server', () => {
       enum: [peer],
       description: 'The agent to discuss with',
     });
+    expect(askTool?.inputSchema.properties?.mode).toMatchObject({
+      type: 'string',
+      enum: ['review', 'discussion', 'deep-discussion'],
+    });
 
     const result = await client.callTool({
       name: 'ask_peer',
-      arguments: { peer, message: `hello from ${agentType}`, maxTurns: 12 },
+      arguments: { peer, message: `hello from ${agentType}`, mode: 'review' },
     });
     expect(result.isError).not.toBe(true);
     expect(JSON.parse(result.content[0].type === 'text' ? result.content[0].text : '{}')).toMatchObject({
       peer,
+      mode: 'review',
+      maxTurns: 3,
       status: 'DISCUSSING',
     });
 

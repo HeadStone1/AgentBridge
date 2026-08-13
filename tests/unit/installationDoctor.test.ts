@@ -117,6 +117,28 @@ describe('system installation and diagnostics', () => {
     expect(existsSync(missingProject)).toBe(false);
   });
 
+  it('fails verify --live when authenticated provider prerequisites are unavailable', () => {
+    const root = temporaryDirectory();
+    const result = runCliResult([
+      'verify', '--live', '--project-path', repositoryRoot,
+    ], {
+      AGENTBRIDGE_INSTALL_ROOT: join(root, 'registry'),
+      AGENTBRIDGE_CLAUDE_COMMAND: join(root, 'missing-claude'),
+      AGENTBRIDGE_CODEX_COMMAND: join(root, 'missing-codex'),
+    });
+    expect(result.status).toBe(1);
+    expect(result.output).toMatchObject({
+      ok: false,
+      liveRequested: true,
+      status: 'FAIL',
+      checks: {
+        launcher: { status: 'PASS' },
+        claudeToCodex: { status: 'NOT_TESTED' },
+        codexToClaude: { status: 'NOT_TESTED' },
+      },
+    });
+  });
+
   it('setup registers MCP globally while keeping multiple project states isolated', () => {
     const root = temporaryDirectory();
     const installRoot = join(root, 'install');
