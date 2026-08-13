@@ -66,6 +66,11 @@ function buildTools(agentType: AgentType): Tool[] {
         properties: {
           discussionId: { type: 'string', description: 'Discussion ID from ask_peer' },
           message: { type: 'string', description: 'Reply message' },
+          mode: {
+            type: 'string',
+            enum: [...DISCUSSION_MODES],
+            description: 'Optional monotonic depth upgrade: review → discussion → deep-discussion',
+          },
         },
         required: ['discussionId', 'message'],
       },
@@ -167,7 +172,7 @@ function createServer(resolveRuntime: MCPRuntimeResolver, options: MCPServerOpti
       maxTurns: z.number().int().min(1).max(50).optional(),
       sessionPolicy: z.enum(['auto', 'reuse', 'fresh']).optional(),
     }),
-    reply: z.object({ discussionId: id, message: text }),
+    reply: z.object({ discussionId: id, message: text, mode: z.enum(DISCUSSION_MODES).optional() }),
     get: z.object({ discussionId: id }),
     wait: z.object({
       discussionId: id,
@@ -224,6 +229,7 @@ function createServer(resolveRuntime: MCPRuntimeResolver, options: MCPServerOpti
             discussionId: input.discussionId,
             reply: input.message,
             sender: agentType,
+            mode: input.mode,
           }));
         }
         case 'get_discussion': {

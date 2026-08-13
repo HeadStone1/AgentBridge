@@ -5,7 +5,7 @@ description: Obtain a bounded, independent Claude Code–Codex review through Ag
 
 # AgentBridge peer review
 
-Use `ask_peer` with `mode=review`. Keep the default three successful provider responses unless the reviewed scope clearly requires a different safety ceiling.
+Use `ask_peer` with `mode=review` and `sessionPolicy=fresh` so the second opinion is independent of an existing project provider session. Keep the default three successful provider responses unless the reviewed scope clearly requires a different safety ceiling.
 
 ## Prepare the review
 

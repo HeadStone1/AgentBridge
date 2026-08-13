@@ -15,6 +15,7 @@ import type {
   SessionStatus,
   DiscussionError,
   DiscussionStopReason,
+  DiscussionOperationKind,
   CollaborationSession,
   SessionPolicy,
   DiscussionMode,
@@ -87,7 +88,10 @@ CREATE TABLE IF NOT EXISTS discussions (
   trace_id TEXT NOT NULL,
   collaboration_session_id TEXT,
   stop_reason TEXT,
-  last_error TEXT
+  last_error TEXT,
+  failed_dispatch_receiver TEXT,
+  failed_message_id TEXT,
+  failed_operation_kind TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -230,6 +234,9 @@ export class Storage {
     this.ensureColumn('discussions', 'round_count', 'ALTER TABLE discussions ADD COLUMN round_count INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('discussions', 'stop_reason', 'ALTER TABLE discussions ADD COLUMN stop_reason TEXT');
     this.ensureColumn('discussions', 'last_error', 'ALTER TABLE discussions ADD COLUMN last_error TEXT');
+    this.ensureColumn('discussions', 'failed_dispatch_receiver', 'ALTER TABLE discussions ADD COLUMN failed_dispatch_receiver TEXT');
+    this.ensureColumn('discussions', 'failed_message_id', 'ALTER TABLE discussions ADD COLUMN failed_message_id TEXT');
+    this.ensureColumn('discussions', 'failed_operation_kind', 'ALTER TABLE discussions ADD COLUMN failed_operation_kind TEXT');
     this.ensureColumn('discussions', 'collaboration_session_id', 'ALTER TABLE discussions ADD COLUMN collaboration_session_id TEXT');
     this.ensureColumn('discussions', 'mode', "ALTER TABLE discussions ADD COLUMN mode TEXT NOT NULL DEFAULT 'discussion'");
     this.ensureColumn('messages', 'provider_session_id', 'ALTER TABLE messages ADD COLUMN provider_session_id TEXT');
@@ -416,11 +423,31 @@ export class Storage {
     this.db.prepare(`UPDATE discussions SET ${setClauses} WHERE id = ?`).run(...values);
   }
 
+  updateDiscussionMode(id: string, mode: DiscussionMode): void {
+    if (!this.getDiscussion(id)) throw new Error(`Discussion ${id} not found`);
+    assertDiscussionMode(mode);
+    this.db.prepare('UPDATE discussions SET mode = ?, updated_at = ? WHERE id = ?')
+      .run(mode, new Date().toISOString(), id);
+  }
+
   updateDiscussionDispatch(id: string, state: DispatchState | null, waitingFor: AgentType | null = null): void {
     if (!this.getDiscussion(id)) throw new Error(`Discussion ${id} not found`);
     this.db
       .prepare('UPDATE discussions SET dispatch_state = ?, waiting_for = ?, updated_at = ? WHERE id = ?')
       .run(state, waitingFor, new Date().toISOString(), id);
+  }
+
+  updateDiscussionFailure(id: string, failure: {
+    receiver: AgentType | null;
+    messageId: string | null;
+    operationKind: DiscussionOperationKind | null;
+  }): void {
+    if (!this.getDiscussion(id)) throw new Error(`Discussion ${id} not found`);
+    this.db.prepare(
+      `UPDATE discussions
+       SET failed_dispatch_receiver = ?, failed_message_id = ?, failed_operation_kind = ?, updated_at = ?
+       WHERE id = ?`,
+    ).run(failure.receiver, failure.messageId, failure.operationKind, new Date().toISOString(), id);
   }
 
   updateDiscussionSignal(id: string, signal: DiscussionSignal | null): void {
@@ -1033,6 +1060,9 @@ function rowToDiscussion(row: Record<string, unknown>): Discussion {
     lastSignal: (row.last_signal as DiscussionSignal | null) ?? null,
     stopReason: (row.stop_reason as DiscussionStopReason | null) ?? null,
     lastError: parseJsonObject(row.last_error) as unknown as DiscussionError | null,
+    failedDispatchReceiver: (row.failed_dispatch_receiver as AgentType | null) ?? null,
+    failedMessageId: (row.failed_message_id as string | null) ?? null,
+    failedOperationKind: (row.failed_operation_kind as DiscussionOperationKind | null) ?? null,
   };
 }
 

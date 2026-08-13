@@ -5,7 +5,7 @@ description: Diagnose a reproducible bug with an evidence-driven Claude Code-Cod
 
 # AgentBridge debug
 
-Use `ask_peer` with `mode=discussion` for a bounded diagnosis. Escalate to `deep-discussion` only when the fault crosses components, evidence conflicts, or the proposed fix carries substantial migration or security risk.
+Use `ask_peer` with `mode=discussion` for a bounded diagnosis. Escalate the same discussion with `reply_peer(mode=deep-discussion)` only when the fault crosses components, evidence conflicts, or the proposed fix carries substantial migration or security risk.
 
 ## Establish the failure
 

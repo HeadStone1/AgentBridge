@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { Storage } from '../../packages/storage/src/index';
 import { AuditService } from '../../packages/audit/src/index';
 import { CollaborationService } from '../../packages/collaboration/src/index';
+import { ProviderError } from '../../packages/protocol/src/index';
 import { ClaudeConnector } from '../../packages/connectors/src/claude';
 import { CodexConnector } from '../../packages/connectors/src/codex';
 import { fileURLToPath } from 'node:url';
@@ -390,6 +391,10 @@ describe('CollaborationService', () => {
       reply: 'b'.repeat(600),
     })).rejects.toThrow('message budget');
     expect((await budgetCollaboration.getDiscussion(started.discussionId)).discussion.status).toBe('TIMEOUT');
+    await expect(budgetCollaboration.retryDiscussion({
+      discussionId: started.discussionId,
+      agent: 'claude',
+    })).rejects.toThrow('MESSAGE_BUDGET');
     budgetStorage.close();
   });
 
@@ -612,6 +617,11 @@ describe('CollaborationService', () => {
     expect(retryStorage.getDiscussion(discussionId)?.status).toBe('FAILED');
     expect(retryStorage.getDiscussion(discussionId)?.dispatchState).toBe('FAILED');
     expect(retryStorage.getDiscussion(discussionId)?.retryCount).toBe(1);
+    expect(retryStorage.getDiscussion(discussionId)).toMatchObject({
+      failedDispatchReceiver: 'codex',
+      failedMessageId: retryStorage.getMessages(discussionId)[0].id,
+      failedOperationKind: 'peer_message',
+    });
 
     const retried = await retryCollaboration.retryDiscussion({ discussionId, agent: 'claude' });
     expect(retried.status).toBe('DISCUSSING');
@@ -620,6 +630,176 @@ describe('CollaborationService', () => {
     expect(attempts).toBe(2);
     expect(retryStorage.getMessages(discussionId)).toHaveLength(2);
     retryStorage.close();
+  });
+
+  it('keeps legacy failed discussions retryable when dispatch metadata is absent', async () => {
+    const legacyStorage = new Storage(':memory:');
+    let attempts = 0;
+    const legacyCollaboration = new CollaborationService(
+      legacyStorage,
+      new AuditService(legacyStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            attempts += 1;
+            if (attempts === 1) throw new Error('legacy connector failure');
+            return { content: 'legacy retry succeeded', duration: 1 };
+          },
+        },
+      },
+    );
+
+    await expect(legacyCollaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'legacy retry',
+      initialMessage: 'retry legacy request',
+      traceId: 'tr_legacy_retry',
+    })).rejects.toThrow('legacy connector failure');
+    const discussion = legacyStorage.listDiscussions()[0];
+    const database = (legacyStorage as unknown as {
+      db: { prepare(sql: string): { run(...params: unknown[]): unknown } };
+    }).db;
+    database.prepare(
+      'UPDATE discussions SET failed_dispatch_receiver = NULL, failed_message_id = NULL, failed_operation_kind = NULL WHERE id = ?',
+    ).run(discussion.id);
+
+    const retried = await legacyCollaboration.retryDiscussion({
+      discussionId: discussion.id,
+      agent: 'claude',
+    });
+    expect(retried.peerResponse?.content).toBe('legacy retry succeeded');
+    expect(attempts).toBe(2);
+    legacyStorage.close();
+  });
+
+  it('retries a retryable non-ambiguous provider timeout', async () => {
+    const timeoutStorage = new Storage(':memory:');
+    let attempts = 0;
+    const service = new CollaborationService(
+      timeoutStorage,
+      new AuditService(timeoutStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            attempts += 1;
+            if (attempts === 1) {
+              throw new ProviderError('TIMEOUT', 'provider timed out', {
+                retryable: true,
+                ambiguous: false,
+              });
+            }
+            return { content: 'timeout retry succeeded', duration: 1 };
+          },
+        },
+      },
+    );
+    const pending = service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'retryable timeout',
+      initialMessage: 'Retry this timeout.',
+      traceId: 'tr_retryable_timeout',
+    });
+    await expect(pending).rejects.toMatchObject({ code: 'TIMEOUT' });
+    const discussion = timeoutStorage.listDiscussions()[0];
+    expect(discussion).toMatchObject({
+      status: 'TIMEOUT',
+      lastError: { retryable: true, ambiguous: false },
+      failedDispatchReceiver: 'codex',
+    });
+    const retried = await service.retryDiscussion({ discussionId: discussion.id, agent: 'claude' });
+    expect(retried.peerResponse?.content).toBe('timeout retry succeeded');
+    expect(attempts).toBe(2);
+    timeoutStorage.close();
+  });
+
+  it('does not retry a peer-requested user decision or replay it to the wrong provider', async () => {
+    const signalStorage = new Storage(':memory:');
+    let attempts = 0;
+    const service = new CollaborationService(
+      signalStorage,
+      new AuditService(signalStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            attempts += 1;
+            return {
+              content: 'Choose a path.\n[AGENTBRIDGE_SIGNAL: NEEDS_USER_DECISION]',
+              duration: 1,
+            };
+          },
+        },
+      },
+    );
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'retry direction',
+      initialMessage: 'Choose a path.',
+      traceId: 'tr_retry_direction',
+    });
+
+    await expect(service.retryDiscussion({
+      discussionId: started.discussionId,
+      agent: 'claude',
+    })).rejects.toThrow('explicit reply_peer decision');
+    expect(attempts).toBe(1);
+    expect(signalStorage.getMessages(started.discussionId).at(-1)?.receiver).toBe('claude');
+    signalStorage.close();
+  });
+
+  it('does not retry an ambiguous provider result', async () => {
+    const ambiguousStorage = new Storage(':memory:');
+    const service = new CollaborationService(
+      ambiguousStorage,
+      new AuditService(ambiguousStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            throw new ProviderError('FAILED', 'turn started before transport failure', {
+              ambiguous: true,
+            });
+          },
+        },
+      },
+    );
+    const pending = service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'ambiguous retry',
+      initialMessage: 'Run the operation.',
+      traceId: 'tr_ambiguous_retry',
+    });
+    await expect(pending).rejects.toThrow('turn started before transport failure');
+    const discussion = ambiguousStorage.listDiscussions()[0];
+    expect(discussion).toMatchObject({
+      status: 'NEEDS_USER_DECISION',
+      lastError: { ambiguous: true },
+      failedDispatchReceiver: 'codex',
+      failedOperationKind: 'peer_message',
+    });
+    await expect(service.retryDiscussion({
+      discussionId: discussion.id,
+      agent: 'claude',
+    })).rejects.toThrow('ambiguous=true');
+    ambiguousStorage.close();
   });
 
   it('restores a provider session from SQLite after the collaboration process restarts', async () => {
@@ -772,6 +952,55 @@ describe('CollaborationService', () => {
     expect(started.maxTurns).toBe(7);
     expect(configuredStorage.getDiscussion(started.discussionId)?.maxTurns).toBe(7);
     configuredStorage.close();
+  });
+
+  it('monotonically upgrades discussion mode without replacing the discussion', async () => {
+    const modeStorage = new Storage(':memory:');
+    const prompts: string[] = [];
+    const service = new CollaborationService(
+      modeStorage,
+      new AuditService(modeStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => {
+            prompts.push(prompt);
+            return { content: 'continue\n[AGENTBRIDGE_SIGNAL: CONTINUE]', duration: 1 };
+          },
+        },
+      },
+    );
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'mode upgrade',
+      initialMessage: 'Start a review.',
+      traceId: 'tr_mode_upgrade',
+      mode: 'review',
+    });
+    const resumed = await service.replyToDiscussion({
+      discussionId: started.discussionId,
+      sender: 'claude',
+      reply: 'Escalate the analysis.',
+      mode: 'deep-discussion',
+    });
+
+    expect(resumed.status).toBe('DISCUSSING');
+    expect(modeStorage.getDiscussion(started.discussionId)).toMatchObject({
+      id: started.discussionId,
+      mode: 'deep-discussion',
+    });
+    expect(prompts.at(-1)).toContain('mode: deep-discussion');
+    await expect(service.replyToDiscussion({
+      discussionId: started.discussionId,
+      sender: 'claude',
+      reply: 'Downgrade the analysis.',
+      mode: 'discussion',
+    })).rejects.toThrow('cannot be downgraded');
+    modeStorage.close();
   });
 
   it('pauses safely when the peer returns a user-owned decision signal', async () => {

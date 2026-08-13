@@ -24,6 +24,7 @@ describe('AgentBridge MCP server', () => {
 
     const tools = await client.listTools();
     const askTool = tools.tools.find((tool) => tool.name === 'ask_peer');
+    const replyTool = tools.tools.find((tool) => tool.name === 'reply_peer');
     expect(tools.tools).toHaveLength(8);
     expect(tools.tools.some((tool) => tool.name === 'wait_discussion')).toBe(true);
     expect(askTool?.inputSchema.properties?.peer).toEqual({
@@ -32,6 +33,10 @@ describe('AgentBridge MCP server', () => {
       description: 'The agent to discuss with',
     });
     expect(askTool?.inputSchema.properties?.mode).toMatchObject({
+      type: 'string',
+      enum: ['review', 'discussion', 'deep-discussion'],
+    });
+    expect(replyTool?.inputSchema.properties?.mode).toMatchObject({
       type: 'string',
       enum: ['review', 'discussion', 'deep-discussion'],
     });
