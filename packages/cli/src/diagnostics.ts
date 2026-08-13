@@ -52,7 +52,7 @@ export async function runDoctor(
   if (!providers.claudeCli) recommendations.push('Install/login to Claude Code or set AGENTBRIDGE_CLAUDE_COMMAND.');
   if (!providers.codexSelectedBackend) recommendations.push('Install/login to Codex App or Codex CLI, or pass an explicit Codex command.');
   const skills = inspectManagedSkills(env);
-  if (!skills.ok) recommendations.push('Run setup again to install the AgentBridge collaboration skill for Claude and Codex.');
+  if (!skills.ok) recommendations.push('Run setup again to install the managed AgentBridge skills for Claude and Codex.');
 
   const node = {
     ok: isSupportedNode(process.versions.node),

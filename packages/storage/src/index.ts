@@ -17,8 +17,16 @@ import type {
   DiscussionStopReason,
   CollaborationSession,
   SessionPolicy,
+  DiscussionMode,
+  DiscussionSignal,
 } from '@agentbridge/protocol';
-import { canTransition, resolveProjectPath, SessionBusyError } from '@agentbridge/protocol';
+import {
+  canTransition,
+  DEFAULT_DISCUSSION_MODE,
+  DISCUSSION_MODES,
+  resolveProjectPath,
+  SessionBusyError,
+} from '@agentbridge/protocol';
 
 export type { StoragePort } from './port.js';
 export {
@@ -59,9 +67,11 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS discussions (
   id TEXT PRIMARY KEY,
   topic TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'discussion',
   status TEXT NOT NULL DEFAULT 'CREATED',
   dispatch_state TEXT,
   waiting_for TEXT,
+  last_signal TEXT,
   driver TEXT NOT NULL,
   peer TEXT,
   current_turn INTEGER NOT NULL DEFAULT 0,
@@ -75,9 +85,9 @@ CREATE TABLE IF NOT EXISTS discussions (
   conclusion TEXT,
   project_path TEXT,
   trace_id TEXT NOT NULL,
-  collaboration_session_id TEXT
-  ,stop_reason TEXT
-  ,last_error TEXT
+  collaboration_session_id TEXT,
+  stop_reason TEXT,
+  last_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -214,12 +224,14 @@ export class Storage {
     this.ensureColumn('discussions', 'peer', 'ALTER TABLE discussions ADD COLUMN peer TEXT');
     this.ensureColumn('discussions', 'dispatch_state', 'ALTER TABLE discussions ADD COLUMN dispatch_state TEXT');
     this.ensureColumn('discussions', 'waiting_for', 'ALTER TABLE discussions ADD COLUMN waiting_for TEXT');
+    this.ensureColumn('discussions', 'last_signal', 'ALTER TABLE discussions ADD COLUMN last_signal TEXT');
     this.ensureColumn('discussions', 'retry_count', 'ALTER TABLE discussions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('discussions', 'max_retries', 'ALTER TABLE discussions ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 2');
     this.ensureColumn('discussions', 'round_count', 'ALTER TABLE discussions ADD COLUMN round_count INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('discussions', 'stop_reason', 'ALTER TABLE discussions ADD COLUMN stop_reason TEXT');
     this.ensureColumn('discussions', 'last_error', 'ALTER TABLE discussions ADD COLUMN last_error TEXT');
     this.ensureColumn('discussions', 'collaboration_session_id', 'ALTER TABLE discussions ADD COLUMN collaboration_session_id TEXT');
+    this.ensureColumn('discussions', 'mode', "ALTER TABLE discussions ADD COLUMN mode TEXT NOT NULL DEFAULT 'discussion'");
     this.ensureColumn('messages', 'provider_session_id', 'ALTER TABLE messages ADD COLUMN provider_session_id TEXT');
   }
 
@@ -259,6 +271,7 @@ export class Storage {
     projectPath?: string;
     peer?: AgentType;
     traceId: string;
+    mode?: DiscussionMode;
     maxTurns?: number;
     maxRetries?: number;
     collaborationSessionId?: string;
@@ -268,18 +281,20 @@ export class Storage {
     const maxTurns = data.maxTurns ?? DEFAULT_MAX_TURNS;
     const maxRetries = data.maxRetries ?? 2;
     const peer = data.peer ?? (data.driver === 'claude' ? 'codex' : 'claude');
+    const mode = data.mode ?? DEFAULT_DISCUSSION_MODE;
 
     assertText(data.topic, 'topic');
     assertText(data.traceId, 'traceId');
     assertTurns(maxTurns);
     assertRetries(maxRetries);
+    assertDiscussionMode(mode);
 
     this.db
       .prepare(
-        `INSERT INTO discussions (id, topic, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id, collaboration_session_id)
-         VALUES (?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO discussions (id, topic, mode, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id, collaboration_session_id)
+         VALUES (?, ?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, data.topic, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId, data.collaborationSessionId ?? null);
+      .run(id, data.topic, mode, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId, data.collaborationSessionId ?? null);
 
     return this.getDiscussion(id)!;
   }
@@ -337,7 +352,9 @@ export class Storage {
     const row = this.db.prepare(
       `SELECT sessions.* FROM collaboration_sessions AS collaborations
        JOIN agent_sessions AS sessions
-         ON sessions.provider = ? AND sessions.session_id = collaborations.${column}
+         ON sessions.provider = ?
+        AND sessions.session_id = collaborations.${column}
+        AND sessions.project_path = collaborations.project_path
        WHERE collaborations.id = ? AND collaborations.project_path = ?
          AND collaborations.status = 'ACTIVE'
        LIMIT 1`,
@@ -352,9 +369,25 @@ export class Storage {
     const result = this.db.prepare(
       `UPDATE collaboration_sessions
        SET ${column} = ?, last_seen_at = ?
-       WHERE id = ? AND status = 'ACTIVE'`,
-    ).run(data.sessionId, new Date().toISOString(), data.collaborationSessionId);
-    if (result.changes !== 1) throw new Error(`Collaboration session ${data.collaborationSessionId} not found or archived`);
+       WHERE id = ? AND status = 'ACTIVE'
+         AND EXISTS (
+           SELECT 1 FROM agent_sessions AS sessions
+           WHERE sessions.provider = ?
+             AND sessions.session_id = ?
+             AND sessions.project_path = collaboration_sessions.project_path
+         )`,
+    ).run(
+      data.sessionId,
+      new Date().toISOString(),
+      data.collaborationSessionId,
+      data.provider,
+      data.sessionId,
+    );
+    if (result.changes !== 1) {
+      throw new Error(
+        `Collaboration session ${data.collaborationSessionId} is unavailable or does not own provider session ${data.provider}/${data.sessionId}`,
+      );
+    }
   }
 
   getDiscussion(id: string): Discussion | null {
@@ -388,6 +421,12 @@ export class Storage {
     this.db
       .prepare('UPDATE discussions SET dispatch_state = ?, waiting_for = ?, updated_at = ? WHERE id = ?')
       .run(state, waitingFor, new Date().toISOString(), id);
+  }
+
+  updateDiscussionSignal(id: string, signal: DiscussionSignal | null): void {
+    if (!this.getDiscussion(id)) throw new Error(`Discussion ${id} not found`);
+    this.db.prepare('UPDATE discussions SET last_signal = ?, updated_at = ? WHERE id = ?')
+      .run(signal, new Date().toISOString(), id);
   }
 
   updateDiscussionDiagnostic(
@@ -819,17 +858,20 @@ export class Storage {
     const now = new Date().toISOString();
     const status = data.status ?? 'UNKNOWN';
     const metadata = data.metadata ?? {};
-    this.db
+    const result = this.db
       .prepare(
         `INSERT INTO agent_sessions (provider, session_id, project_path, status, metadata, created_at, last_seen_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(provider, session_id) DO UPDATE SET
-           project_path = excluded.project_path,
            status = excluded.status,
            metadata = excluded.metadata,
-           last_seen_at = excluded.last_seen_at`,
+           last_seen_at = excluded.last_seen_at
+         WHERE agent_sessions.project_path = excluded.project_path`,
       )
       .run(data.provider, data.sessionId, data.projectPath, status, JSON.stringify(metadata), now, now);
+    if (result.changes !== 1) {
+      throw new Error(`Provider session ${data.provider}/${data.sessionId} belongs to another project`);
+    }
     return this.getSession(data.provider, data.sessionId)!;
   }
 
@@ -970,6 +1012,7 @@ function rowToDiscussion(row: Record<string, unknown>): Discussion {
   return {
     id: row.id as string,
     topic: row.topic as string,
+    mode: (row.mode as DiscussionMode | null) ?? DEFAULT_DISCUSSION_MODE,
     status: row.status as DiscussionStatus,
     driver,
     peer: (row.peer as AgentType | null) ?? (driver === 'claude' ? 'codex' : 'claude'),
@@ -987,6 +1030,7 @@ function rowToDiscussion(row: Record<string, unknown>): Discussion {
     traceId: row.trace_id as string,
     dispatchState: (row.dispatch_state as DispatchState | null) ?? null,
     waitingFor: (row.waiting_for as AgentType | null) ?? null,
+    lastSignal: (row.last_signal as DiscussionSignal | null) ?? null,
     stopReason: (row.stop_reason as DiscussionStopReason | null) ?? null,
     lastError: parseJsonObject(row.last_error) as unknown as DiscussionError | null,
   };
@@ -1068,6 +1112,12 @@ function isReusableBridgeSession(session: AgentSession): boolean {
 function assertSessionPolicy(value: string): asserts value is SessionPolicy {
   if (value !== 'auto' && value !== 'reuse' && value !== 'fresh') {
     throw new Error('session policy must be auto, reuse, or fresh');
+  }
+}
+
+function assertDiscussionMode(value: string): asserts value is DiscussionMode {
+  if (!DISCUSSION_MODES.includes(value as DiscussionMode)) {
+    throw new Error(`mode must be one of: ${DISCUSSION_MODES.join(', ')}`);
   }
 }
 

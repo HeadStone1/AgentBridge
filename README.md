@@ -4,9 +4,9 @@
 
 AgentBridge 是一个本地优先的 MCP 协作核心，让 Claude Code 和 Codex 能在同一个项目中互相提问、回复、重试、达成一致，并把讨论状态保存在项目本地的 SQLite 数据库中。
 
-> 当前开发版本：v0.7.1。本项目以 GitHub Release 分发本地 stdio MCP；便携包自带 Node.js 运行时，不要求用户另外安装 Node 或 npm。Release 安装后程序独立位于用户目录，不依赖下载目录或源码仓库。
+> 当前开发版本：v0.7.3。本项目以 GitHub Release 分发本地 stdio MCP；便携包自带 Node.js 运行时，不要求用户另外安装 Node 或 npm。Release 安装后程序独立位于用户目录，不依赖下载目录或源码仓库。
 
-> 当前源码验证状态：UTF-8 校验、TypeScript 构建以及 18 个测试文件中的 102 项测试均已通过。Provider 原生会话只会在明确属于同一 discussion 时续接，不会把其他 discussion 或未绑定会话自动复用到新讨论。上述自动化测试不等同于真实 Provider 端到端验收；只有 Claude → Codex 和 Codex → Claude 两个方向都完成实际 `ask_peer` 调用，才能声明真实双向通信可用。
+> 当前源码验证状态：UTF-8 校验、TypeScript 构建以及完整自动化测试均已通过，其中 Release MCP 使用官方 SDK 连续完成 30 次握手。`auto/reuse` 会通过同一项目的 collaboration session 复用 Provider 原生会话；`fresh` 会建立隔离 room，并在该 room 内复用自己的 Provider 会话。上述自动化测试不等同于真实 Provider 端到端验收；只有 Claude → Codex 和 Codex → Claude 两个方向都完成实际 `ask_peer` 调用，才能声明真实双向通信可用。
 
 > 如果你准备把本项目交给 Claude、Codex 或其他 AI Agent 自动部署，请优先让它完整阅读 [README.ai.md](README.ai.md)。该手册要求 Agent 明确判断当前连接的是 Codex App 的 App Server 还是独立 Codex CLI，并完成 doctor、配置文件、MCP 工具、真实双向调用四层验收。
 
@@ -397,7 +397,7 @@ AgentBridge 不会把代码或讨论上传到自己的云服务。实际模型�
 - 使用 Node 内置 `node:sqlite` 的 SQLite WAL 存储。
 - 双 MCP 进程共享讨论、消息、决定、审计事件、会话租约和 provider 原生会话 ID。
 - `ask_peer`、`reply_peer`、`get_discussion`、`wait_discussion`、`list_discussions`、`close_discussion`、`cancel_discussion`、`retry_discussion` 八个 MCP 工具。
-- Claude CLI、Codex CLI 和 Codex App Server 的会话 ID 按讨论持久化；MCP 重启后只续接当前 discussion 明确绑定的会话，不跨 discussion 复用未绑定或其他讨论的会话；续接失败时使用 SQLite 历史重建有界上下文。
+- Claude CLI、Codex CLI 和 Codex App Server 的会话 ID 通过项目级 collaboration session 持久化；`auto/reuse` 可跨同项目 discussion 续接 AgentBridge 所有的会话，`fresh` 保持隔离；续接失败时使用 SQLite 历史重建有界上下文。
 - 自动发现 Codex Desktop 或新版 ChatGPT Desktop 自带的 Codex 运行程序，优先使用 App Server stdio 协议。
 - App Server 不可用时自动回退到 Codex CLI `exec --json` 和 `exec resume`。
 - 讨论轮数、重试次数、总消息长度和持续时间限制。
@@ -617,7 +617,7 @@ node packages/cli/dist/index.js status .
   "peer": "codex",
   "message": "请审查这个实现方案。",
   "projectPath": "/project/path",
-  "maxTurns": 12
+  "mode": "review"
 }
 ```
 
@@ -625,7 +625,9 @@ node packages/cli/dist/index.js status .
 - Codex 侧只能选择 `claude`。
 - `projectPath` 可省略，默认使用 MCP 进程当前工作目录。
 - 返回的 `discussionId` 用于后续所有操作。
-- `maxTurns` 可选，范围 1–50；默认 12，表示成功取得的 Provider 回复次数，而不是完整往返轮数。
+- `mode` 可选：`review`、`discussion`、`deep-discussion`，默认成功回复上限分别为 3、12、20。
+- `maxTurns` 可选，范围 1–50；它覆盖模式默认值，只是安全上限，不是必须聊满的目标。
+- `get_discussion` 会返回持久化的 `mode`、`maxTurns` 和最新 `lastSignal`；对端明确返回 `NEEDS_USER_DECISION` 时讨论会暂停交给用户决策。
 
 ### `reply_peer`
 
@@ -662,7 +664,7 @@ node packages/cli/dist/index.js status .
 }
 ```
 
-同一问题必须复用原 `discussionId`；不要为了轮询结果再次调用 `ask_peer`。`setup` 会为 Claude Code 和 Codex 安全安装 `agentbridge-collaboration` Skill，同名自定义或已修改 Skill 不会被覆盖。
+同一问题必须复用原 `discussionId`；不要为了轮询结果再次调用 `ask_peer`。`setup` 会为 Claude Code 和 Codex 安全安装四项聚焦 Skill：`agentbridge-collaboration`、`agentbridge-peer-review`、`agentbridge-debug` 和 `agentbridge-decision-debate`，同名自定义或已修改 Skill 不会被覆盖。
 
 ### `list_discussions`
 
@@ -804,7 +806,7 @@ node packages/cli/dist/index.js register-session \
 | `AGENTBRIDGE_CODEX_MODEL` | Codex CLI 模型覆盖 | 使用 Codex 默认模型 |
 | `AGENTBRIDGE_CODEX_APP_COMMAND` | 仅用于 App Server 的可执行程序覆盖路径 | 未设置时自动发现 Desktop |
 | `AGENTBRIDGE_RECOVERY_MAX_AGE_MS` | 旧讨论恢复阈值 | 默认 30 分钟 |
-| `AGENTBRIDGE_MAX_TURNS` | 每场讨论的成功 Provider 回复上限 | 默认 12，范围 1–50 |
+| `AGENTBRIDGE_MAX_TURNS` | 覆盖所有模式的成功 Provider 回复上限 | 未设置时按模式取 3/12/20；设置范围 1–50 |
 | `AGENTBRIDGE_DISCUSSION_RETENTION_DAYS` | 启动时清理终态讨论 | 未设置或 `0` 表示永久保留；可选 1–3650 |
 | `AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE` | close/cancel 后尝试归档 Provider 原生会话 | 默认关闭；设为 `1` 启用，Provider 不支持时安全跳过 |
 

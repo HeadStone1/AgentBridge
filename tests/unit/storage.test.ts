@@ -1,3 +1,7 @@
+import { createRequire } from 'node:module';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { Storage } from '../../packages/storage/src/index';
 
@@ -22,6 +26,64 @@ describe('Storage', () => {
       expect(d.currentTurn).toBe(0);
       expect(d.roundCount).toBe(0);
       expect(d.maxTurns).toBe(12);
+      expect(d.mode).toBe('discussion');
+      expect(d.lastSignal).toBeNull();
+    });
+
+    it('persists and clears the latest convergence signal', () => {
+      const discussion = storage.createDiscussion({
+        topic: 'Convergence state',
+        driver: 'claude',
+        traceId: 'tr_convergence',
+      });
+      storage.updateDiscussionSignal(discussion.id, 'READY_TO_CLOSE');
+      expect(storage.getDiscussion(discussion.id)?.lastSignal).toBe('READY_TO_CLOSE');
+      storage.updateDiscussionSignal(discussion.id, null);
+      expect(storage.getDiscussion(discussion.id)?.lastSignal).toBeNull();
+    });
+
+    it('persists an explicit discussion mode and rejects invalid values', () => {
+      const deep = storage.createDiscussion({
+        topic: 'Deep decision',
+        driver: 'claude',
+        traceId: 'tr_deep',
+        mode: 'deep-discussion',
+      });
+      expect(storage.getDiscussion(deep.id)?.mode).toBe('deep-discussion');
+      expect(() => storage.createDiscussion({
+        topic: 'Invalid mode',
+        driver: 'claude',
+        traceId: 'tr_invalid_mode',
+        mode: 'forever' as 'discussion',
+      })).toThrow('mode must be one of');
+    });
+
+    it('migrates a pre-mode database with a backward-compatible default', () => {
+      const directory = mkdtempSync(join(tmpdir(), 'agentbridge-mode-migration-'));
+      const dbPath = join(directory, 'legacy.sqlite');
+      try {
+        const original = new Storage(dbPath);
+        const discussion = original.createDiscussion({
+          topic: 'Legacy row',
+          driver: 'claude',
+          traceId: 'tr_legacy_mode',
+        });
+        original.close();
+
+        const require = createRequire(import.meta.url);
+        const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: new (path: string) => { exec(sql: string): void; close(): void } };
+        const raw = new DatabaseSync(dbPath);
+        raw.exec('ALTER TABLE discussions DROP COLUMN mode');
+        raw.exec('ALTER TABLE discussions DROP COLUMN last_signal');
+        raw.close();
+
+        const migrated = new Storage(dbPath);
+        expect(migrated.getDiscussion(discussion.id)?.mode).toBe('discussion');
+        expect(migrated.getDiscussion(discussion.id)?.lastSignal).toBeNull();
+        migrated.close();
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
     });
 
     it('retrieves a discussion by id', () => {
@@ -400,12 +462,57 @@ describe('Storage', () => {
       expect(storage.getSessionForDiscussion('claude', 'dsc_session', '/project')?.sessionId)
         .toBe('claude-session-1');
 
+      const refreshed = storage.registerSession({
+        provider: 'claude',
+        sessionId: 'claude-session-1',
+        projectPath: '/project',
+        status: 'IDLE',
+        metadata: { source: 'provider', discussionId: 'dsc_session', bridgeOwned: true },
+      });
+      expect(refreshed.projectPath).toBe('/project');
+      expect(refreshed.metadata.source).toBe('provider');
+
       const updated = storage.updateSessionStatus('claude', 'claude-session-1', 'BUSY');
       expect(updated.status).toBe('BUSY');
       expect(storage.getSession('claude', 'claude-session-1')?.status).toBe('BUSY');
 
       storage.unregisterSession('claude', 'claude-session-1');
       expect(storage.getSession('claude', 'claude-session-1')).toBeNull();
+    });
+
+    it('rejects cross-project provider session registration and binding', () => {
+      const victim = storage.createCollaborationSession({ projectPath: '/victim' });
+      const other = storage.createCollaborationSession({ projectPath: '/other' });
+      storage.registerSession({
+        provider: 'codex',
+        sessionId: 'shared-provider-session',
+        projectPath: '/victim',
+        status: 'IDLE',
+        metadata: { sessionKind: 'codex-cli', bridgeOwned: true },
+      });
+      storage.bindProviderSession({
+        collaborationSessionId: victim.id,
+        provider: 'codex',
+        sessionId: 'shared-provider-session',
+      });
+
+      expect(() => storage.registerSession({
+        provider: 'codex',
+        sessionId: 'shared-provider-session',
+        projectPath: '/attacker',
+        status: 'IDLE',
+        metadata: { sessionKind: 'codex-cli', bridgeOwned: true },
+      })).toThrow('belongs to another project');
+      expect(() => storage.bindProviderSession({
+        collaborationSessionId: other.id,
+        provider: 'codex',
+        sessionId: 'shared-provider-session',
+      })).toThrow('does not own provider session');
+
+      expect(storage.getSession('codex', 'shared-provider-session')?.projectPath).toBe('/victim');
+      expect(storage.getSessionForCollaboration('codex', victim.id, '/victim')?.sessionId)
+        .toBe('shared-provider-session');
+      expect(storage.getSessionForCollaboration('codex', other.id, '/other')).toBeNull();
     });
 
     it('does not reuse an unbound project session across discussions', () => {

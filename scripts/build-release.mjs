@@ -22,6 +22,9 @@ for (const [name, entry] of entries) {
     platform: 'node',
     format: 'esm',
     target: 'node22',
+    banner: {
+      js: "import { createRequire as __agentbridgeCreateRequire } from 'node:module'; const require = __agentbridgeCreateRequire(import.meta.url);",
+    },
     define: { __AGENTBRIDGE_VERSION__: JSON.stringify(version) },
     logLevel: 'info',
   });

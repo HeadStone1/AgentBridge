@@ -4,7 +4,7 @@
 
 AgentBridge is a local-first MCP collaboration bridge that lets Claude Code and OpenAI Codex ask each other questions, reply, retry, reach agreement, and persist discussion state in a project-local SQLite database.
 
-> Current development version: v0.7.1. AgentBridge is registered globally once; each client session then detects the active project and keeps its SQLite data inside that project.
+> Current development version: v0.7.3. AgentBridge is registered globally once; each client session then detects the active project and keeps its SQLite data inside that project.
 
 On Windows, the unified ChatGPT Desktop MSIX keeps its private Codex runtime inaccessible to outside processes. AgentBridge therefore ships the official `@openai/codex` CLI and uses it to start an independent stdio App Server; run `codex login` once under the same Windows account if its login is not already available.
 
@@ -164,7 +164,7 @@ Restart both clients after updating. Release updates keep versioned program file
 
 ## Discussion workflow and retention
 
-`setup` safely installs the bundled `agentbridge-collaboration` Skill for both Claude Code and Codex. It never overwrites a same-name custom or user-modified Skill. Reuse the returned `discussionId`, and call `wait_discussion` while dispatch is `QUEUED` or `RUNNING`; do not create a duplicate discussion just to poll. `maxTurns` defaults to 12 and counts successful Provider responses, not full round trips.
+`setup` safely installs four focused Skills for both Claude Code and Codex: `agentbridge-collaboration`, `agentbridge-peer-review`, `agentbridge-debug`, and `agentbridge-decision-debate`. It never overwrites a same-name custom or user-modified Skill. Reuse the returned `discussionId`, and call `wait_discussion` while dispatch is `QUEUED` or `RUNNING`; do not create a duplicate discussion just to poll. `ask_peer.mode` supports `review`, `discussion`, and `deep-discussion` with default successful-response ceilings of 3, 12, and 20. An explicit `maxTurns` overrides that safety ceiling.
 
 SQLite discussion history is retained permanently by default. `cleanup` is preview-only unless `--yes` is supplied, and deletes only old `COMPLETED` or `CANCELLED` discussions. Set `AGENTBRIDGE_DISCUSSION_RETENTION_DAYS=1..3650` for opt-in startup cleanup. Native Provider sessions are retained unless `AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE=1`; unsupported providers are skipped without failing discussion closure.
 

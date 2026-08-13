@@ -9,7 +9,7 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Storage } from '@agentbridge/storage';
 import type { CollaborationService } from '@agentbridge/collaboration';
-import type { AgentType } from '@agentbridge/protocol';
+import { DISCUSSION_MODES, type AgentType } from '@agentbridge/protocol';
 
 export interface MCPServerOptions {
   agentType?: AgentType;
@@ -47,7 +47,12 @@ function buildTools(agentType: AgentType): Tool[] {
           peer: { type: 'string', enum: [peer], description: 'The agent to discuss with' },
           message: { type: 'string', description: 'Proposal or question for the peer' },
           projectPath: { type: 'string', description: 'Project path; defaults to the current working directory' },
-          maxTurns: { type: 'integer', minimum: 1, maximum: 50, description: 'Maximum successful provider responses (default: 12)' },
+          mode: {
+            type: 'string',
+            enum: [...DISCUSSION_MODES],
+            description: 'Depth contract (defaults: review=3, discussion=12, deep-discussion=20 successful responses)',
+          },
+          maxTurns: { type: 'integer', minimum: 1, maximum: 50, description: 'Safety ceiling for successful provider responses; overrides the mode default' },
           sessionPolicy: { type: 'string', enum: ['auto', 'reuse', 'fresh'], description: 'Provider session policy (default: auto)' },
         },
         required: ['peer', 'message'],
@@ -158,6 +163,7 @@ function createServer(resolveRuntime: MCPRuntimeResolver, options: MCPServerOpti
       peer: z.literal(opposite(agentType)),
       message: text,
       projectPath: z.string().trim().min(1).max(4096).optional(),
+      mode: z.enum(DISCUSSION_MODES).optional(),
       maxTurns: z.number().int().min(1).max(50).optional(),
       sessionPolicy: z.enum(['auto', 'reuse', 'fresh']).optional(),
     }),
@@ -205,6 +211,7 @@ function createServer(resolveRuntime: MCPRuntimeResolver, options: MCPServerOpti
             initialMessage: input.message,
             projectPath: runtime.projectPath ?? input.projectPath,
             traceId: `tr_${randomUUID()}`,
+            mode: input.mode,
             maxTurns: input.maxTurns,
             sessionPolicy: input.sessionPolicy,
           });

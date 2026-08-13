@@ -1,39 +1,39 @@
 ---
 name: agentbridge-collaboration
-description: Coordinate structured peer discussions between Claude Code and Codex through AgentBridge MCP. Use when the user asks to consult, discuss with, obtain a second opinion from, or continue a review with the other coding agent, or when an existing AgentBridge discussion must be resumed, waited on, retried, or closed.
+description: Route and manage bounded Claude Code–Codex collaboration through AgentBridge MCP. Use for general peer consultation, continuing or recovering an AgentBridge discussion, choosing review versus discussion depth, waiting on provider work, or reaching a canonical conclusion. Prefer the focused agentbridge-peer-review skill for defect reviews and agentbridge-decision-debate for high-impact tradeoff decisions.
 ---
 
 # AgentBridge collaboration
 
-Use AgentBridge as a bounded collaboration channel with a project-scoped provider session. It is not an open-ended chat, but separate discussions in the same project can reuse the same Claude/Codex provider sessions.
+Treat AgentBridge as a bounded, evidence-driven collaboration channel. Reuse one discussion for one topic and independently verify material peer claims.
 
-## Start a discussion
+## Choose depth
 
-1. Call `ask_peer` once for one concrete topic.
-2. Structure `message` with: goal, verified evidence, constraints, exact question, and acceptance criteria.
-3. Keep the returned `discussionId`. Never create another discussion merely because dispatch is queued.
-4. Set `maxTurns` only when the default 12 successful Provider responses is unsuitable.
-5. Keep the default `sessionPolicy=auto` for continuity. Use `sessionPolicy=reuse` when continuity is required, and `sessionPolicy=fresh` only when the user explicitly requests an isolated provider context.
-6. A fresh discussion ID does not imply a fresh provider session; check `collaborationSessionId` in the result when session continuity matters.
+- Use `mode=review` for a scoped audit, second opinion, regression check, or defect hunt. Prefer `$agentbridge-peer-review` when available.
+- Use `mode=discussion` for ordinary design questions and implementation tradeoffs.
+- Use `mode=deep-discussion` for architecture, security boundaries, irreversible changes, or unresolved substantive disagreement. Prefer `$agentbridge-decision-debate` when available.
 
-## Continue and wait
+Keep each mode's default response ceiling unless risk or scope justifies an explicit `maxTurns`. Treat the ceiling as a safety limit, never a target.
 
-- When dispatch is `QUEUED` or `RUNNING`, call `wait_discussion` with the current `discussionId` and last message ID.
-- Reuse that `discussionId` with `reply_peer`. Continue only for new evidence, a concrete objection, or an unresolved decision.
-- Do not restate prior messages or ask the same question again.
-- The peer must not call AgentBridge recursively. Treat peer output as advice and independently verify material claims.
+## Start
 
-## Finish safely
+1. Call `ask_peer` once with one concrete topic, the selected `mode`, and the project path.
+2. Structure `message` with goal, verified evidence, constraints, exact question, and acceptance criteria.
+3. Keep the returned `discussionId`. Do not start a replacement because dispatch is queued.
+4. Keep `sessionPolicy=auto` normally. Use `reuse` when continuity is required and `fresh` only for explicitly isolated provider context.
 
-- On `FAILED`, `TIMEOUT`, or `PEER_BUSY`, inspect `lastError` before calling `retry_discussion` on the same discussion.
-- On `NEEDS_USER_DECISION`, present the exact unresolved choice to the user; do not bypass a turn limit or ambiguous Provider result.
-- When both sides accept one exact canonical conclusion, call `close_discussion` with that conclusion unchanged.
-- Call `cancel_discussion` when the user withdraws the request or continuing could duplicate an ambiguous Provider action.
+## Continue
 
-Session safety:
+- For `QUEUED` or `RUNNING`, call `wait_discussion` with the same discussion ID and latest message ID.
+- Call `reply_peer` only with new evidence, a concrete objection, a revised position, or an unresolved decision.
+- Honor the peer's final `AGENTBRIDGE_SIGNAL`: verify `READY_TO_CLOSE`; continue only when `CONTINUE` is backed by substance; surface the exact choice on `NEEDS_USER_DECISION`.
+- Do not repeat prior content or allow recursive AgentBridge calls from the peer.
 
-- Provider sessions are reused only within the same project and only when AgentBridge owns a live, non-superseded session.
-- If a provider session disappears or changes backend, AgentBridge records the old session as unavailable and creates a replacement; do not treat a provider session ID as proof of identity outside AgentBridge.
-- `agentbridge verify --live` reports real-provider checks as `NOT_TESTED` unless an authenticated E2E harness performs them; never infer live connectivity from local MCP initialization alone.
+## Finish
 
-Read [references/discussion-protocol.md](references/discussion-protocol.md) when status handling or prompt structure needs more detail.
+- Inspect `lastError` before retrying `FAILED`, `TIMEOUT`, or `PEER_BUSY` on the same discussion.
+- Ask the user to resolve product, permission, risk, or preference choices in `NEEDS_USER_DECISION`.
+- Call `close_discussion` only when both sides can accept one exact canonical conclusion.
+- Call `cancel_discussion` when the user withdraws the request or continuing risks duplicating an ambiguous provider action.
+
+Read [references/discussion-protocol.md](references/discussion-protocol.md) for the mode contract, convergence checks, state handling, and request template.

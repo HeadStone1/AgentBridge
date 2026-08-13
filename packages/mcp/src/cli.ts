@@ -13,6 +13,7 @@ import {
 } from '@agentbridge/storage';
 import type { AgentType } from '@agentbridge/protocol';
 import { runDynamicServer, type MCPRuntime } from './server.js';
+import { readOptionalBoundedInteger } from './runtimeConfig.js';
 
 const agentType: AgentType = process.env.AGENTBRIDGE_AGENT === 'codex' ? 'codex' : 'claude';
 let runtimePromise: Promise<MCPRuntime> | null = null;
@@ -47,7 +48,7 @@ async function createRuntime(projectPath: string): Promise<MCPRuntime> {
   const timeoutMs = readBoundedInteger('AGENTBRIDGE_TIMEOUT_MS', 120_000, 1_000, 600_000);
   const startupTimeoutMs = readBoundedInteger('AGENTBRIDGE_STARTUP_TIMEOUT_MS', 15_000, 1_000, 600_000);
   const maxDurationMs = readBoundedInteger('AGENTBRIDGE_MAX_DURATION_MS', 30 * 60 * 1_000, 1_000, 7 * 24 * 60 * 60 * 1_000);
-  const maxTurns = readBoundedInteger('AGENTBRIDGE_MAX_TURNS', 12, 1, 50);
+  const maxTurns = readOptionalBoundedInteger('AGENTBRIDGE_MAX_TURNS', 1, 50);
   const retentionDays = readBoundedInteger('AGENTBRIDGE_DISCUSSION_RETENTION_DAYS', 0, 0, 3650);
   if (retentionDays > 0) {
     const cleanup = storage.cleanupDiscussions(retentionDays, true);
@@ -98,7 +99,8 @@ async function createRuntime(projectPath: string): Promise<MCPRuntime> {
 function readBoundedInteger(name: string, fallback: number, min: number, max: number): number {
   const raw = process.env[name];
   if (!raw?.trim()) return fallback;
-  const value = Number.parseInt(raw, 10);
+  const normalized = raw.trim();
+  const value = /^\d+$/.test(normalized) ? Number(normalized) : Number.NaN;
   if (!Number.isInteger(value) || value < min || value > max) {
     throw new Error(`${name} must be an integer between ${min} and ${max}`);
   }

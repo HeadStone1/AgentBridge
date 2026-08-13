@@ -4,11 +4,11 @@
 
 AgentBridge es un puente MCP local que permite que Claude Code y OpenAI Codex se hagan preguntas, respondan, reintenten, alcancen acuerdos y guarden el estado de cada conversación en una base de datos SQLite dentro del proyecto.
 
-> Versión de desarrollo actual: v0.7.1. AgentBridge se registra globalmente una sola vez; cada sesión detecta el proyecto activo y guarda su base SQLite dentro de ese proyecto.
+> Versión de desarrollo actual: v0.7.3. AgentBridge se registra globalmente una sola vez; cada sesión detecta el proyecto activo y guarda su base SQLite dentro de ese proyecto.
 
 En Windows, el paquete MSIX unificado de ChatGPT Desktop no permite que procesos externos ejecuten su runtime privado de Codex. Por eso AgentBridge incluye la CLI oficial `@openai/codex` e inicia con ella un App Server stdio independiente; ejecuta `codex login` una vez con la misma cuenta de Windows si todavía no está autenticada.
 
-> Verificación actual del código fuente: pasan la comprobación UTF-8, la compilación TypeScript y las 102 pruebas de 18 archivos. Una sesión nativa del proveedor solo se reanuda cuando está vinculada explícitamente a la misma conversación; una conversación nueva no hereda sesiones ajenas ni sesiones históricas sin vínculo. Estas pruebas automáticas no sustituyen la validación con proveedores reales: solo declare comunicación bidireccional después de llamadas `ask_peer` correctas de Claude → Codex y Codex → Claude.
+> Verificación actual del código fuente: pasan la comprobación UTF-8, la compilación TypeScript y toda la suite automatizada, incluidas 30 conexiones MCP consecutivas con el SDK oficial. `auto/reuse` reanuda una sesión nativa dentro de la sesión de colaboración del proyecto; `fresh` crea una sala aislada y reutiliza su propia sesión en turnos posteriores. Estas pruebas automáticas no sustituyen la validación con proveedores reales: solo declare comunicación bidireccional después de llamadas `ask_peer` correctas de Claude → Codex y Codex → Claude.
 
 ## Instalación rápida
 
@@ -164,7 +164,7 @@ Reinicie los dos clientes después de actualizar. Las instalaciones Release guar
 
 ## Flujo de discusión y retención
 
-`setup` instala de forma segura la Skill `agentbridge-collaboration` para Claude Code y Codex; nunca sobrescribe una Skill personalizada o modificada. Reutilice siempre el mismo `discussionId` y use `wait_discussion` cuando el envío esté `QUEUED` o `RUNNING`. `maxTurns` vale 12 de forma predeterminada y cuenta respuestas correctas del proveedor, no ciclos completos.
+`setup` instala de forma segura cuatro Skills enfocadas para Claude Code y Codex: `agentbridge-collaboration`, `agentbridge-peer-review`, `agentbridge-debug` y `agentbridge-decision-debate`; nunca sobrescribe una Skill personalizada o modificada. Reutilice siempre el mismo `discussionId` y use `wait_discussion` cuando el envío esté `QUEUED` o `RUNNING`. `ask_peer.mode` admite `review`, `discussion` y `deep-discussion`, con límites predeterminados de 3, 12 y 20 respuestas correctas; `maxTurns` los sustituye como límite de seguridad.
 
 SQLite conserva el historial indefinidamente por defecto. `cleanup` solo previsualiza salvo que se añada `--yes`, y únicamente elimina conversaciones `COMPLETED` o `CANCELLED`. `AGENTBRIDGE_DISCUSSION_RETENTION_DAYS=1..3650` activa la limpieza al iniciar. Las sesiones nativas se conservan salvo que `AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE=1`; un proveedor sin archivado se omite sin impedir el cierre.
 

@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync, rmSync } from 'node:fs';
-import { spawn } from 'node:child_process';
 import { join, parse, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import process from 'node:process';
@@ -22,6 +21,8 @@ import {
 import { defaultCodexConfig, defaultGlobalCodexConfig, resolveMcpEntry } from './paths.js';
 import { runDoctor } from './diagnostics.js';
 import { installManagedSkills, removeManagedSkills } from './skills.js';
+import { createLiveVerificationToken, matchesLiveVerificationToken } from './verify.js';
+import { runMcpSmoke } from './mcpSmoke.js';
 import {
   cleanupEmptyRegistryRoot,
   assertUpdateSupported,
@@ -262,18 +263,29 @@ async function verify(options: Options): Promise<Record<string, unknown>> {
     mcpInitialize: { status: mcpSmoke.status, detail: mcpSmoke.detail, tools: mcpSmoke.tools },
     claudeToCodex: {
       ...live.claudeToCodex,
+      evidenceLevel: 'L2_PROVIDER_REACHABILITY',
+      scope: 'Direct verifier-to-Codex request; this is not proof that the Claude host loaded MCP or completed ask_peer.',
     },
     codexToClaude: {
       ...live.codexToClaude,
+      evidenceLevel: 'L2_PROVIDER_REACHABILITY',
+      scope: 'Direct verifier-to-Claude request; this is not proof that the Codex host loaded MCP or completed ask_peer.',
     },
     restartRecovery: { status: 'NOT_TESTED', detail: 'Requires two real MCP client processes and authenticated providers.' },
   };
   const tested = Object.values(checks).filter((check) => check.status !== 'NOT_TESTED').length;
   return {
-    ok: checks.launcher.status === 'PASS' && Object.values(checks).every((check) => check.status !== 'FAIL'),
+    ok: checks.launcher.status === 'PASS'
+      && Object.values(checks).every((check) => check.status !== 'FAIL')
+      && (!liveRequested || (checks.claudeToCodex.status === 'PASS' && checks.codexToClaude.status === 'PASS')),
     liveRequested,
     liveConfigured,
-    status: tested > 0 && Object.values(checks).some((check) => check.status === 'NOT_TESTED') ? 'PARTIAL' : 'PASS',
+    status: Object.values(checks).some((check) => check.status === 'FAIL')
+      || (liveRequested && (checks.claudeToCodex.status !== 'PASS' || checks.codexToClaude.status !== 'PASS'))
+      ? 'FAIL'
+      : tested > 0 && Object.values(checks).some((check) => check.status === 'NOT_TESTED')
+        ? 'PARTIAL'
+        : 'PASS',
     checks,
     limitation: 'NOT_TESTED is intentional when authenticated real-provider E2E prerequisites are absent; it is never reported as a pass.',
   };
@@ -312,13 +324,17 @@ async function runLiveProviderSmoke(projectPath: string): Promise<{
     if (!codexAvailable) result.claudeToCodex.detail = 'NOT_TESTED: Codex provider command is unavailable or not logged in.';
     else {
       try {
+        const expectedToken = createLiveVerificationToken('CODEX');
         const response = await codex.sendAndWait({
           projectPath,
           discussionId: `verify_claude_to_codex_${Date.now()}`,
-          prompt: 'AgentBridge live verification. Reply with exactly LIVE_CODEX_OK and do not call any tools.',
+          prompt: `AgentBridge live verification. Reply with exactly ${expectedToken} and do not call any tools.`,
         });
-        result.claudeToCodex.status = response.content.trim() ? 'PASS' : 'FAIL';
-        result.claudeToCodex.detail = response.content.trim() ? 'Codex returned a live response.' : 'Codex returned an empty response.';
+        const accepted = matchesLiveVerificationToken(response.content, expectedToken);
+        result.claudeToCodex.status = accepted ? 'PASS' : 'FAIL';
+        result.claudeToCodex.detail = accepted
+          ? 'Codex returned the expected live verification token.'
+          : 'Codex returned an unexpected live verification response.';
       } catch (cause) {
         result.claudeToCodex.status = 'FAIL';
         result.claudeToCodex.detail = `Codex live request failed: ${safeVerifyError(cause)}`;
@@ -328,13 +344,17 @@ async function runLiveProviderSmoke(projectPath: string): Promise<{
     if (!claudeAvailable) result.codexToClaude.detail = 'NOT_TESTED: Claude provider command is unavailable or not logged in.';
     else {
       try {
+        const expectedToken = createLiveVerificationToken('CLAUDE');
         const response = await claude.sendAndWait({
           projectPath,
           discussionId: `verify_codex_to_claude_${Date.now()}`,
-          prompt: 'AgentBridge live verification. Reply with exactly LIVE_CLAUDE_OK and do not call any tools.',
+          prompt: `AgentBridge live verification. Reply with exactly ${expectedToken} and do not call any tools.`,
         });
-        result.codexToClaude.status = response.content.trim() ? 'PASS' : 'FAIL';
-        result.codexToClaude.detail = response.content.trim() ? 'Claude returned a live response.' : 'Claude returned an empty response.';
+        const accepted = matchesLiveVerificationToken(response.content, expectedToken);
+        result.codexToClaude.status = accepted ? 'PASS' : 'FAIL';
+        result.codexToClaude.detail = accepted
+          ? 'Claude returned the expected live verification token.'
+          : 'Claude returned an unexpected live verification response.';
       } catch (cause) {
         result.codexToClaude.status = 'FAIL';
         result.codexToClaude.detail = `Claude live request failed: ${safeVerifyError(cause)}`;
@@ -348,7 +368,8 @@ async function runLiveProviderSmoke(projectPath: string): Promise<{
 
 function boundedVerifyTimeout(value: string | undefined): number {
   if (!value?.trim()) return 120_000;
-  const timeoutMs = Number.parseInt(value, 10);
+  const normalized = value.trim();
+  const timeoutMs = /^\d+$/.test(normalized) ? Number(normalized) : Number.NaN;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 600_000) {
     throw new Error('AGENTBRIDGE_VERIFY_TIMEOUT_MS must be an integer between 1000 and 600000');
   }
@@ -361,59 +382,6 @@ function safeVerifyError(cause: unknown): string {
     .slice(0, 512);
 }
 
-async function runMcpSmoke(entry: string, projectPath: string): Promise<{ status: 'PASS' | 'FAIL' | 'NOT_TESTED'; detail: string; tools: string[] }> {
-  if (!existsSync(entry)) return { status: 'FAIL', detail: `MCP entry does not exist: ${entry}`, tools: [] };
-  return new Promise((resolveResult) => {
-    const child = spawn(process.execPath, [entry], {
-      cwd: projectPath,
-      windowsHide: true,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        AGENTBRIDGE_AGENT: 'claude',
-        AGENTBRIDGE_PROJECT_PATH: projectPath,
-        AGENTBRIDGE_ASYNC_DISPATCH: '0',
-        AGENTBRIDGE_TEST_MAX_LIFETIME_MS: '10_000',
-      },
-    });
-    let buffer = '';
-    let settled = false;
-    const finish = (result: { status: 'PASS' | 'FAIL' | 'NOT_TESTED'; detail: string; tools: string[] }) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      child.kill();
-      resolveResult(result);
-    };
-    const timer = setTimeout(() => finish({ status: 'FAIL', detail: 'MCP initialize/tools smoke test timed out.', tools: [] }), 8_000);
-    child.stdout.on('data', (chunk: Buffer | string) => {
-      buffer += chunk.toString();
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() ?? '';
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        let message: any;
-        try { message = JSON.parse(line); } catch { continue; }
-        if (message.id === 1) {
-          child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} })}\n`);
-          child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })}\n`);
-        } else if (message.id === 2) {
-          const tools = Array.isArray(message.result?.tools) ? message.result.tools.map((tool: any) => tool.name).filter((name: unknown): name is string => typeof name === 'string') : [];
-          finish(tools.length === 8
-            ? { status: 'PASS', detail: 'MCP initialize → initialized → tools/list completed.', tools }
-            : { status: 'FAIL', detail: `MCP tools/list returned ${tools.length} tools; expected 8.`, tools });
-        }
-      }
-    });
-    child.once('error', (error) => finish({ status: 'FAIL', detail: error.message, tools: [] }));
-    child.stdin.write(`${JSON.stringify({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'agentbridge-verify', version: CURRENT_VERSION } },
-    })}\n`);
-  });
-}
 
 function uninstallProject(projectPath: string, confirmed: boolean, options: Options): Record<string, unknown> {
   if (!confirmed) throw new Error('Refusing to remove local state without --yes');

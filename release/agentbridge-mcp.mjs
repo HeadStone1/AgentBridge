@@ -1,3 +1,4 @@
+import { createRequire as __agentbridgeCreateRequire } from 'node:module'; const require = __agentbridgeCreateRequire(import.meta.url);
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -5,7 +6,11 @@ var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __commonJS = (cb, mod) => function __require() {
-  return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+  try {
+    return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+  } catch (e) {
+    throw mod = 0, e;
+  }
 };
 var __export = (target, all) => {
   for (var name in all)
@@ -7072,12 +7077,87 @@ function resolveProjectPath(explicit, env = process.env, cwd = process.cwd()) {
   const candidate = [explicit, env.AGENTBRIDGE_PROJECT_PATH, env.CLAUDE_PROJECT_DIR, cwd].find((value) => typeof value === "string" && value.trim().length > 0);
   return resolve(candidate ?? cwd);
 }
+var DISCUSSION_MODES = ["review", "discussion", "deep-discussion"];
+var DEFAULT_DISCUSSION_MODE = "discussion";
+var DEFAULT_MAX_TURNS_BY_MODE = {
+  review: 3,
+  discussion: 12,
+  "deep-discussion": 20
+};
+
+// packages/collaboration/dist/discussionPolicy.js
+var DEEP_PHASES = ["challenge", "evidence", "rebuttal", "revision", "verification", "convergence"];
+function assertDiscussionMode(value) {
+  if (!DISCUSSION_MODES.includes(value)) {
+    throw new Error(`mode must be one of: ${DISCUSSION_MODES.join(", ")}`);
+  }
+}
+function resolveDiscussionMode(value) {
+  const mode = value ?? DEFAULT_DISCUSSION_MODE;
+  assertDiscussionMode(mode);
+  return mode;
+}
+function defaultMaxTurnsForMode(mode) {
+  return DEFAULT_MAX_TURNS_BY_MODE[mode];
+}
+function discussionPhase(mode, completedResponses) {
+  if (mode === "review")
+    return "independent-review";
+  if (mode === "discussion") {
+    if (completedResponses === 0)
+      return "position";
+    if (completedResponses === 1)
+      return "challenge";
+    return "synthesis";
+  }
+  return DEEP_PHASES[Math.min(Math.max(completedResponses, 0), DEEP_PHASES.length - 1)];
+}
+function buildDiscussionPrompt(params) {
+  const phase = discussionPhase(params.mode, params.completedResponses);
+  const modeRules = params.mode === "review" ? [
+    "Review independently. Prioritize concrete defects, regressions, missing tests, and operational risks by severity.",
+    "Tie every finding to observable evidence. If no actionable finding remains, say so directly."
+  ] : params.mode === "deep-discussion" ? [
+    `Work the current phase (${phase}) before attempting consensus. State the strongest counterargument, supporting evidence, uncertainty, and any revised position.`,
+    "Do not accept a conclusion until material objections and alternatives have been tested."
+  ] : [
+    "Advance the decision with evidence, a substantive objection, or a concrete synthesis; do not restate prior messages.",
+    "Surface unresolved tradeoffs and revise your position when the evidence warrants it."
+  ];
+  return [
+    "<agentbridge-discussion-contract>",
+    `mode: ${params.mode}`,
+    `phase: ${phase}`,
+    `successful-provider-responses: ${params.completedResponses}/${params.maxTurns}`,
+    "The response limit is a safety ceiling, not a target. Converge early when acceptance criteria are met.",
+    ...modeRules,
+    "End with exactly one signal line:",
+    "[AGENTBRIDGE_SIGNAL: CONTINUE] when new evidence or a material objection remains;",
+    "[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE] when a canonical conclusion is supportable;",
+    "[AGENTBRIDGE_SIGNAL: NEEDS_USER_DECISION] when the blocker is a product, risk, permission, or preference choice.",
+    "</agentbridge-discussion-contract>",
+    "",
+    "<current-request>",
+    params.prompt,
+    "</current-request>"
+  ].join("\n");
+}
+function parseDiscussionSignal(content) {
+  const matches = [...content.matchAll(/\[AGENTBRIDGE_SIGNAL:\s*(CONTINUE|READY_TO_CLOSE|NEEDS_USER_DECISION)\]/g)];
+  if (matches.length !== 1)
+    return null;
+  const match = matches[0];
+  if (!content.trimEnd().endsWith(match[0]))
+    return null;
+  return match[1];
+}
 
 // packages/collaboration/dist/index.js
 var CollaborationService = class {
   storage;
   audit;
   maxTurns;
+  maxTurnsWasConfigured;
   timeoutMs;
   maxDurationMs;
   maxTotalMessageChars;
@@ -7092,6 +7172,7 @@ var CollaborationService = class {
   constructor(storage, audit, config2 = {}, connectors = {}) {
     this.storage = storage;
     this.audit = audit;
+    this.maxTurnsWasConfigured = config2.maxTurns !== void 0;
     this.maxTurns = config2.maxTurns ?? 12;
     this.timeoutMs = config2.timeoutMs ?? 12e4;
     this.maxDurationMs = config2.maxDurationMs ?? 30 * 60 * 1e3;
@@ -7117,7 +7198,8 @@ var CollaborationService = class {
   }
   async initiateDiscussion(params) {
     const projectPath = resolveProjectPath(params.projectPath);
-    const maxTurns = params.maxTurns ?? this.maxTurns;
+    const mode = resolveDiscussionMode(params.mode);
+    const maxTurns = params.maxTurns ?? (this.maxTurnsWasConfigured ? this.maxTurns : defaultMaxTurnsForMode(mode));
     if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 50) {
       throw new Error("maxTurns must be an integer between 1 and 50");
     }
@@ -7134,6 +7216,7 @@ var CollaborationService = class {
       peer: params.peer,
       projectPath,
       traceId: params.traceId,
+      mode,
       maxTurns,
       collaborationSessionId: collaborationSession.id
     });
@@ -7142,7 +7225,15 @@ var CollaborationService = class {
       discussionId: discussion.id,
       action: "discussion.created",
       agent: params.driver,
-      metadata: { peer: params.peer, topic: params.topic, projectPath, sessionPolicy, collaborationSessionId: collaborationSession.id }
+      metadata: {
+        peer: params.peer,
+        topic: params.topic,
+        projectPath,
+        mode,
+        maxTurns,
+        sessionPolicy,
+        collaborationSessionId: collaborationSession.id
+      }
     });
     const message = this.storage.createMessage({
       discussionId: discussion.id,
@@ -7167,18 +7258,23 @@ var CollaborationService = class {
         discussionId: discussion.id,
         collaborationSessionId: collaborationSession.id,
         peer: params.peer,
+        mode,
+        maxTurns,
         messageId: message.id,
         status: "DISCUSSING",
         dispatchState: "QUEUED"
       };
     }
     const peerResponse = await this.dispatchToAgent(discussion.id, params.peer, params.initialMessage, []);
+    const current = this.storage.getDiscussion(discussion.id);
     return {
       discussionId: discussion.id,
       collaborationSessionId: collaborationSession.id,
       peer: params.peer,
+      mode,
+      maxTurns,
       messageId: message.id,
-      status: "DISCUSSING",
+      status: current?.status ?? "DISCUSSING",
       dispatchState: peerResponse ? "COMPLETED" : "FAILED",
       ...peerResponse ? { peerResponse } : {}
     };
@@ -7188,7 +7284,8 @@ var CollaborationService = class {
     const discussion = this.storage.getDiscussion(params.discussionId);
     if (!discussion)
       throw new Error(`Discussion ${params.discussionId} not found`);
-    if (isTerminal(discussion.status) || isPaused(discussion.status)) {
+    const resumesUserDecision = discussion.status === "NEEDS_USER_DECISION";
+    if (isTerminal(discussion.status) || isPaused(discussion.status) && !resumesUserDecision) {
       throw new Error(`Discussion ${params.discussionId} is already ${discussion.status}`);
     }
     if (![discussion.driver, discussion.peer].includes(params.sender)) {
@@ -7234,6 +7331,15 @@ var CollaborationService = class {
         agent: params.sender,
         metadata: { messageId: message.id, role: "response" }
       });
+      if (resumesUserDecision) {
+        this.audit.log({
+          traceId: discussion.traceId,
+          discussionId: params.discussionId,
+          action: "discussion.user_decision_resumed",
+          agent: params.sender,
+          metadata: { previousStopReason: discussion.stopReason }
+        });
+      }
       this.storage.updateDiscussionStatus(params.discussionId, "DISCUSSING");
       this.queueDispatch(params.discussionId, receiver);
       const previousMessages = this.storage.getMessages(params.discussionId).slice(0, -1);
@@ -7243,9 +7349,10 @@ var CollaborationService = class {
         return { messageId: message.id, status: "DISCUSSING", dispatchState: "QUEUED" };
       }
       const peerResponse = await this.dispatchToAgent(params.discussionId, receiver, params.reply, previousMessages, { discussionLeaseOwned: true });
+      const current = this.storage.getDiscussion(params.discussionId);
       return {
         messageId: message.id,
-        status: "DISCUSSING",
+        status: current?.status ?? "DISCUSSING",
         dispatchState: peerResponse ? "COMPLETED" : "FAILED",
         ...peerResponse ? { peerResponse } : {}
       };
@@ -7355,7 +7462,12 @@ var CollaborationService = class {
       }
       let peerResponse;
       try {
-        peerResponse = await this.dispatchToAgent(params.discussionId, otherAgent, agreementPrompt, messages, { updateFailureStatus: false, countRound: false, discussionLeaseOwned: true });
+        peerResponse = await this.dispatchToAgent(params.discussionId, otherAgent, agreementPrompt, messages, {
+          updateFailureStatus: false,
+          countRound: false,
+          discussionLeaseOwned: true,
+          applyDiscussionPolicy: false
+        });
       } catch (cause) {
         this.audit.log({
           traceId: discussion.traceId,
@@ -7570,9 +7682,10 @@ var CollaborationService = class {
         };
       }
       const peerResponse = await this.dispatchToAgent(params.discussionId, lastMessage.receiver, lastMessage.content, previousMessages, { discussionLeaseOwned: true });
+      const current = this.storage.getDiscussion(params.discussionId);
       return {
         discussionId: discussion.id,
-        status: "DISCUSSING",
+        status: current?.status === "NEEDS_USER_DECISION" ? "NEEDS_USER_DECISION" : "DISCUSSING",
         retryCount: discussion.retryCount,
         dispatchState: peerResponse ? "COMPLETED" : "FAILED",
         ...peerResponse ? { peerResponse } : {}
@@ -7652,7 +7765,7 @@ var CollaborationService = class {
       }, Math.max(1e3, Math.floor(this.timeoutMs / 3)));
       leaseHeartbeat.unref?.();
       const collaborationSession = discussion.collaborationSessionId ? this.storage.getCollaborationSession(discussion.collaborationSessionId) : null;
-      const persistedSession = collaborationSession && collaborationSession.policy !== "fresh" ? this.storage.getSessionForCollaboration(receiver, collaborationSession.id, discussion.projectPath) : !collaborationSession ? this.storage.getSessionForDiscussion(receiver, discussionId, discussion.projectPath) : null;
+      const persistedSession = collaborationSession ? this.storage.getSessionForCollaboration(receiver, collaborationSession.id, discussion.projectPath) : !collaborationSession ? this.storage.getSessionForDiscussion(receiver, discussionId, discussion.projectPath) : null;
       if (persistedSession) {
         trackedSession = { sessionId: persistedSession.sessionId, metadata: persistedSession.metadata };
         this.storage.updateSessionStatus(receiver, persistedSession.sessionId, "BRIDGE_OWNED", {
@@ -7663,9 +7776,16 @@ var CollaborationService = class {
         });
       }
       const providerSessionKind = readProviderSessionKind(persistedSession?.metadata.sessionKind);
+      const completedResponses = discussion.roundCount;
+      const effectivePrompt = options.applyDiscussionPolicy === false ? prompt : buildDiscussionPrompt({
+        mode: discussion.mode,
+        completedResponses,
+        maxTurns: discussion.maxTurns,
+        prompt
+      });
       const response = await withTimeout(connector.sendAndWait({
         projectPath: discussion.projectPath,
-        prompt,
+        prompt: effectivePrompt,
         discussionId,
         previousMessages,
         providerSessionId: persistedSession?.sessionId,
@@ -7700,7 +7820,7 @@ var CollaborationService = class {
             ...collaborationSession ? { collaborationSessionId: collaborationSession.id } : {}
           }
         });
-        if (collaborationSession && collaborationSession.policy !== "fresh") {
+        if (collaborationSession) {
           this.storage.bindProviderSession({
             collaborationSessionId: collaborationSession.id,
             provider: receiver,
@@ -7739,9 +7859,20 @@ var CollaborationService = class {
           });
         }
       }
+      const signal = options.applyDiscussionPolicy === false ? null : parseDiscussionSignal(response.content);
+      if (options.applyDiscussionPolicy !== false) {
+        this.storage.updateDiscussionSignal(discussionId, signal);
+      }
       const currentAfterResponse = this.storage.getDiscussion(discussionId);
       if (currentAfterResponse?.status === "PEER_BUSY") {
         this.storage.updateDiscussionStatus(discussionId, "DISCUSSING");
+      }
+      if (signal === "NEEDS_USER_DECISION") {
+        const current = this.storage.getDiscussion(discussionId);
+        if (current?.status === "DISCUSSING") {
+          this.storage.updateDiscussionStatus(discussionId, "NEEDS_USER_DECISION");
+          this.storage.updateDiscussionDiagnostic(discussionId, "PEER_REQUESTED_USER_DECISION");
+        }
       }
       this.storage.updateDiscussionDispatch(discussionId, "COMPLETED", null);
       this.audit.log({
@@ -7749,7 +7880,13 @@ var CollaborationService = class {
         discussionId,
         action: "peer.response",
         agent: receiver,
-        metadata: { messageId: message.id, duration: response.duration }
+        metadata: {
+          messageId: message.id,
+          duration: response.duration,
+          mode: discussion.mode,
+          phase: discussionPhase(discussion.mode, completedResponses),
+          signal
+        }
       });
       return message;
     } catch (cause) {
@@ -7825,7 +7962,12 @@ var CollaborationService = class {
     this.storage.updateDiscussionDispatch(discussionId, "QUEUED", receiver);
   }
   startBackgroundAgreementConfirmation(discussionId, agent, otherAgent, conclusion, decisionHash, prompt, previousMessages) {
-    void this.dispatchToAgent(discussionId, otherAgent, prompt, previousMessages, { updateFailureStatus: false, countRound: false, discussionLeaseOwned: true }).then((peerResponse) => {
+    void this.dispatchToAgent(discussionId, otherAgent, prompt, previousMessages, {
+      updateFailureStatus: false,
+      countRound: false,
+      discussionLeaseOwned: true,
+      applyDiscussionPolicy: false
+    }).then((peerResponse) => {
       if (!peerResponse)
         return;
       const decision = parseAgreementResponse(peerResponse.content, decisionHash);
@@ -7932,6 +8074,18 @@ var CollaborationService = class {
   archiveDiscussionSessions(discussionId) {
     if (!this.archiveSessionsOnClose)
       return;
+    const discussion = this.storage.getDiscussion(discussionId);
+    const collaborationSession = discussion?.collaborationSessionId ? this.storage.getCollaborationSession(discussion.collaborationSessionId) : null;
+    if (collaborationSession && collaborationSession.policy !== "fresh") {
+      this.audit.log({
+        traceId: discussion?.traceId ?? `tr_${discussionId}`,
+        discussionId,
+        action: "session.archive_shared_skipped",
+        agent: "system",
+        metadata: { collaborationSessionId: collaborationSession.id, policy: collaborationSession.policy }
+      });
+      return;
+    }
     for (const session of this.storage.listSessionsForDiscussion(discussionId)) {
       const connector = this.connectors[session.provider];
       const kind = readProviderSessionKind(session.metadata.sessionKind);
@@ -9338,9 +9492,11 @@ var SCHEMA = `
 CREATE TABLE IF NOT EXISTS discussions (
   id TEXT PRIMARY KEY,
   topic TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'discussion',
   status TEXT NOT NULL DEFAULT 'CREATED',
   dispatch_state TEXT,
   waiting_for TEXT,
+  last_signal TEXT,
   driver TEXT NOT NULL,
   peer TEXT,
   current_turn INTEGER NOT NULL DEFAULT 0,
@@ -9354,9 +9510,9 @@ CREATE TABLE IF NOT EXISTS discussions (
   conclusion TEXT,
   project_path TEXT,
   trace_id TEXT NOT NULL,
-  collaboration_session_id TEXT
-  ,stop_reason TEXT
-  ,last_error TEXT
+  collaboration_session_id TEXT,
+  stop_reason TEXT,
+  last_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -9487,12 +9643,14 @@ var Storage = class {
     this.ensureColumn("discussions", "peer", "ALTER TABLE discussions ADD COLUMN peer TEXT");
     this.ensureColumn("discussions", "dispatch_state", "ALTER TABLE discussions ADD COLUMN dispatch_state TEXT");
     this.ensureColumn("discussions", "waiting_for", "ALTER TABLE discussions ADD COLUMN waiting_for TEXT");
+    this.ensureColumn("discussions", "last_signal", "ALTER TABLE discussions ADD COLUMN last_signal TEXT");
     this.ensureColumn("discussions", "retry_count", "ALTER TABLE discussions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("discussions", "max_retries", "ALTER TABLE discussions ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 2");
     this.ensureColumn("discussions", "round_count", "ALTER TABLE discussions ADD COLUMN round_count INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("discussions", "stop_reason", "ALTER TABLE discussions ADD COLUMN stop_reason TEXT");
     this.ensureColumn("discussions", "last_error", "ALTER TABLE discussions ADD COLUMN last_error TEXT");
     this.ensureColumn("discussions", "collaboration_session_id", "ALTER TABLE discussions ADD COLUMN collaboration_session_id TEXT");
+    this.ensureColumn("discussions", "mode", "ALTER TABLE discussions ADD COLUMN mode TEXT NOT NULL DEFAULT 'discussion'");
     this.ensureColumn("messages", "provider_session_id", "ALTER TABLE messages ADD COLUMN provider_session_id TEXT");
   }
   ensureColumn(table, columnName, alterSql) {
@@ -9529,12 +9687,14 @@ var Storage = class {
     const maxTurns = data.maxTurns ?? DEFAULT_MAX_TURNS;
     const maxRetries = data.maxRetries ?? 2;
     const peer = data.peer ?? (data.driver === "claude" ? "codex" : "claude");
+    const mode = data.mode ?? DEFAULT_DISCUSSION_MODE;
     assertText2(data.topic, "topic");
     assertText2(data.traceId, "traceId");
     assertTurns(maxTurns);
     assertRetries(maxRetries);
-    this.db.prepare(`INSERT INTO discussions (id, topic, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id, collaboration_session_id)
-         VALUES (?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?)`).run(id2, data.topic, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId, data.collaborationSessionId ?? null);
+    assertDiscussionMode2(mode);
+    this.db.prepare(`INSERT INTO discussions (id, topic, mode, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id, collaboration_session_id)
+         VALUES (?, ?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?)`).run(id2, data.topic, mode, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId, data.collaborationSessionId ?? null);
     return this.getDiscussion(id2);
   }
   // --- Project-scoped collaboration sessions ---
@@ -9578,7 +9738,9 @@ var Storage = class {
     const column = provider === "claude" ? "claude_session_id" : "codex_session_id";
     const row = this.db.prepare(`SELECT sessions.* FROM collaboration_sessions AS collaborations
        JOIN agent_sessions AS sessions
-         ON sessions.provider = ? AND sessions.session_id = collaborations.${column}
+         ON sessions.provider = ?
+        AND sessions.session_id = collaborations.${column}
+        AND sessions.project_path = collaborations.project_path
        WHERE collaborations.id = ? AND collaborations.project_path = ?
          AND collaborations.status = 'ACTIVE'
        LIMIT 1`).get(provider, collaborationSessionId, projectPath);
@@ -9591,9 +9753,16 @@ var Storage = class {
     const column = data.provider === "claude" ? "claude_session_id" : "codex_session_id";
     const result = this.db.prepare(`UPDATE collaboration_sessions
        SET ${column} = ?, last_seen_at = ?
-       WHERE id = ? AND status = 'ACTIVE'`).run(data.sessionId, (/* @__PURE__ */ new Date()).toISOString(), data.collaborationSessionId);
-    if (result.changes !== 1)
-      throw new Error(`Collaboration session ${data.collaborationSessionId} not found or archived`);
+       WHERE id = ? AND status = 'ACTIVE'
+         AND EXISTS (
+           SELECT 1 FROM agent_sessions AS sessions
+           WHERE sessions.provider = ?
+             AND sessions.session_id = ?
+             AND sessions.project_path = collaboration_sessions.project_path
+         )`).run(data.sessionId, (/* @__PURE__ */ new Date()).toISOString(), data.collaborationSessionId, data.provider, data.sessionId);
+    if (result.changes !== 1) {
+      throw new Error(`Collaboration session ${data.collaborationSessionId} is unavailable or does not own provider session ${data.provider}/${data.sessionId}`);
+    }
   }
   getDiscussion(id2) {
     const row = this.db.prepare("SELECT * FROM discussions WHERE id = ?").get(id2);
@@ -9624,6 +9793,11 @@ var Storage = class {
     if (!this.getDiscussion(id2))
       throw new Error(`Discussion ${id2} not found`);
     this.db.prepare("UPDATE discussions SET dispatch_state = ?, waiting_for = ?, updated_at = ? WHERE id = ?").run(state, waitingFor, (/* @__PURE__ */ new Date()).toISOString(), id2);
+  }
+  updateDiscussionSignal(id2, signal) {
+    if (!this.getDiscussion(id2))
+      throw new Error(`Discussion ${id2} not found`);
+    this.db.prepare("UPDATE discussions SET last_signal = ?, updated_at = ? WHERE id = ?").run(signal, (/* @__PURE__ */ new Date()).toISOString(), id2);
   }
   updateDiscussionDiagnostic(id2, stopReason, lastError = null) {
     if (!this.getDiscussion(id2))
@@ -9893,13 +10067,16 @@ var Storage = class {
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const status = data.status ?? "UNKNOWN";
     const metadata = data.metadata ?? {};
-    this.db.prepare(`INSERT INTO agent_sessions (provider, session_id, project_path, status, metadata, created_at, last_seen_at)
+    const result = this.db.prepare(`INSERT INTO agent_sessions (provider, session_id, project_path, status, metadata, created_at, last_seen_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(provider, session_id) DO UPDATE SET
-           project_path = excluded.project_path,
            status = excluded.status,
            metadata = excluded.metadata,
-           last_seen_at = excluded.last_seen_at`).run(data.provider, data.sessionId, data.projectPath, status, JSON.stringify(metadata), now, now);
+           last_seen_at = excluded.last_seen_at
+         WHERE agent_sessions.project_path = excluded.project_path`).run(data.provider, data.sessionId, data.projectPath, status, JSON.stringify(metadata), now, now);
+    if (result.changes !== 1) {
+      throw new Error(`Provider session ${data.provider}/${data.sessionId} belongs to another project`);
+    }
     return this.getSession(data.provider, data.sessionId);
   }
   getSession(provider, sessionId) {
@@ -9992,6 +10169,7 @@ function rowToDiscussion(row) {
   return {
     id: row.id,
     topic: row.topic,
+    mode: row.mode ?? DEFAULT_DISCUSSION_MODE,
     status: row.status,
     driver,
     peer: row.peer ?? (driver === "claude" ? "codex" : "claude"),
@@ -10009,6 +10187,7 @@ function rowToDiscussion(row) {
     traceId: row.trace_id,
     dispatchState: row.dispatch_state ?? null,
     waitingFor: row.waiting_for ?? null,
+    lastSignal: row.last_signal ?? null,
     stopReason: row.stop_reason ?? null,
     lastError: parseJsonObject(row.last_error)
   };
@@ -10080,6 +10259,11 @@ function isReusableBridgeSession(session) {
 function assertSessionPolicy(value) {
   if (value !== "auto" && value !== "reuse" && value !== "fresh") {
     throw new Error("session policy must be auto, reuse, or fresh");
+  }
+}
+function assertDiscussionMode2(value) {
+  if (!DISCUSSION_MODES.includes(value)) {
+    throw new Error(`mode must be one of: ${DISCUSSION_MODES.join(", ")}`);
   }
 }
 function rowToAuditEvent(row) {
@@ -13971,7 +14155,7 @@ ZodNaN.create = (params) => {
     ...processCreateParams(params)
   });
 };
-var BRAND = Symbol("zod_brand");
+var BRAND = /* @__PURE__ */ Symbol("zod_brand");
 var ZodBranded = class extends ZodType {
   _parse(input) {
     const { ctx } = this._processInputParams(input);
@@ -14173,14 +14357,14 @@ var ostring = () => stringType().optional();
 var onumber = () => numberType().optional();
 var oboolean = () => booleanType().optional();
 var coerce = {
-  string: (arg) => ZodString.create({ ...arg, coerce: true }),
-  number: (arg) => ZodNumber.create({ ...arg, coerce: true }),
-  boolean: (arg) => ZodBoolean.create({
+  string: ((arg) => ZodString.create({ ...arg, coerce: true })),
+  number: ((arg) => ZodNumber.create({ ...arg, coerce: true })),
+  boolean: ((arg) => ZodBoolean.create({
     ...arg,
     coerce: true
-  }),
-  bigint: (arg) => ZodBigInt.create({ ...arg, coerce: true }),
-  date: (arg) => ZodDate.create({ ...arg, coerce: true })
+  })),
+  bigint: ((arg) => ZodBigInt.create({ ...arg, coerce: true })),
+  date: ((arg) => ZodDate.create({ ...arg, coerce: true }))
 };
 var NEVER = INVALID;
 
@@ -14231,7 +14415,6 @@ function $constructor(name, initializer3, params) {
   Object.defineProperty(_, "name", { value: name });
   return _;
 }
-var $brand = Symbol("zod_brand");
 var $ZodAsyncError = class extends Error {
   constructor() {
     super(`Encountered Promise during synchronous parse. Use .parseAsync() instead.`);
@@ -16733,8 +16916,6 @@ function en_default2() {
 }
 
 // node_modules/zod/v4/core/registries.js
-var $output = Symbol("ZodOutput");
-var $input = Symbol("ZodInput");
 var $ZodRegistry = class {
   constructor() {
     this._map = /* @__PURE__ */ new Map();
@@ -17384,10 +17565,10 @@ var ZodType2 = /* @__PURE__ */ $constructor("ZodType", (inst, def) => {
   };
   inst.clone = (def2, params) => clone(inst, def2, params);
   inst.brand = () => inst;
-  inst.register = (reg, meta) => {
+  inst.register = ((reg, meta) => {
     reg.add(inst, meta);
     return inst;
-  };
+  });
   inst.parse = (data, params) => parse2(inst, data, params, { callee: inst.parse });
   inst.safeParse = (data, params) => safeParse3(inst, data, params);
   inst.parseAsync = async (data, params) => parseAsync2(inst, data, params, { callee: inst.parseAsync });
@@ -19503,9 +19684,6 @@ function isTerminal2(status) {
   return status === "completed" || status === "failed" || status === "cancelled";
 }
 
-// node_modules/zod-to-json-schema/dist/esm/Options.js
-var ignoreOverride = Symbol("Let zodToJsonSchema decide on which parser to use");
-
 // node_modules/zod-to-json-schema/dist/esm/parsers/string.js
 var ALPHA_NUMERIC = new Set("ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvxyz0123456789");
 
@@ -21296,7 +21474,12 @@ function buildTools(agentType2) {
           peer: { type: "string", enum: [peer], description: "The agent to discuss with" },
           message: { type: "string", description: "Proposal or question for the peer" },
           projectPath: { type: "string", description: "Project path; defaults to the current working directory" },
-          maxTurns: { type: "integer", minimum: 1, maximum: 50, description: "Maximum successful provider responses (default: 12)" },
+          mode: {
+            type: "string",
+            enum: [...DISCUSSION_MODES],
+            description: "Depth contract (defaults: review=3, discussion=12, deep-discussion=20 successful responses)"
+          },
+          maxTurns: { type: "integer", minimum: 1, maximum: 50, description: "Safety ceiling for successful provider responses; overrides the mode default" },
           sessionPolicy: { type: "string", enum: ["auto", "reuse", "fresh"], description: "Provider session policy (default: auto)" }
         },
         required: ["peer", "message"]
@@ -21393,6 +21576,7 @@ function createServer(resolveRuntime2, options) {
       peer: external_exports.literal(opposite(agentType2)),
       message: text,
       projectPath: external_exports.string().trim().min(1).max(4096).optional(),
+      mode: external_exports.enum(DISCUSSION_MODES).optional(),
       maxTurns: external_exports.number().int().min(1).max(50).optional(),
       sessionPolicy: external_exports.enum(["auto", "reuse", "fresh"]).optional()
     }),
@@ -21433,6 +21617,7 @@ function createServer(resolveRuntime2, options) {
             initialMessage: input.message,
             projectPath: runtime.projectPath ?? input.projectPath,
             traceId: `tr_${randomUUID5()}`,
+            mode: input.mode,
             maxTurns: input.maxTurns,
             sessionPolicy: input.sessionPolicy
           });
@@ -21513,6 +21698,19 @@ function error2(message) {
   return { content: [{ type: "text", text: JSON.stringify({ error: message }) }], isError: true };
 }
 
+// packages/mcp/dist/runtimeConfig.js
+function readOptionalBoundedInteger(name, min, max, env = process.env) {
+  const raw = env[name];
+  if (!raw?.trim())
+    return void 0;
+  const normalized = raw.trim();
+  const value = /^\d+$/.test(normalized) ? Number(normalized) : Number.NaN;
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return value;
+}
+
 // packages/mcp/dist/cli.js
 var agentType = process.env.AGENTBRIDGE_AGENT === "codex" ? "codex" : "claude";
 var runtimePromise = null;
@@ -21546,7 +21744,7 @@ async function createRuntime(projectPath) {
   const timeoutMs = readBoundedInteger("AGENTBRIDGE_TIMEOUT_MS", 12e4, 1e3, 6e5);
   const startupTimeoutMs = readBoundedInteger("AGENTBRIDGE_STARTUP_TIMEOUT_MS", 15e3, 1e3, 6e5);
   const maxDurationMs = readBoundedInteger("AGENTBRIDGE_MAX_DURATION_MS", 30 * 60 * 1e3, 1e3, 7 * 24 * 60 * 60 * 1e3);
-  const maxTurns = readBoundedInteger("AGENTBRIDGE_MAX_TURNS", 12, 1, 50);
+  const maxTurns = readOptionalBoundedInteger("AGENTBRIDGE_MAX_TURNS", 1, 50);
   const retentionDays = readBoundedInteger("AGENTBRIDGE_DISCUSSION_RETENTION_DAYS", 0, 0, 3650);
   if (retentionDays > 0) {
     const cleanup = storage.cleanupDiscussions(retentionDays, true);
@@ -21590,7 +21788,8 @@ function readBoundedInteger(name, fallback, min, max) {
   const raw = process.env[name];
   if (!raw?.trim())
     return fallback;
-  const value = Number.parseInt(raw, 10);
+  const normalized = raw.trim();
+  const value = /^\d+$/.test(normalized) ? Number(normalized) : Number.NaN;
   if (!Number.isInteger(value) || value < min || value > max) {
     throw new Error(`${name} must be an integer between ${min} and ${max}`);
   }
@@ -21662,6 +21861,7 @@ var shutdown = () => {
       process.exit(0);
     }
   })();
+  void shutdownPromise;
 };
 process.once("SIGINT", shutdown);
 process.once("SIGTERM", shutdown);
