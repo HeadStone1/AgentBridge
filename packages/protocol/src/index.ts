@@ -32,6 +32,7 @@ export type DiscussionStopReason =
   | 'MESSAGE_BUDGET'
   | 'PROVIDER_ERROR'
   | 'PEER_REQUESTED_USER_DECISION';
+export type DiscussionOperationKind = 'peer_message' | 'agreement_confirmation';
 
 export interface DiscussionError {
   code: string;
@@ -102,6 +103,10 @@ export interface Discussion {
   lastSignal: DiscussionSignal | null;
   stopReason: DiscussionStopReason | null;
   lastError: DiscussionError | null;
+  /** Exact dispatch that failed and may be eligible for explicit retry. */
+  failedDispatchReceiver: AgentType | null;
+  failedMessageId: string | null;
+  failedOperationKind: DiscussionOperationKind | null;
 }
 
 export interface AgentSession {
@@ -174,6 +179,8 @@ export interface AskPeerOutput {
 export interface ReplyPeerInput {
   discussionId: string;
   message: string;
+  /** Optional monotonic upgrade of the discussion depth contract. */
+  mode?: DiscussionMode;
 }
 
 export interface ReplyPeerOutput {

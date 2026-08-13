@@ -8,6 +8,7 @@ import type {
   DispatchState,
   DiscussionError,
   DiscussionStopReason,
+  DiscussionOperationKind,
   DiscussionMode,
   DiscussionSignal,
   Message,
@@ -56,7 +57,13 @@ export interface StoragePort {
   }): void;
   getDiscussion(id: string): Discussion | null;
   updateDiscussionStatus(id: string, status: DiscussionStatus, extra?: Partial<Discussion>): void;
+  updateDiscussionMode(id: string, mode: DiscussionMode): void;
   updateDiscussionDispatch(id: string, state: DispatchState | null, waitingFor?: AgentType | null): void;
+  updateDiscussionFailure(id: string, failure: {
+    receiver: AgentType | null;
+    messageId: string | null;
+    operationKind: DiscussionOperationKind | null;
+  }): void;
   updateDiscussionSignal(id: string, signal: DiscussionSignal | null): void;
   updateDiscussionDiagnostic(id: string, stopReason: DiscussionStopReason | null, lastError?: DiscussionError | null): void;
   incrementDiscussionRound(id: string): Discussion;

@@ -4,6 +4,7 @@ import { AuditService } from '@agentbridge/audit';
 import type { AgentConnector, ProviderSessionKind } from '@agentbridge/connectors';
 import type {
   AgentType,
+  Discussion,
   DiscussionMode,
   SessionPolicy,
   Message,
@@ -14,6 +15,7 @@ import type {
   CancelDiscussionOutput,
   RetryDiscussionOutput,
   WaitDiscussionOutput,
+  DiscussionOperationKind,
 } from '@agentbridge/protocol';
 import {
   canRetry,
@@ -184,7 +186,13 @@ export class CollaborationService {
     this.queueDispatch(discussion.id, params.peer);
 
     if (this.asyncDispatch) {
-      this.startBackgroundDispatch(discussion.id, params.peer, params.initialMessage, []);
+      this.startBackgroundDispatch(
+        discussion.id,
+        params.peer,
+        params.initialMessage,
+        [],
+        { failedMessageId: message.id, operationKind: 'peer_message' },
+      );
       return {
         discussionId: discussion.id,
         collaborationSessionId: collaborationSession.id,
@@ -196,7 +204,13 @@ export class CollaborationService {
         dispatchState: 'QUEUED',
       };
     }
-    const peerResponse = await this.dispatchToAgent(discussion.id, params.peer, params.initialMessage, []);
+    const peerResponse = await this.dispatchToAgent(
+      discussion.id,
+      params.peer,
+      params.initialMessage,
+      [],
+      { failedMessageId: message.id, operationKind: 'peer_message' },
+    );
     const current = this.storage.getDiscussion(discussion.id);
     return {
       discussionId: discussion.id,
@@ -215,6 +229,7 @@ export class CollaborationService {
     discussionId: string;
     reply: string;
     sender: AgentType;
+    mode?: DiscussionMode;
   }): Promise<ReplyPeerOutput> {
     assertText(params.reply, 'message');
     const discussion = this.storage.getDiscussion(params.discussionId);
@@ -225,6 +240,10 @@ export class CollaborationService {
     }
     if (![discussion.driver, discussion.peer].includes(params.sender)) {
       throw new Error(`Agent ${params.sender} is not a participant in discussion ${params.discussionId}`);
+    }
+    const requestedMode = params.mode === undefined ? undefined : resolveDiscussionMode(params.mode);
+    if (requestedMode && discussionModeRank(requestedMode) < discussionModeRank(discussion.mode)) {
+      throw new Error(`Discussion mode cannot be downgraded from ${discussion.mode} to ${requestedMode}`);
     }
     this.ensureNoDispatchInFlight(params.discussionId);
     this.ensureWithinBudget(discussion, params.reply);
@@ -252,6 +271,16 @@ export class CollaborationService {
     });
     let discussionLeaseOwned = true;
     try {
+      if (requestedMode && requestedMode !== discussion.mode) {
+        this.storage.updateDiscussionMode(params.discussionId, requestedMode);
+        this.audit.log({
+          traceId: discussion.traceId,
+          discussionId: discussion.id,
+          action: 'discussion.mode_upgraded',
+          agent: params.sender,
+          metadata: { from: discussion.mode, to: requestedMode },
+        });
+      }
       const message = this.storage.createMessage({
         discussionId: params.discussionId,
         sender: params.sender,
@@ -288,7 +317,11 @@ export class CollaborationService {
           receiver,
           params.reply,
           previousMessages,
-          { discussionLeaseOwned: true },
+          {
+            discussionLeaseOwned: true,
+            failedMessageId: message.id,
+            operationKind: 'peer_message',
+          },
         );
         discussionLeaseOwned = false;
         return { messageId: message.id, status: 'DISCUSSING', dispatchState: 'QUEUED' };
@@ -298,7 +331,7 @@ export class CollaborationService {
         receiver,
         params.reply,
         previousMessages,
-        { discussionLeaseOwned: true },
+        { discussionLeaseOwned: true, failedMessageId: message.id, operationKind: 'peer_message' },
       );
       const current = this.storage.getDiscussion(params.discussionId);
       return {
@@ -421,6 +454,12 @@ export class CollaborationService {
 
     const messages = this.storage.getMessages(params.discussionId);
     const agreementPrompt = buildAgreementPrompt(params.conclusion, agreement.decisionHash);
+    const conclusionMessageId = messages.find((message) => (
+      message.sender === params.agent
+      && message.receiver === otherAgent
+      && message.role === 'conclusion'
+      && message.content === params.conclusion
+    ))?.id ?? null;
     this.queueDispatch(params.discussionId, otherAgent);
     if (this.asyncDispatch) {
       this.startBackgroundAgreementConfirmation(
@@ -431,6 +470,7 @@ export class CollaborationService {
         agreement.decisionHash,
         agreementPrompt,
         messages,
+        conclusionMessageId,
       );
       discussionLeaseOwned = false;
       return {
@@ -452,6 +492,8 @@ export class CollaborationService {
           countRound: false,
           discussionLeaseOwned: true,
           applyDiscussionPolicy: false,
+          failedMessageId: conclusionMessageId,
+          operationKind: 'agreement_confirmation',
         },
       );
     } catch (cause) {
@@ -642,12 +684,54 @@ export class CollaborationService {
       throw new Error(`Discussion ${params.discussionId} exhausted its maxTurns budget`);
     }
 
-    const messages = this.storage.getMessages(params.discussionId);
-    const lastMessage = messages.at(-1);
-    if (!lastMessage) {
-      throw new Error(`Discussion ${params.discussionId} has no message to retry`);
+    if (discussion.stopReason === 'PEER_REQUESTED_USER_DECISION') {
+      throw new Error(
+        `Discussion ${params.discussionId} requires an explicit reply_peer decision; retry_discussion cannot replay a peer decision request`,
+      );
     }
-    this.ensureProviderNotLeased(lastMessage.receiver, discussion.projectPath);
+    if (discussion.stopReason === 'MAX_DURATION'
+      || discussion.stopReason === 'MESSAGE_BUDGET'
+      || discussion.stopReason === 'MAX_TURNS') {
+      throw new Error(`Discussion ${params.discussionId} cannot retry after ${discussion.stopReason}`);
+    }
+    if (discussion.lastError && (!discussion.lastError.retryable || discussion.lastError.ambiguous)) {
+      throw new Error(
+        `Discussion ${params.discussionId} cannot retry provider result (retryable=${discussion.lastError.retryable}, ambiguous=${discussion.lastError.ambiguous})`,
+      );
+    }
+
+    const messages = this.storage.getMessages(params.discussionId);
+    let failedMessageId = discussion.failedMessageId;
+    let failedReceiver = discussion.failedDispatchReceiver;
+    let failedMessage = failedMessageId
+      ? messages.find((message) => message.id === failedMessageId)
+      : undefined;
+    const hasFailureMetadata = Boolean(
+      failedMessageId || failedReceiver || discussion.failedOperationKind,
+    );
+    if (hasFailureMetadata) {
+      if (!failedMessageId || !failedReceiver || discussion.failedOperationKind !== 'peer_message') {
+        throw new Error(`Discussion ${params.discussionId} has no retryable failed peer dispatch`);
+      }
+      if (!failedMessage || failedMessage.receiver !== failedReceiver) {
+        throw new Error(`Discussion ${params.discussionId} has inconsistent failed dispatch metadata`);
+      }
+    } else {
+      // Rows created before failed-dispatch metadata was introduced have no
+      // pointer to replay. Infer only an unmistakable peer request; all
+      // reason-aware retry guards above still apply.
+      const legacyMessage = messages.at(-1);
+      if (!legacyMessage || !isLegacyRetryablePeerMessage(legacyMessage, discussion)) {
+        throw new Error(`Discussion ${params.discussionId} has no retryable failed peer dispatch`);
+      }
+      failedMessage = legacyMessage;
+      failedMessageId = legacyMessage.id;
+      failedReceiver = legacyMessage.receiver;
+    }
+    if (!failedMessage || !failedMessageId || !failedReceiver) {
+      throw new Error(`Discussion ${params.discussionId} has inconsistent failed dispatch metadata`);
+    }
+    this.ensureProviderNotLeased(failedReceiver, discussion.projectPath);
     this.storage.acquireDiscussionLease({
       discussionId: params.discussionId,
       projectPath: discussion.projectPath,
@@ -661,7 +745,7 @@ export class CollaborationService {
       this.storage.updateDiscussionStatus(params.discussionId, 'CREATED');
     }
     this.storage.updateDiscussionStatus(params.discussionId, 'DISCUSSING');
-    this.queueDispatch(params.discussionId, lastMessage.receiver);
+    this.queueDispatch(params.discussionId, failedReceiver);
     this.audit.log({
       traceId: discussion.traceId,
       discussionId: discussion.id,
@@ -669,14 +753,18 @@ export class CollaborationService {
       agent: params.agent,
       metadata: { retryCount: discussion.retryCount, maxRetries: discussion.maxRetries },
     });
-    const previousMessages = messages.slice(0, -1);
+    const previousMessages = messages.filter((message) => message.id !== failedMessageId);
     if (this.asyncDispatch) {
       this.startBackgroundDispatch(
         params.discussionId,
-        lastMessage.receiver,
-        lastMessage.content,
+        failedReceiver,
+        failedMessage.content,
         previousMessages,
-        { discussionLeaseOwned: true },
+        {
+          discussionLeaseOwned: true,
+          failedMessageId,
+          operationKind: 'peer_message',
+        },
       );
       discussionLeaseOwned = false;
       return {
@@ -688,10 +776,14 @@ export class CollaborationService {
     }
     const peerResponse = await this.dispatchToAgent(
       params.discussionId,
-      lastMessage.receiver,
-      lastMessage.content,
+      failedReceiver,
+      failedMessage.content,
       previousMessages,
-      { discussionLeaseOwned: true },
+      {
+        discussionLeaseOwned: true,
+        failedMessageId,
+        operationKind: 'peer_message',
+      },
     );
     const current = this.storage.getDiscussion(params.discussionId);
     return {
@@ -716,6 +808,8 @@ export class CollaborationService {
       countRound?: boolean;
       discussionLeaseOwned?: boolean;
       applyDiscussionPolicy?: boolean;
+      failedMessageId?: string | null;
+      operationKind?: DiscussionOperationKind;
     } = {},
   ): Promise<Message | undefined> {
     const connector = this.connectors[receiver];
@@ -754,6 +848,19 @@ export class CollaborationService {
       this.storage.updateDiscussionDispatch(discussionId, 'RUNNING', receiver);
       if (!connector) {
         this.storage.updateDiscussionDispatch(discussionId, 'FAILED', null);
+        this.storage.updateDiscussionDiagnostic(discussionId, 'PROVIDER_ERROR', {
+          code: 'UNAVAILABLE',
+          message: `${receiver} connector is not configured`,
+          backend: receiver,
+          retryable: true,
+          ambiguous: false,
+          at: new Date().toISOString(),
+        });
+        this.storage.updateDiscussionFailure(discussionId, {
+          receiver,
+          messageId: options.failedMessageId ?? null,
+          operationKind: options.operationKind ?? null,
+        });
         return undefined;
       }
       if (!(await connector.isAvailable())) {
@@ -911,6 +1018,11 @@ export class CollaborationService {
         }
       }
       this.storage.updateDiscussionDispatch(discussionId, 'COMPLETED', null);
+      this.storage.updateDiscussionFailure(discussionId, {
+        receiver: null,
+        messageId: null,
+        operationKind: null,
+      });
       this.audit.log({
         traceId: discussion.traceId,
         discussionId,
@@ -927,8 +1039,20 @@ export class CollaborationService {
       return message;
     } catch (cause) {
       try {
+        const beforeFailure = this.storage.getDiscussion(discussionId);
         this.storage.updateDiscussionDispatch(discussionId, 'FAILED', null);
-        this.storage.updateDiscussionDiagnostic(discussionId, 'PROVIDER_ERROR', diagnosticFromError(cause, receiver, trackedSession?.metadata.sessionKind));
+        if (beforeFailure?.status === 'DISCUSSING') {
+          this.storage.updateDiscussionDiagnostic(
+            discussionId,
+            'PROVIDER_ERROR',
+            diagnosticFromError(cause, receiver, trackedSession?.metadata.sessionKind),
+          );
+        }
+        this.storage.updateDiscussionFailure(discussionId, {
+          receiver,
+          messageId: options.failedMessageId ?? null,
+          operationKind: options.operationKind ?? null,
+        });
       } catch {
         // Preserve the provider error if persistence is unavailable during failure handling.
       }
@@ -1003,6 +1127,8 @@ export class CollaborationService {
       countRound?: boolean;
       discussionLeaseOwned?: boolean;
       applyDiscussionPolicy?: boolean;
+      failedMessageId?: string | null;
+      operationKind?: DiscussionOperationKind;
     } = {},
   ): void {
     void this.dispatchToAgent(discussionId, receiver, prompt, previousMessages, options).catch(() => {
@@ -1024,6 +1150,7 @@ export class CollaborationService {
     decisionHash: string,
     prompt: string,
     previousMessages: Message[],
+    failedMessageId: string | null,
   ): void {
     void this.dispatchToAgent(
       discussionId,
@@ -1035,6 +1162,8 @@ export class CollaborationService {
         countRound: false,
         discussionLeaseOwned: true,
         applyDiscussionPolicy: false,
+        failedMessageId,
+        operationKind: 'agreement_confirmation',
       },
     ).then((peerResponse) => {
       if (!peerResponse) return;
@@ -1231,6 +1360,20 @@ function readProviderSessionKind(value: unknown): ProviderSessionKind | undefine
 
 function assertParticipants(driver: AgentType, peer: AgentType): void {
   if (driver === peer) throw new Error('Discussion driver and peer must be different agents');
+}
+
+function discussionModeRank(mode: DiscussionMode): number {
+  return mode === 'review' ? 0 : mode === 'discussion' ? 1 : 2;
+}
+
+function isLegacyRetryablePeerMessage(
+  message: Message,
+  discussion: Pick<Discussion, 'driver' | 'peer'>,
+): boolean {
+  const expectedReceiver = message.sender === discussion.driver ? discussion.peer : discussion.driver;
+  return (message.role === 'proposal' || message.role === 'response')
+    && message.sender !== message.receiver
+    && message.receiver === expectedReceiver;
 }
 
 function assertText(value: string, label: string): void {
