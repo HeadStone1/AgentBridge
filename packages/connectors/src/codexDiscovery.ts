@@ -144,7 +144,8 @@ function addPathCandidate(
 function deduplicate(candidates: CodexCommandCandidate[], caseInsensitive: boolean): CodexCommandCandidate[] {
   const seen = new Set<string>();
   return candidates.filter((candidate) => {
-    const key = caseInsensitive ? candidate.command.toLowerCase() : candidate.command;
+    const command = caseInsensitive ? candidate.command.toLowerCase() : candidate.command;
+    const key = JSON.stringify({ command, args: candidate.args ?? [], mode: candidate.mode });
     if (seen.has(key)) return false;
     seen.add(key);
     return true;

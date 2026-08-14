@@ -13,6 +13,12 @@ import type {
   DiscussionSignal,
   Message,
   MessageRole,
+  PermissionDecision,
+  PermissionRequest,
+  PermissionRequestStatus,
+  PeerPermissionRequestInput,
+  PeerRuntimeEvent,
+  PeerRuntimeState,
   SessionStatus,
   SessionPolicy,
   CollaborationSession,
@@ -56,6 +62,16 @@ export interface StoragePort {
     sessionId: string;
   }): void;
   getDiscussion(id: string): Discussion | null;
+  getPeerRuntime(discussionId: string): PeerRuntimeState | null;
+  upsertPeerRuntime(state: PeerRuntimeState): void;
+  appendPeerRuntimeEvent(event: Omit<PeerRuntimeEvent, 'id' | 'sequence' | 'timestamp'> & { timestamp?: string }): PeerRuntimeEvent;
+  getPeerRuntimeEvents(discussionId: string, afterSequence?: number, limit?: number): PeerRuntimeEvent[];
+  createPermissionRequest(request: PeerPermissionRequestInput): PermissionRequest;
+  getPermissionRequest(id: string): PermissionRequest | null;
+  listPermissionRequests(discussionId: string, statuses?: PermissionRequestStatus[]): PermissionRequest[];
+  resolvePermissionRequest(id: string, decision: PermissionDecision, resolvedBy?: PermissionRequest['resolvedBy']): PermissionRequest;
+  expirePermissionRequest(id: string): PermissionRequest;
+  recoverOrphanedDiscussions(isOwnerAlive: (ownerId: string) => boolean): Discussion[];
   updateDiscussionStatus(id: string, status: DiscussionStatus, extra?: Partial<Discussion>): void;
   updateDiscussionMode(id: string, mode: DiscussionMode): void;
   updateDiscussionDispatch(id: string, state: DispatchState | null, waitingFor?: AgentType | null): void;

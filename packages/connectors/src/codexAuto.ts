@@ -1,4 +1,4 @@
-import type { Message } from '@agentbridge/protocol';
+import type { Message, PeerActivity, PeerPermissionRequestInput, PermissionDecision } from '@agentbridge/protocol';
 import { isProviderError, ProviderError } from '@agentbridge/protocol';
 import type { AgentConnector, PeerResponse, ProviderSessionKind } from './index.js';
 import { CodexAppServerConnector } from './codexAppServer.js';
@@ -12,7 +12,9 @@ import {
 export interface CodexAutoConnectorOptions {
   mode?: CodexBackendMode;
   candidates?: CodexCommandCandidate[];
+  /** Legacy alias for the absolute provider hard limit. */
   timeoutMs?: number;
+  hardTimeoutMs?: number;
   startupTimeoutMs?: number;
   model?: string;
   sandbox?: CodexConnectorOptions['sandbox'];
@@ -66,10 +68,13 @@ export class CodexAutoConnector implements AgentConnector {
     projectPath: string;
     prompt: string;
     discussionId: string;
+    dispatchId?: string;
     previousMessages?: Message[];
     providerSessionId?: string;
     providerSessionKind?: ProviderSessionKind;
     signal?: AbortSignal;
+    onActivity?: (activity: PeerActivity) => void;
+    onPermissionRequest?: (request: PeerPermissionRequestInput) => Promise<PermissionDecision>;
   }): Promise<PeerResponse> {
     const selected = await this.selectBackend();
     if (!selected) {
@@ -154,6 +159,7 @@ export class CodexAutoConnector implements AgentConnector {
           command: candidate.command,
           serverArgs: [...(candidate.args ?? []), ...(this.options.appServerArgs ?? [])],
           timeoutMs: this.options.timeoutMs,
+          hardTimeoutMs: this.options.hardTimeoutMs,
           startupTimeoutMs: this.options.startupTimeoutMs,
           model: this.options.model,
         });
@@ -169,6 +175,7 @@ export class CodexAutoConnector implements AgentConnector {
         const connector = new CodexConnector({
           command: candidate.command,
           timeoutMs: this.options.timeoutMs,
+          hardTimeoutMs: this.options.hardTimeoutMs,
           model: this.options.model,
           sandbox: this.options.sandbox,
           extraArgs: [...(candidate.args ?? []), ...(this.options.cliExtraArgs ?? [])],

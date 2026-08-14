@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { StoragePort } from '@agentbridge/storage';
 import { AuditService } from '@agentbridge/audit';
-import type { AgentConnector, ProviderSessionKind } from '@agentbridge/connectors';
+import type { AgentConnector, PeerResponse, ProviderSessionKind } from '@agentbridge/connectors';
 import type {
   AgentType,
   Discussion,
@@ -16,6 +16,14 @@ import type {
   RetryDiscussionOutput,
   WaitDiscussionOutput,
   DiscussionOperationKind,
+  PermissionDecision,
+  PermissionRequest,
+  PeerPermissionRequestInput,
+  PeerActivity,
+  PeerRuntimeEvent,
+  PeerRuntimeState,
+  PeerRuntimePhase,
+  WatchDiscussionOutput,
 } from '@agentbridge/protocol';
 import {
   canRetry,
@@ -45,7 +53,14 @@ export {
 
 export interface CollaborationConfig {
   maxTurns?: number;
+  /** Legacy alias for idleTimeoutMs and the session-lease TTL. */
   timeoutMs?: number;
+  startupTimeoutMs?: number;
+  idleTimeoutMs?: number;
+  stallGraceMs?: number;
+  turnHardLimitMs?: number;
+  permissionTimeoutMs?: number;
+  terminationGraceMs?: number;
   maxDurationMs?: number;
   maxTotalMessageChars?: number;
   asyncDispatch?: boolean;
@@ -67,6 +82,12 @@ export class CollaborationService {
   private readonly maxTurns: number;
   private readonly maxTurnsWasConfigured: boolean;
   private readonly timeoutMs: number;
+  private readonly startupTimeoutMs: number;
+  private readonly idleTimeoutMs: number;
+  private readonly stallGraceMs: number;
+  private readonly turnHardLimitMs: number;
+  private readonly permissionTimeoutMs: number;
+  private readonly terminationGraceMs: number;
   private readonly maxDurationMs: number;
   private readonly maxTotalMessageChars: number;
   private readonly asyncDispatch: boolean;
@@ -88,7 +109,15 @@ export class CollaborationService {
     this.audit = audit;
     this.maxTurnsWasConfigured = config.maxTurns !== undefined;
     this.maxTurns = config.maxTurns ?? 12;
+    this.idleTimeoutMs = config.idleTimeoutMs ?? config.timeoutMs ?? 120_000;
+    // Keep lease renewal independent from the provider's output-idle budget.
+    // A short idle threshold must not make a healthy session lease expire.
     this.timeoutMs = config.timeoutMs ?? 120_000;
+    this.startupTimeoutMs = config.startupTimeoutMs ?? 30_000;
+    this.stallGraceMs = config.stallGraceMs ?? 180_000;
+    this.turnHardLimitMs = config.turnHardLimitMs ?? config.timeoutMs ?? 30 * 60 * 1_000;
+    this.permissionTimeoutMs = config.permissionTimeoutMs ?? 120_000;
+    this.terminationGraceMs = config.terminationGraceMs ?? 5_000;
     this.maxDurationMs = config.maxDurationMs ?? 30 * 60 * 1_000;
     this.maxTotalMessageChars = config.maxTotalMessageChars ?? 500_000;
     this.asyncDispatch = config.asyncDispatch ?? false;
@@ -101,6 +130,24 @@ export class CollaborationService {
     if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1_000 || this.timeoutMs > 600_000) {
       throw new Error('timeoutMs must be an integer between 1000 and 600000');
     }
+    if (!Number.isInteger(this.idleTimeoutMs) || this.idleTimeoutMs < 1_000 || this.idleTimeoutMs > 600_000) {
+      throw new Error('idleTimeoutMs must be an integer between 1000 and 600000');
+    }
+    if (!Number.isInteger(this.startupTimeoutMs) || this.startupTimeoutMs < 1_000 || this.startupTimeoutMs > 600_000) {
+      throw new Error('startupTimeoutMs must be an integer between 1000 and 600000');
+    }
+    if (!Number.isInteger(this.stallGraceMs) || this.stallGraceMs < 1_000 || this.stallGraceMs > 600_000) {
+      throw new Error('stallGraceMs must be an integer between 1000 and 600000');
+    }
+    if (!Number.isInteger(this.turnHardLimitMs) || this.turnHardLimitMs < 1_000 || this.turnHardLimitMs > 7 * 24 * 60 * 60 * 1_000) {
+      throw new Error('turnHardLimitMs must be an integer between 1000 and 604800000');
+    }
+    if (!Number.isInteger(this.permissionTimeoutMs) || this.permissionTimeoutMs < 1_000 || this.permissionTimeoutMs > 600_000) {
+      throw new Error('permissionTimeoutMs must be an integer between 1000 and 600000');
+    }
+    if (!Number.isInteger(this.terminationGraceMs) || this.terminationGraceMs < 1_000 || this.terminationGraceMs > 60_000) {
+      throw new Error('terminationGraceMs must be an integer between 1000 and 60000');
+    }
     if (!Number.isInteger(this.maxDurationMs) || this.maxDurationMs < 1_000 || this.maxDurationMs > 7 * 24 * 60 * 60 * 1_000) {
       throw new Error('maxDurationMs must be an integer between 1000 and 604800000');
     }
@@ -108,6 +155,7 @@ export class CollaborationService {
       throw new Error('maxTotalMessageChars must be an integer between 1000 and 10000000');
     }
     this.connectors = connectors;
+    this.storage.recoverOrphanedDiscussions(isOwnerProcessAlive);
   }
 
   async initiateDiscussion(params: {
@@ -341,1107 +389,4 @@ export class CollaborationService {
         ...(peerResponse ? { peerResponse } : {}),
       };
     } finally {
-      if (discussionLeaseOwned) this.storage.releaseDiscussionLease(params.discussionId, this.ownerId);
-    }
-  }
-
-  async getDiscussion(discussionId: string): Promise<GetDiscussionOutput> {
-    const discussion = this.storage.getDiscussion(discussionId);
-    if (!discussion) throw new Error(`Discussion ${discussionId} not found`);
-
-    return {
-      discussion,
-      messages: this.storage.getMessages(discussionId),
-      decision: this.storage.getDecisionByDiscussion(discussionId),
-      providerSessions: this.storage.listSessionsForDiscussion(discussionId).map((session) => ({
-        provider: session.provider,
-        sessionId: session.sessionId,
-        kind: typeof session.metadata.sessionKind === 'string' ? session.metadata.sessionKind : null,
-        status: session.status,
-        lastSeenAt: session.lastSeenAt,
-      })),
-    };
-  }
-
-  async waitForDiscussion(
-    discussionId: string,
-    timeoutMs = 30_000,
-    afterMessageId?: string,
-  ): Promise<WaitDiscussionOutput> {
-    if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 120_000) {
-      throw new Error('timeoutMs must be an integer between 1000 and 120000');
-    }
-    const deadline = Date.now() + timeoutMs;
-    const initialMessages = this.storage.getMessages(discussionId);
-    const wakeAfterMessageId = afterMessageId ?? initialMessages.at(-1)?.id;
-    while (true) {
-      const snapshot = await this.getDiscussion(discussionId);
-      const lastMessageId = snapshot.messages.at(-1)?.id ?? null;
-      const hasNewMessage = wakeAfterMessageId
-        ? this.storage.getMessages(discussionId, wakeAfterMessageId).length > 0
-        : false;
-      const settled = isTerminal(snapshot.discussion.status)
-        || isPaused(snapshot.discussion.status)
-        || (snapshot.discussion.dispatchState !== 'QUEUED' && snapshot.discussion.dispatchState !== 'RUNNING');
-      if (hasNewMessage || settled) return { ...snapshot, waitTimedOut: false, lastMessageId };
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) return { ...snapshot, waitTimedOut: true, lastMessageId };
-      await new Promise((resolve) => setTimeout(resolve, Math.min(200, remaining)));
-    }
-  }
-
-  async closeDiscussion(params: {
-    discussionId: string;
-    conclusion: string;
-    agent: AgentType;
-  }): Promise<CloseDiscussionOutput> {
-    assertText(params.conclusion, 'conclusion');
-    const discussion = this.storage.getDiscussion(params.discussionId);
-    if (!discussion) throw new Error(`Discussion ${params.discussionId} not found`);
-    if (isTerminal(discussion.status) || isPaused(discussion.status)) {
-      throw new Error(`Discussion ${params.discussionId} is already ${discussion.status}`);
-    }
-    if (![discussion.driver, discussion.peer].includes(params.agent)) {
-      throw new Error(`Agent ${params.agent} is not a participant in discussion ${params.discussionId}`);
-    }
-    this.ensureNoDispatchInFlight(params.discussionId);
-
-    const otherAgent = params.agent === discussion.driver ? discussion.peer : discussion.driver;
-    this.ensureProviderNotLeased(otherAgent, discussion.projectPath);
-    const existingConclusion = this.storage.getMessages(params.discussionId).some((message) => (
-      message.sender === params.agent
-      && message.receiver === otherAgent
-      && message.role === 'conclusion'
-      && message.content === params.conclusion
-    ));
-    this.ensureWithinBudget(discussion, existingConclusion ? '' : params.conclusion);
-
-    this.storage.acquireDiscussionLease({
-      discussionId: params.discussionId,
-      projectPath: discussion.projectPath,
-      ownerId: this.ownerId,
-      ttlMs: this.timeoutMs,
-    });
-    let discussionLeaseOwned = true;
-    try {
-    const agreement = this.storage.recordAgreement({
-      discussionId: params.discussionId,
-      agent: params.agent,
-      summary: params.conclusion,
-    });
-    this.audit.log({
-      traceId: discussion.traceId,
-      discussionId: params.discussionId,
-      action: `agreement.${params.agent}`,
-      agent: params.agent,
-      metadata: { decisionHash: agreement.decisionHash },
-    });
-
-    if (agreement.agreedBy.length >= 2) {
-      return this.completeDiscussion(discussion, params.conclusion, agreement.agreedBy);
-    }
-
-    if (!existingConclusion) {
-      this.storage.createMessage({
-        discussionId: params.discussionId,
-        sender: params.agent,
-        receiver: otherAgent,
-        role: 'conclusion',
-        content: params.conclusion,
-        projectPath: discussion.projectPath,
-      });
-    }
-
-    const messages = this.storage.getMessages(params.discussionId);
-    const agreementPrompt = buildAgreementPrompt(params.conclusion, agreement.decisionHash);
-    const conclusionMessageId = messages.find((message) => (
-      message.sender === params.agent
-      && message.receiver === otherAgent
-      && message.role === 'conclusion'
-      && message.content === params.conclusion
-    ))?.id ?? null;
-    this.queueDispatch(params.discussionId, otherAgent);
-    if (this.asyncDispatch) {
-      this.startBackgroundAgreementConfirmation(
-        discussion.id,
-        params.agent,
-        otherAgent,
-        params.conclusion,
-        agreement.decisionHash,
-        agreementPrompt,
-        messages,
-        conclusionMessageId,
-      );
-      discussionLeaseOwned = false;
-      return {
-        discussionId: params.discussionId,
-        status: 'DISCUSSING',
-        waitingFor: [otherAgent],
-        dispatchState: 'QUEUED',
-      };
-    }
-    let peerResponse: Message | undefined;
-    try {
-      peerResponse = await this.dispatchToAgent(
-        params.discussionId,
-        otherAgent,
-        agreementPrompt,
-        messages,
-        {
-          updateFailureStatus: false,
-          countRound: false,
-          discussionLeaseOwned: true,
-          applyDiscussionPolicy: false,
-          failedMessageId: conclusionMessageId,
-          operationKind: 'agreement_confirmation',
-        },
-      );
-    } catch (cause) {
-      this.audit.log({
-        traceId: discussion.traceId,
-        discussionId: params.discussionId,
-        action: 'agreement.notification_failed',
-        agent: otherAgent,
-        metadata: { error: cause instanceof Error ? cause.message : String(cause) },
-      });
-    }
-
-    if (!peerResponse) {
-      return {
-        discussionId: params.discussionId,
-        status: 'DISCUSSING',
-        waitingFor: [otherAgent],
-        dispatchState: 'FAILED',
-      };
-    }
-
-    const peerDecision = parseAgreementResponse(peerResponse.content, agreement.decisionHash);
-    if (!peerDecision.accepted) {
-      this.storage.updateDiscussionDispatch(params.discussionId, 'COMPLETED', params.agent);
-      this.audit.log({
-        traceId: discussion.traceId,
-        discussionId: params.discussionId,
-        action: 'agreement.rejected',
-        agent: otherAgent,
-        metadata: { reason: peerDecision.reason ?? 'invalid_or_rejected_response' },
-      });
-      return {
-        discussionId: params.discussionId,
-        status: 'DISCUSSING',
-        waitingFor: [params.agent],
-        peerAccepted: false,
-        dispatchState: 'COMPLETED',
-        peerResponse,
-      };
-    }
-
-    const peerAgreement = this.storage.recordAgreement({
-      discussionId: params.discussionId,
-      agent: otherAgent,
-      summary: params.conclusion,
-    });
-    this.audit.log({
-      traceId: discussion.traceId,
-      discussionId: params.discussionId,
-      action: `agreement.${otherAgent}`,
-      agent: otherAgent,
-      metadata: { decisionHash: peerAgreement.decisionHash, source: 'connector_confirmation' },
-    });
-    const completed = this.completeDiscussion(discussion, params.conclusion, peerAgreement.agreedBy);
-    return { ...completed, peerAccepted: true, peerResponse };
-    } finally {
-      if (discussionLeaseOwned) this.storage.releaseDiscussionLease(params.discussionId, this.ownerId);
-    }
-  }
-
-  async cancelDiscussion(params: {
-    discussionId: string;
-    agent: AgentType;
-  }): Promise<CancelDiscussionOutput> {
-    const discussion = this.storage.getDiscussion(params.discussionId);
-    if (!discussion) throw new Error(`Discussion ${params.discussionId} not found`);
-    if (isTerminal(discussion.status) && discussion.status !== 'NEEDS_USER_DECISION') {
-      throw new Error(`Discussion ${params.discussionId} is already ${discussion.status}`);
-    }
-    if (![discussion.driver, discussion.peer].includes(params.agent)) {
-      throw new Error(`Agent ${params.agent} is not a participant in discussion ${params.discussionId}`);
-    }
-
-    const active = this.inFlight.get(params.discussionId);
-    const remoteProviderActive = !active && [discussion.driver, discussion.peer].some((provider) => (
-      this.storage.hasSessionLease(provider, discussion.projectPath, discussion.id)
-    ));
-    this.cancellationRequests.add(params.discussionId);
-    this.audit.log({
-      traceId: discussion.traceId,
-      discussionId: discussion.id,
-      action: 'cancel.requested',
-      agent: params.agent,
-      metadata: { providerActive: Boolean(active) },
-    });
-    try {
-      active?.controller.abort();
-      const connectors = [this.connectors[discussion.driver], this.connectors[discussion.peer]];
-      const results = await Promise.allSettled(connectors.map((connector) => connector?.cancel?.(params.discussionId)));
-      const connectorFailures = results.filter((result) => result.status === 'rejected');
-      const providerSettled = !remoteProviderActive
-        && (!active || await waitForCompletion(active.done, Math.min(5_000, this.timeoutMs)));
-      if (connectorFailures.length > 0 || !providerSettled) {
-        const current = this.storage.getDiscussion(params.discussionId);
-        if (current && !isTerminal(current.status) && current.status !== 'NEEDS_USER_DECISION') {
-          this.storage.updateDiscussionStatus(params.discussionId, 'NEEDS_USER_DECISION');
-        }
-        this.storage.updateDiscussionDispatch(params.discussionId, 'FAILED', null);
-        this.audit.log({
-          traceId: discussion.traceId,
-          discussionId: discussion.id,
-          action: 'cancel.provider_unconfirmed',
-          agent: params.agent,
-          metadata: { connectorFailures: connectorFailures.length, providerSettled, remoteProviderActive },
-        });
-        throw new ProviderError('FAILED', 'Provider cancellation could not be confirmed');
-      }
-
-      this.storage.updateDiscussionStatus(params.discussionId, 'CANCELLED', {
-        endedAt: new Date().toISOString(),
-      });
-      this.storage.updateDiscussionDispatch(params.discussionId, null, null);
-      this.storage.releaseSessionLease(discussion.driver, discussion.projectPath, discussion.id);
-      this.storage.releaseSessionLease(discussion.peer, discussion.projectPath, discussion.id);
-      this.storage.releaseDiscussionLease(discussion.id, this.ownerId);
-      this.audit.log({
-        traceId: discussion.traceId,
-        discussionId: discussion.id,
-        action: 'cancel.provider_confirmed',
-        agent: params.agent,
-        metadata: {},
-      });
-      this.audit.log({
-        traceId: discussion.traceId,
-        discussionId: discussion.id,
-        action: 'discussion.cancelled',
-        agent: params.agent,
-        metadata: {},
-      });
-      this.archiveDiscussionSessions(discussion.id);
-      return { discussionId: discussion.id, status: 'CANCELLED' };
-    } finally {
-      this.cancellationRequests.delete(params.discussionId);
-    }
-  }
-
-  async shutdown(graceMs = 5_000): Promise<void> {
-    if (this.shuttingDown) return;
-    if (!Number.isInteger(graceMs) || graceMs < 0 || graceMs > 60_000) {
-      throw new Error('graceMs must be an integer between 0 and 60000');
-    }
-    this.shuttingDown = true;
-    const active = [...this.inFlight.entries()];
-    for (const [discussionId, operation] of active) {
-      this.cancellationRequests.add(discussionId);
-      operation.controller.abort();
-    }
-    await Promise.allSettled(
-      active.map(([discussionId]) => {
-        const discussion = this.storage.getDiscussion(discussionId);
-        if (!discussion) return Promise.resolve();
-        const connectors = [this.connectors[discussion.driver], this.connectors[discussion.peer]];
-        return Promise.allSettled(connectors.map((connector) => connector?.cancel?.(discussionId)));
-      }),
-    );
-    const settled = await Promise.all(active.map(async ([discussionId, operation]) => ({
-      discussionId,
-      done: await waitForCompletion(operation.done, graceMs),
-    })));
-    for (const item of settled) {
-      if (!item.done) continue;
-      const discussion = this.storage.getDiscussion(item.discussionId);
-      if (!discussion) continue;
-      this.storage.releaseSessionLease(discussion.driver, discussion.projectPath, item.discussionId);
-      this.storage.releaseSessionLease(discussion.peer, discussion.projectPath, item.discussionId);
-      this.storage.releaseDiscussionLease(item.discussionId, this.ownerId);
-    }
-    for (const [discussionId] of active) this.cancellationRequests.delete(discussionId);
-  }
-
-  async retryDiscussion(params: {
-    discussionId: string;
-    agent: AgentType;
-  }): Promise<RetryDiscussionOutput> {
-    const discussion = this.storage.getDiscussion(params.discussionId);
-    if (!discussion) throw new Error(`Discussion ${params.discussionId} not found`);
-    if (![discussion.driver, discussion.peer].includes(params.agent)) {
-      throw new Error(`Agent ${params.agent} is not a participant in discussion ${params.discussionId}`);
-    }
-    if (!canRetry(discussion.status)) {
-      throw new Error(`Discussion ${params.discussionId} cannot be retried from ${discussion.status}`);
-    }
-    this.ensureNoDispatchInFlight(params.discussionId);
-    if (discussion.retryCount >= discussion.maxRetries) {
-      throw new Error(`Discussion ${params.discussionId} exhausted its maxRetries budget`);
-    }
-    if (discussion.roundCount >= discussion.maxTurns) {
-      throw new Error(`Discussion ${params.discussionId} exhausted its maxTurns budget`);
-    }
-
-    if (discussion.stopReason === 'PEER_REQUESTED_USER_DECISION') {
-      throw new Error(
-        `Discussion ${params.discussionId} requires an explicit reply_peer decision; retry_discussion cannot replay a peer decision request`,
-      );
-    }
-    if (discussion.stopReason === 'MAX_DURATION'
-      || discussion.stopReason === 'MESSAGE_BUDGET'
-      || discussion.stopReason === 'MAX_TURNS') {
-      throw new Error(`Discussion ${params.discussionId} cannot retry after ${discussion.stopReason}`);
-    }
-    if (discussion.lastError && (!discussion.lastError.retryable || discussion.lastError.ambiguous)) {
-      throw new Error(
-        `Discussion ${params.discussionId} cannot retry provider result (retryable=${discussion.lastError.retryable}, ambiguous=${discussion.lastError.ambiguous})`,
-      );
-    }
-
-    const messages = this.storage.getMessages(params.discussionId);
-    let failedMessageId = discussion.failedMessageId;
-    let failedReceiver = discussion.failedDispatchReceiver;
-    let failedMessage = failedMessageId
-      ? messages.find((message) => message.id === failedMessageId)
-      : undefined;
-    const hasFailureMetadata = Boolean(
-      failedMessageId || failedReceiver || discussion.failedOperationKind,
-    );
-    if (hasFailureMetadata) {
-      if (!failedMessageId || !failedReceiver || discussion.failedOperationKind !== 'peer_message') {
-        throw new Error(`Discussion ${params.discussionId} has no retryable failed peer dispatch`);
-      }
-      if (!failedMessage || failedMessage.receiver !== failedReceiver) {
-        throw new Error(`Discussion ${params.discussionId} has inconsistent failed dispatch metadata`);
-      }
-    } else {
-      // Rows created before failed-dispatch metadata was introduced have no
-      // pointer to replay. Infer only an unmistakable peer request; all
-      // reason-aware retry guards above still apply.
-      const legacyMessage = messages.at(-1);
-      if (!legacyMessage || !isLegacyRetryablePeerMessage(legacyMessage, discussion)) {
-        throw new Error(`Discussion ${params.discussionId} has no retryable failed peer dispatch`);
-      }
-      failedMessage = legacyMessage;
-      failedMessageId = legacyMessage.id;
-      failedReceiver = legacyMessage.receiver;
-    }
-    if (!failedMessage || !failedMessageId || !failedReceiver) {
-      throw new Error(`Discussion ${params.discussionId} has inconsistent failed dispatch metadata`);
-    }
-    this.ensureProviderNotLeased(failedReceiver, discussion.projectPath);
-    this.storage.acquireDiscussionLease({
-      discussionId: params.discussionId,
-      projectPath: discussion.projectPath,
-      ownerId: this.ownerId,
-      ttlMs: this.timeoutMs,
-    });
-    let discussionLeaseOwned = true;
-    try {
-
-    if (discussion.status === 'FAILED') {
-      this.storage.updateDiscussionStatus(params.discussionId, 'CREATED');
-    }
-    this.storage.updateDiscussionStatus(params.discussionId, 'DISCUSSING');
-    this.queueDispatch(params.discussionId, failedReceiver);
-    this.audit.log({
-      traceId: discussion.traceId,
-      discussionId: discussion.id,
-      action: 'discussion.retry_requested',
-      agent: params.agent,
-      metadata: { retryCount: discussion.retryCount, maxRetries: discussion.maxRetries },
-    });
-    const previousMessages = messages.filter((message) => message.id !== failedMessageId);
-    if (this.asyncDispatch) {
-      this.startBackgroundDispatch(
-        params.discussionId,
-        failedReceiver,
-        failedMessage.content,
-        previousMessages,
-        {
-          discussionLeaseOwned: true,
-          failedMessageId,
-          operationKind: 'peer_message',
-        },
-      );
-      discussionLeaseOwned = false;
-      return {
-        discussionId: params.discussionId,
-        status: 'DISCUSSING',
-        retryCount: discussion.retryCount,
-        dispatchState: 'QUEUED',
-      };
-    }
-    const peerResponse = await this.dispatchToAgent(
-      params.discussionId,
-      failedReceiver,
-      failedMessage.content,
-      previousMessages,
-      {
-        discussionLeaseOwned: true,
-        failedMessageId,
-        operationKind: 'peer_message',
-      },
-    );
-    const current = this.storage.getDiscussion(params.discussionId);
-    return {
-      discussionId: discussion.id,
-      status: current?.status === 'NEEDS_USER_DECISION' ? 'NEEDS_USER_DECISION' : 'DISCUSSING',
-      retryCount: discussion.retryCount,
-      dispatchState: peerResponse ? 'COMPLETED' : 'FAILED',
-      ...(peerResponse ? { peerResponse } : {}),
-    };
-    } finally {
-      if (discussionLeaseOwned) this.storage.releaseDiscussionLease(params.discussionId, this.ownerId);
-    }
-  }
-
-  private async dispatchToAgent(
-    discussionId: string,
-    receiver: AgentType,
-    prompt: string,
-    previousMessages: Message[],
-    options: {
-      updateFailureStatus?: boolean;
-      countRound?: boolean;
-      discussionLeaseOwned?: boolean;
-      applyDiscussionPolicy?: boolean;
-      failedMessageId?: string | null;
-      operationKind?: DiscussionOperationKind;
-    } = {},
-  ): Promise<Message | undefined> {
-    const connector = this.connectors[receiver];
-    const discussion = this.storage.getDiscussion(discussionId);
-    if (!discussion) throw new Error(`Discussion ${discussionId} not found`);
-    if (this.shuttingDown) {
-      this.storage.updateDiscussionDispatch(discussionId, 'FAILED', null);
-      if (options.discussionLeaseOwned) this.storage.releaseDiscussionLease(discussionId, this.ownerId);
-      throw new ProviderError('CANCELLED', 'Collaboration service is shutting down');
-    }
-    if (this.inFlight.has(discussionId)) {
-      throw new ProviderError('BUSY', `Discussion ${discussionId} already has a provider request in flight`);
-    }
-    const controller = new AbortController();
-    let resolveDone!: () => void;
-    const operation: InFlightOperation = {
-      controller,
-      done: new Promise<void>((resolve) => { resolveDone = resolve; }),
-      resolveDone: () => resolveDone(),
-    };
-    let leaseAcquired = false;
-    let discussionLeaseAcquired = options.discussionLeaseOwned === true;
-    let leaseHeartbeat: ReturnType<typeof setInterval> | undefined;
-    let trackedSession: { sessionId: string; metadata: Record<string, unknown> } | undefined;
-    this.inFlight.set(discussionId, operation);
-    try {
-      if (!discussionLeaseAcquired) {
-        this.storage.acquireDiscussionLease({
-          discussionId,
-          projectPath: discussion.projectPath,
-          ownerId: this.ownerId,
-          ttlMs: this.timeoutMs,
-        });
-        discussionLeaseAcquired = true;
-      }
-      this.storage.updateDiscussionDispatch(discussionId, 'RUNNING', receiver);
-      if (!connector) {
-        this.storage.updateDiscussionDispatch(discussionId, 'FAILED', null);
-        this.storage.updateDiscussionDiagnostic(discussionId, 'PROVIDER_ERROR', {
-          code: 'UNAVAILABLE',
-          message: `${receiver} connector is not configured`,
-          backend: receiver,
-          retryable: true,
-          ambiguous: false,
-          at: new Date().toISOString(),
-        });
-        this.storage.updateDiscussionFailure(discussionId, {
-          receiver,
-          messageId: options.failedMessageId ?? null,
-          operationKind: options.operationKind ?? null,
-        });
-        return undefined;
-      }
-      if (!(await connector.isAvailable())) {
-        throw new ProviderError('UNAVAILABLE', `${receiver} connector is not available`);
-      }
-      if (await connector.isBusy()) {
-        throw new ProviderError('BUSY', `${receiver} session is busy`);
-      }
-      this.storage.acquireSessionLease({
-        provider: receiver,
-        projectPath: discussion.projectPath,
-        ownerId: discussionId,
-        ttlMs: this.timeoutMs,
-      });
-      leaseAcquired = true;
-      leaseHeartbeat = setInterval(() => {
-        try {
-          if (!this.storage.renewSessionLease(receiver, discussion.projectPath, discussionId, this.timeoutMs)) {
-            controller.abort();
-          }
-          if (!this.storage.renewDiscussionLease(discussionId, this.ownerId, this.timeoutMs)) {
-            controller.abort();
-          }
-        } catch {
-          controller.abort();
-        }
-      }, Math.max(1_000, Math.floor(this.timeoutMs / 3)));
-      leaseHeartbeat.unref?.();
-
-      const collaborationSession = discussion.collaborationSessionId
-        ? this.storage.getCollaborationSession(discussion.collaborationSessionId)
-        : null;
-      const persistedSession = collaborationSession
-        ? this.storage.getSessionForCollaboration(receiver, collaborationSession.id, discussion.projectPath)
-        : !collaborationSession
-          ? this.storage.getSessionForDiscussion(receiver, discussionId, discussion.projectPath)
-          : null;
-      if (persistedSession) {
-        trackedSession = { sessionId: persistedSession.sessionId, metadata: persistedSession.metadata };
-        this.storage.updateSessionStatus(receiver, persistedSession.sessionId, 'BRIDGE_OWNED', {
-          ...persistedSession.metadata,
-          bridgeOwned: true,
-          discussionId,
-          ...(collaborationSession ? { collaborationSessionId: collaborationSession.id } : {}),
-        });
-      }
-    const providerSessionKind = readProviderSessionKind(persistedSession?.metadata.sessionKind);
-      const completedResponses = discussion.roundCount;
-      const effectivePrompt = options.applyDiscussionPolicy === false
-        ? prompt
-        : buildDiscussionPrompt({
-            mode: discussion.mode,
-            completedResponses,
-            maxTurns: discussion.maxTurns,
-            prompt,
-          });
-      const response = await withTimeout(
-        connector.sendAndWait({
-          projectPath: discussion.projectPath,
-          prompt: effectivePrompt,
-          discussionId,
-          previousMessages,
-          providerSessionId: persistedSession?.sessionId,
-          providerSessionKind,
-          signal: controller.signal,
-        }),
-        this.timeoutMs,
-        () => controller.abort(),
-      );
-
-      if (controller.signal.aborted) {
-        throw new ProviderError('CANCELLED', `Peer ${receiver} request was cancelled`);
-      }
-
-      this.ensureWithinBudget(discussion, response.content);
-
-      if (response.availability) {
-        this.audit.log({
-          traceId: discussion.traceId,
-          discussionId,
-          action: 'peer.availability',
-          agent: receiver,
-          metadata: { availability: response.availability },
-        });
-      }
-
-      const providerSessionId = response.providerSessionId;
-      if (providerSessionId) {
-        this.storage.registerSession({
-          provider: receiver,
-          sessionId: providerSessionId,
-          projectPath: discussion.projectPath,
-          status: 'IDLE',
-          metadata: {
-            discussionId,
-            bridgeOwned: true,
-            availability: response.availability ?? 'BACKGROUND',
-            sessionKind: response.providerSessionKind,
-            ...(collaborationSession ? { collaborationSessionId: collaborationSession.id } : {}),
-          },
-        });
-        if (collaborationSession) {
-          this.storage.bindProviderSession({
-            collaborationSessionId: collaborationSession.id,
-            provider: receiver,
-            sessionId: providerSessionId,
-          });
-        }
-      }
-
-      const message = this.storage.createMessage({
-        discussionId,
-        sender: receiver,
-        receiver: receiver === discussion.driver ? discussion.peer : discussion.driver,
-        role: 'response',
-        content: response.content,
-        projectPath: discussion.projectPath,
-        providerSessionId,
-      });
-      if (options.countRound !== false) this.storage.incrementDiscussionRound(discussionId);
-      if (response.backendSwitched) {
-        this.audit.log({
-          traceId: discussion.traceId,
-          discussionId,
-          action: 'peer.backend_switched',
-          agent: receiver,
-          metadata: response.backendSwitched,
-        });
-      }
-      if (trackedSession) {
-        const sameSession = providerSessionId === trackedSession.sessionId
-          && (!response.providerSessionKind || response.providerSessionKind === providerSessionKind);
-        if (!providerSessionId) {
-          this.storage.updateSessionStatus(receiver, trackedSession.sessionId, 'IDLE', trackedSession.metadata);
-        } else if (!sameSession) {
-          this.storage.updateSessionStatus(receiver, trackedSession.sessionId, 'UNKNOWN', {
-            ...trackedSession.metadata,
-            supersededBy: providerSessionId,
-          });
-        }
-      }
-      const signal = options.applyDiscussionPolicy === false ? null : parseDiscussionSignal(response.content);
-      if (options.applyDiscussionPolicy !== false) {
-        this.storage.updateDiscussionSignal(discussionId, signal);
-      }
-      const currentAfterResponse = this.storage.getDiscussion(discussionId);
-      if (currentAfterResponse?.status === 'PEER_BUSY') {
-        this.storage.updateDiscussionStatus(discussionId, 'DISCUSSING');
-      }
-      if (signal === 'NEEDS_USER_DECISION') {
-        const current = this.storage.getDiscussion(discussionId);
-        if (current?.status === 'DISCUSSING') {
-          this.storage.updateDiscussionStatus(discussionId, 'NEEDS_USER_DECISION');
-          this.storage.updateDiscussionDiagnostic(discussionId, 'PEER_REQUESTED_USER_DECISION');
-        }
-      }
-      this.storage.updateDiscussionDispatch(discussionId, 'COMPLETED', null);
-      this.storage.updateDiscussionFailure(discussionId, {
-        receiver: null,
-        messageId: null,
-        operationKind: null,
-      });
-      this.audit.log({
-        traceId: discussion.traceId,
-        discussionId,
-        action: 'peer.response',
-        agent: receiver,
-        metadata: {
-          messageId: message.id,
-          duration: response.duration,
-          mode: discussion.mode,
-          phase: discussionPhase(discussion.mode, completedResponses),
-          signal,
-        },
-      });
-      return message;
-    } catch (cause) {
-      try {
-        const beforeFailure = this.storage.getDiscussion(discussionId);
-        this.storage.updateDiscussionDispatch(discussionId, 'FAILED', null);
-        if (beforeFailure?.status === 'DISCUSSING') {
-          this.storage.updateDiscussionDiagnostic(
-            discussionId,
-            'PROVIDER_ERROR',
-            diagnosticFromError(cause, receiver, trackedSession?.metadata.sessionKind),
-          );
-        }
-        this.storage.updateDiscussionFailure(discussionId, {
-          receiver,
-          messageId: options.failedMessageId ?? null,
-          operationKind: options.operationKind ?? null,
-        });
-      } catch {
-        // Preserve the provider error if persistence is unavailable during failure handling.
-      }
-      this.audit.log({
-        traceId: discussion.traceId,
-        discussionId,
-        action: 'error',
-        agent: receiver,
-        metadata: { error: cause instanceof Error ? cause.message : String(cause) },
-      });
-      const current = this.storage.getDiscussion(discussionId);
-      if (trackedSession) {
-        try {
-          this.storage.updateSessionStatus(receiver, trackedSession.sessionId, 'UNKNOWN', {
-            ...trackedSession.metadata,
-            lastError: cause instanceof Error ? cause.message : String(cause),
-          });
-        } catch {
-          // The provider may have removed the session while the request failed.
-        }
-      }
-      if (options.updateFailureStatus !== false && current && current.status === 'DISCUSSING') {
-        const nextStatus = controller.signal.aborted && this.cancellationRequests.has(discussionId)
-          ? 'CANCELLED'
-          : classifyFailure(cause);
-        if (nextStatus === 'PEER_BUSY') {
-          this.audit.log({
-            traceId: discussion.traceId,
-            discussionId,
-            action: 'session.busy',
-            agent: receiver,
-            metadata: { error: cause instanceof Error ? cause.message : String(cause) },
-          });
-        }
-        if (nextStatus === 'CANCELLED' && this.cancellationRequests.has(discussionId)) {
-          // cancelDiscussion waits for this operation and owns the final state.
-        } else if (nextStatus === 'FAILED') {
-          this.storage.incrementRetry(discussionId);
-        } else {
-          this.storage.updateDiscussionStatus(discussionId, nextStatus);
-        }
-      }
-      throw cause;
-    } finally {
-      if (leaseHeartbeat) clearInterval(leaseHeartbeat);
-      if (leaseAcquired) this.storage.releaseSessionLease(receiver, discussion.projectPath, discussionId);
-      if (discussionLeaseAcquired) this.storage.releaseDiscussionLease(discussionId, this.ownerId);
-      operation.resolveDone();
-      if (this.inFlight.get(discussionId) === operation) this.inFlight.delete(discussionId);
-    }
-  }
-
-  private ensureNoDispatchInFlight(discussionId: string): void {
-    if (this.inFlight.has(discussionId)) {
-      throw new ProviderError('BUSY', `Discussion ${discussionId} already has a provider request in flight`);
-    }
-  }
-
-  private ensureProviderNotLeased(provider: AgentType, projectPath: string): void {
-    if (this.storage.hasSessionLease(provider, projectPath)) {
-      throw new SessionBusyError(`Session for ${provider} is already leased for project ${projectPath}`);
-    }
-  }
-
-  private startBackgroundDispatch(
-    discussionId: string,
-    receiver: AgentType,
-    prompt: string,
-    previousMessages: Message[],
-    options: {
-      updateFailureStatus?: boolean;
-      countRound?: boolean;
-      discussionLeaseOwned?: boolean;
-      applyDiscussionPolicy?: boolean;
-      failedMessageId?: string | null;
-      operationKind?: DiscussionOperationKind;
-    } = {},
-  ): void {
-    void this.dispatchToAgent(discussionId, receiver, prompt, previousMessages, options).catch(() => {
-      // dispatchToAgent persists and audits the failure; the caller already
-      // received an accepted asynchronous request.
-    });
-  }
-
-  private queueDispatch(discussionId: string, receiver: AgentType): void {
-    this.storage.updateDiscussionDiagnostic(discussionId, null, null);
-    this.storage.updateDiscussionDispatch(discussionId, 'QUEUED', receiver);
-  }
-
-  private startBackgroundAgreementConfirmation(
-    discussionId: string,
-    agent: AgentType,
-    otherAgent: AgentType,
-    conclusion: string,
-    decisionHash: string,
-    prompt: string,
-    previousMessages: Message[],
-    failedMessageId: string | null,
-  ): void {
-    void this.dispatchToAgent(
-      discussionId,
-      otherAgent,
-      prompt,
-      previousMessages,
-      {
-        updateFailureStatus: false,
-        countRound: false,
-        discussionLeaseOwned: true,
-        applyDiscussionPolicy: false,
-        failedMessageId,
-        operationKind: 'agreement_confirmation',
-      },
-    ).then((peerResponse) => {
-      if (!peerResponse) return;
-      const decision = parseAgreementResponse(peerResponse.content, decisionHash);
-      const discussion = this.storage.getDiscussion(discussionId);
-      if (!discussion || isTerminal(discussion.status) || isPaused(discussion.status)) return;
-      if (!decision.accepted) {
-        this.storage.updateDiscussionDispatch(discussionId, 'COMPLETED', agent);
-        this.audit.log({
-          traceId: discussion.traceId,
-          discussionId,
-          action: 'agreement.rejected',
-          agent: otherAgent,
-          metadata: { reason: decision.reason ?? 'invalid_or_rejected_response' },
-        });
-        return;
-      }
-      const peerAgreement = this.storage.recordAgreement({
-        discussionId,
-        agent: otherAgent,
-        summary: conclusion,
-      });
-      this.audit.log({
-        traceId: discussion.traceId,
-        discussionId,
-        action: `agreement.${otherAgent}`,
-        agent: otherAgent,
-        metadata: { decisionHash: peerAgreement.decisionHash, source: 'connector_confirmation' },
-      });
-      this.completeDiscussion(discussion, conclusion, peerAgreement.agreedBy);
-    }).catch((cause) => {
-      const discussion = this.storage.getDiscussion(discussionId);
-      this.audit.log({
-        traceId: discussion?.traceId ?? `tr_${discussionId}`,
-        discussionId,
-        action: 'agreement.notification_failed',
-        agent: agent === otherAgent ? discussion?.driver ?? otherAgent : otherAgent,
-        metadata: { error: cause instanceof Error ? cause.message : String(cause) },
-      });
-    });
-  }
-
-  private ensureWithinBudget(discussion: {
-    id: string;
-    createdAt: string;
-    status: string;
-  }, extraContent = ''): void {
-    const elapsed = Date.now() - Date.parse(discussion.createdAt);
-    if (elapsed > this.maxDurationMs) {
-      this.storage.updateDiscussionStatus(discussion.id, 'TIMEOUT', { endedAt: new Date().toISOString() });
-      this.storage.updateDiscussionDiagnostic(discussion.id, 'MAX_DURATION');
-      this.audit.log({
-        traceId: this.storage.getDiscussion(discussion.id)?.traceId ?? `tr_${discussion.id}`,
-        discussionId: discussion.id,
-        action: 'discussion.timeout',
-        agent: 'system',
-        metadata: { reason: 'max_duration', maxDurationMs: this.maxDurationMs },
-      });
-      throw new Error(`Discussion ${discussion.id} exceeded max duration`);
-    }
-    const currentLength = this.storage.getMessages(discussion.id)
-      .reduce((total, message) => total + message.content.length, 0);
-    if (currentLength + extraContent.length > this.maxTotalMessageChars) {
-      this.storage.updateDiscussionStatus(discussion.id, 'TIMEOUT', { endedAt: new Date().toISOString() });
-      this.storage.updateDiscussionDiagnostic(discussion.id, 'MESSAGE_BUDGET');
-      this.audit.log({
-        traceId: this.storage.getDiscussion(discussion.id)?.traceId ?? `tr_${discussion.id}`,
-        discussionId: discussion.id,
-        action: 'discussion.timeout',
-        agent: 'system',
-        metadata: { reason: 'max_total_message_chars', maxTotalMessageChars: this.maxTotalMessageChars },
-      });
-      throw new Error(`Discussion ${discussion.id} exceeded message budget`);
-    }
-  }
-
-  private completeDiscussion(
-    discussion: { id: string; status: string; traceId: string },
-    conclusion: string,
-    agreedBy: AgentType[],
-  ): CloseDiscussionOutput {
-    if (discussion.status !== 'AGREED') {
-      this.storage.updateDiscussionStatus(discussion.id, 'AGREED');
-    }
-    const decision = this.storage.getDecisionByDiscussion(discussion.id) ?? this.storage.createDecision({
-      discussionId: discussion.id,
-      summary: conclusion,
-      changes: [],
-      agreedBy,
-    });
-    this.audit.log({
-      traceId: discussion.traceId,
-      discussionId: discussion.id,
-      action: 'decision.created',
-      agent: 'system',
-      metadata: { decisionId: decision.id, decisionHash: decision.decisionHash },
-    });
-    this.storage.updateDiscussionStatus(discussion.id, 'COMPLETED', {
-      conclusion,
-      endedAt: new Date().toISOString(),
-    });
-    this.storage.updateDiscussionDispatch(discussion.id, null, null);
-    this.storage.releaseSessionLease('claude', this.storage.getDiscussion(discussion.id)!.projectPath, discussion.id);
-    this.storage.releaseSessionLease('codex', this.storage.getDiscussion(discussion.id)!.projectPath, discussion.id);
-    this.audit.log({
-      traceId: discussion.traceId,
-      discussionId: discussion.id,
-      action: 'discussion.closed',
-      agent: 'system',
-      metadata: { decisionId: decision.id },
-    });
-    this.archiveDiscussionSessions(discussion.id);
-    return { discussionId: discussion.id, status: 'COMPLETED', decisionId: decision.id };
-  }
-
-  private archiveDiscussionSessions(discussionId: string): void {
-    if (!this.archiveSessionsOnClose) return;
-    const discussion = this.storage.getDiscussion(discussionId);
-    const collaborationSession = discussion?.collaborationSessionId
-      ? this.storage.getCollaborationSession(discussion.collaborationSessionId)
-      : null;
-    if (collaborationSession && collaborationSession.policy !== 'fresh') {
-      this.audit.log({
-        traceId: discussion?.traceId ?? `tr_${discussionId}`,
-        discussionId,
-        action: 'session.archive_shared_skipped',
-        agent: 'system',
-        metadata: { collaborationSessionId: collaborationSession.id, policy: collaborationSession.policy },
-      });
-      return;
-    }
-    for (const session of this.storage.listSessionsForDiscussion(discussionId)) {
-      const connector = this.connectors[session.provider];
-      const kind = readProviderSessionKind(session.metadata.sessionKind);
-      void Promise.resolve(connector?.archiveSession?.(session.sessionId, kind) ?? false)
-        .then((archived) => {
-          if (archived) this.storage.updateSessionStatus(session.provider, session.sessionId, 'ARCHIVED', session.metadata);
-          this.audit.log({
-            traceId: this.storage.getDiscussion(discussionId)?.traceId ?? `tr_${discussionId}`,
-            discussionId,
-            action: archived ? 'session.archived' : 'session.archive_unsupported',
-            agent: session.provider,
-            metadata: { sessionId: session.sessionId, sessionKind: kind ?? null },
-          });
-        })
-        .catch((cause) => this.audit.log({
-          traceId: this.storage.getDiscussion(discussionId)?.traceId ?? `tr_${discussionId}`,
-          discussionId,
-          action: 'session.archive_failed',
-          agent: session.provider,
-          metadata: { sessionId: session.sessionId, error: redactDiagnostic(cause instanceof Error ? cause.message : String(cause)) },
-        }));
-    }
-  }
-}
-
-function buildAgreementPrompt(conclusion: string, decisionHash: string): string {
-  return [
-    'AgentBridge agreement confirmation request.',
-    'Review the canonical conclusion below against the discussion context.',
-    'Do not call AgentBridge tools. Return exactly one JSON object and no markdown.',
-    `Use {"agentbridgeDecision":"accept","decisionHash":"${decisionHash}"} only if you accept it unchanged.`,
-    `Otherwise use {"agentbridgeDecision":"reject","decisionHash":"${decisionHash}","reason":"brief reason"}.`,
-    'Canonical conclusion:',
-    conclusion,
-  ].join('\n\n');
-}
-
-function parseAgreementResponse(
-  content: string,
-  expectedHash: string,
-): { accepted: boolean; reason?: string } {
-  const start = content.indexOf('{');
-  const end = content.lastIndexOf('}');
-  if (start < 0 || end <= start) return { accepted: false, reason: 'missing_json_confirmation' };
-  try {
-    const value = JSON.parse(content.slice(start, end + 1)) as Record<string, unknown>;
-    if (value.decisionHash !== expectedHash) return { accepted: false, reason: 'decision_hash_mismatch' };
-    if (value.agentbridgeDecision === 'accept') return { accepted: true };
-    return {
-      accepted: false,
-      reason: typeof value.reason === 'string' ? value.reason : 'peer_rejected',
-    };
-  } catch {
-    return { accepted: false, reason: 'invalid_json_confirmation' };
-  }
-}
-
-function readProviderSessionKind(value: unknown): ProviderSessionKind | undefined {
-  return value === 'claude-cli' || value === 'codex-cli' || value === 'codex-app-server'
-    ? value
-    : undefined;
-}
-
-function assertParticipants(driver: AgentType, peer: AgentType): void {
-  if (driver === peer) throw new Error('Discussion driver and peer must be different agents');
-}
-
-function discussionModeRank(mode: DiscussionMode): number {
-  return mode === 'review' ? 0 : mode === 'discussion' ? 1 : 2;
-}
-
-function isLegacyRetryablePeerMessage(
-  message: Message,
-  discussion: Pick<Discussion, 'driver' | 'peer'>,
-): boolean {
-  const expectedReceiver = message.sender === discussion.driver ? discussion.peer : discussion.driver;
-  return (message.role === 'proposal' || message.role === 'response')
-    && message.sender !== message.receiver
-    && message.receiver === expectedReceiver;
-}
-
-function assertText(value: string, label: string): void {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new Error(`${label} must be a non-empty string`);
-  }
-}
-
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, onTimeout?: () => void): Promise<T> {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => {
-          onTimeout?.();
-          reject(new ProviderError('TIMEOUT', `Peer connector timed out after ${timeoutMs}ms`));
-        }, timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-function classifyFailure(cause: unknown): 'FAILED' | 'PEER_BUSY' | 'TIMEOUT' | 'CANCELLED' | 'NEEDS_USER_DECISION' {
-  if (cause instanceof SessionBusyError) return 'PEER_BUSY';
-  if (isProviderError(cause)) {
-    if (cause.ambiguous) return 'NEEDS_USER_DECISION';
-    if (cause.code === 'BUSY' || cause.code === 'UNAVAILABLE') return 'PEER_BUSY';
-    if (cause.code === 'TIMEOUT') return 'TIMEOUT';
-    if (cause.code === 'CANCELLED') return 'CANCELLED';
-  }
-  const message = cause instanceof Error ? cause.message.toLowerCase() : String(cause).toLowerCase();
-  if (message.includes('busy') || message.includes('not available')) return 'PEER_BUSY';
-  if (message.includes('timed out') || message.includes('timeout') || message.includes('duration')) return 'TIMEOUT';
-  return 'FAILED';
-}
-
-function diagnosticFromError(cause: unknown, receiver: AgentType, backend: unknown) {
-  const message = redactDiagnostic(cause instanceof Error ? cause.message : String(cause));
-  return {
-    code: isProviderError(cause) ? cause.code : 'FAILED',
-    message,
-    backend: isProviderError(cause) && cause.backend
-      ? cause.backend
-      : typeof backend === 'string' ? backend : receiver,
-    retryable: isProviderError(cause) ? cause.retryable : true,
-    ambiguous: isProviderError(cause) ? cause.ambiguous : false,
-    at: new Date().toISOString(),
-  };
-}
-
-function redactDiagnostic(value: string): string {
-  return value
-    .replace(/(token|password|api[_ -]?key)\s*[:=]\s*[^\s;]+/gi, '$1=[REDACTED]')
-    .slice(0, 4_096);
-}
-
-async function waitForCompletion(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      promise.then(() => true),
-      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
+      if (discussionLeaseOwned) this.storage.releaseDiscussionLease(paramsÛ5¶‰žËkºwµç@ÍÕµµ…ÉäèÁ…É…µÌ¹½¹±ÕÍ¥½¸°(€€€ô¤ì(€€€Ñ¡¥Ì¹…Õ‘¥Ð¹±½œ¡ì(€€€€€ÑÉ…•%è‘¥ÍÕÍÍ¥½¸¹ÑÉ…•%°(€€€€€‘¥ÍÕÍÍ¥½¹%èÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°(€€€€€…Ñ¥½¸è…É••µ•¹Ð¸‘íÁ…É…µÌ¹…•¹Ñõ€°(€€€€€…•¹ÐèÁ…É…µÌ¹…•¹Ð°(€€€€€µ•Ñ…‘…Ñ„èì‘•¥Í¥½¹!…Í è…É••µ•¹Ð¹‘•¥Í¥½¹!…Í ô°(€€€ô¤ì((€€€¥˜€¡…É••µ•¹Ð¹…É••‘	ä¹±•¹Ñ €øô€È¤ì(€€€€€É•ÑÕÉ¸Ñ¡¥Ì¹½µÁ±•Ñ•¥ÍÕÍÍ¥½¸¡‘¥ÍÕÍÍ¥½¸°Á…É…µÌ¹½¹±ÕÍ¥½¸°…É••µ•¹Ð¹…É••‘	ä¤ì(€€€ô((€€€¥˜€ …•á¥ÍÑ¥¹½¹±ÕÍ¥½¸¤ì(€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹É•…Ñ•5•ÍÍ…”¡ì(€€€€€€€‘¥ÍÕÍÍ¥½¹%èÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°(€€€€€€€Í•¹‘•ÈèÁ…É…µÌ¹…•¹Ð°(€€€€€€€É••¥Ù•Èè½Ñ¡•É•¹Ð°(€€€€€€€É½±”è€½¹±ÕÍ¥½¸œ°(€€€€€€€½¹Ñ•¹ÐèÁ…É…µÌ¹½¹±ÕÍ¥½¸°(€€€€€€€ÁÉ½©•ÑA…Ñ è‘¥ÍÕÍÍ¥½¸¹ÁÉ½©•ÑA…Ñ °(€€€€€ô¤ì(€€€ô((€€€½¹ÍÐµ•ÍÍ…•Ì€ôÑ¡¥Ì¹ÍÑ½É…”¹•Ñ5•ÍÍ…•Ì¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%¤ì(€€€½¹ÍÐ…É••µ•¹ÑAÉ½µÁÐ€ô‰Õ¥±‘É••µ•¹ÑAÉ½µÁÐ¡Á…É…µÌ¹½¹±ÕÍ¥½¸°…É••µ•¹Ð¹‘•¥Í¥½¹!…Í ¤ì(€€€½¹ÍÐ½¹±ÕÍ¥½¹5•ÍÍ…•%€ôµ•ÍÍ…•Ì¹™¥¹ ¡µ•ÍÍ…”¤€ôø€ (€€€€€µ•ÍÍ…”¹Í•¹‘•È€ôôôÁ…É…µÌ¹…•¹Ð(€€€€€€˜˜µ•ÍÍ…”¹É••¥Ù•È€ôôô½Ñ¡•É•¹Ð(€€€€€€˜˜µ•ÍÍ…”¹É½±”€ôôô€½¹±ÕÍ¥½¸œ(€€€€€€˜˜µ•ÍÍ…”¹½¹Ñ•¹Ð€ôôôÁ…É…µÌ¹½¹±ÕÍ¥½¸(€€€€¤¤ü¹¥€üü¹Õ±°ì(€€€Ñ¡¥Ì¹ÅÕ•Õ•¥ÍÁ…Ñ ¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°½Ñ¡•É•¹Ð¤ì(€€€¥˜€¡Ñ¡¥Ì¹…Íå¹¥ÍÁ…Ñ ¤ì(€€€€€Ñ¡¥Ì¹ÍÑ…ÉÑ	…­É½Õ¹‘É••µ•¹Ñ½¹™¥Éµ…Ñ¥½¸ (€€€€€€€‘¥ÍÕÍÍ¥½¸¹¥°(€€€€€€€Á…É…µÌ¹…•¹Ð°(€€€€€€€½Ñ¡•É•¹Ð°(€€€€€€€Á…É…µÌ¹½¹±ÕÍ¥½¸°(€€€€€€€…É••µ•¹Ð¹‘•¥Í¥½¹!…Í °(€€€€€€€…É••µ•¹ÑAÉ½µÁÐ°(€€€€€€€µ•ÍÍ…•Ì°(€€€€€€€½¹±ÕÍ¥½¹5•ÍÍ…•%°(€€€€€€¤ì(€€€€€‘¥ÍÕÍÍ¥½¹1•…Í•=Ý¹•€ô™…±Í”ì(€€€€€É•ÑÕÉ¸ì(€€€€€€€‘¥ÍÕÍÍ¥½¹%èÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°(€€€€€€€ÍÑ…ÑÕÌè€%MUMM%9œ°(€€€€€€€Ý…¥Ñ¥¹½Èèm½Ñ¡•É•¹Ñt°(€€€€€€€‘¥ÍÁ…Ñ¡MÑ…Ñ”è€EUUœ°(€€€€€ôì(€€€ô(€€€±•ÐÁ••ÉI•ÍÁ½¹Í”è5•ÍÍ…”ðÕ¹‘•™¥¹•ì(€€€ÑÉäì(€€€€€Á••ÉI•ÍÁ½¹Í”€ô…Ý…¥ÐÑ¡¥Ì¹‘¥ÍÁ…Ñ¡Q½•¹Ð (€€€€€€€Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°(€€€€€€€½Ñ¡•É•¹Ð°(€€€€€€€…É••µ•¹ÑAÉ½µÁÐ°(€€€€€€€µ•ÍÍ…•Ì°(€€€€€€€ì(€€€€€€€€€ÕÁ‘…Ñ•…¥±ÕÉ•MÑ…ÑÕÌè™…±Í”°(€€€€€€€€€½Õ¹ÑI½Õ¹è™…±Í”°(€€€€€€€€€‘¥ÍÕÍÍ¥½¹1•…Í•=Ý¹•èÑÉÕ”°(€€€€€€€€€…ÁÁ±å¥ÍÕÍÍ¥½¹A½±¥äè™…±Í”°(€€€€€€€€€™…¥±•‘5•ÍÍ…•%è½¹±ÕÍ¥½¹5•ÍÍ…•%°(€€€€€€€€€½Á•É…Ñ¥½¹-¥¹è€…É••µ•¹Ñ}½¹™¥Éµ…Ñ¥½¸œ°(€€€€€€€ô°(€€€€€€¤ì(€€€ô…Ñ €¡…ÕÍ”¤ì(€€€€€Ñ¡¥Ì¹…Õ‘¥Ð¹±½œ¡ì(€€€€€€€ÑÉ…•%è‘¥ÍÕÍÍ¥½¸¹ÑÉ…•%°(€€€€€€€‘¥ÍÕÍÍ¥½¹%èÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°(€€€€€€€…Ñ¥½¸è€…É••µ•¹Ð¹¹½Ñ¥™¥…Ñ¥½¹}™…¥±•œ°(€€€€€€€…•¹Ðè½Ñ¡•É•¹Ð°(€€€€€€€µ•Ñ…‘…Ñ„èì•ÉÉ½Èè…ÕÍ”¥¹ÍÑ…¹•½˜ÉÉ½È€ü…ÕÍ”¹µ•ÍÍ…”€èMÑÉ¥¹œ¡…ÕÍ”¤ô°(€€€€€ô¤ì(€€€ô((€€€¥˜€ …Á••ÉI•ÍÁ½¹Í”¤ì(€€€€€É•ÑÕÉ¸ì(€€€€€€€‘¥ÍÕÍÍ¥½¹%èÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°(€€€€€€€ÍÑ…ÑÕÌè€%MUMM%9œ°(€€€€€€€Ý…¥Ñ¥¹½Èèm½Ñ¡•É•¹Ñt°(€€€€€€€‘¥ÍÁ…Ñ¡MÑ…Ñ”è€%1œ°(€€€€€ôì(€€€ô((€€€½¹ÍÐÁ••É•¥Í¥½¸€ôÁ…ÉÍ•É••µ•¹ÑI•ÍÁ½¹Í”¡Á••ÉI•ÍÁ½¹Í”¹½¹Ñ•¹Ð°…É••µ•¹Ð¹‘•¥Í¥½¹!…Í ¤ì(€€€¥˜€ …Á••É•¥Í¥½¸¹…•ÁÑ•¤ì(€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹¥ÍÁ…Ñ ¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°€=5A1Qœ°Á…É…µÌ¹…•¹Ð¤ì(€€€€€Ñ¡¥Ì¹…Õ‘¥Ð¹±½œ¡ì(€€€€€€€ÑÉ…•%è‘¥ÍÕÍÍ¥½¸¹ÑÉ…•%°(€€€€€€€‘¥ÍÕÍÍ¥½¹%èÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°(€€€€€€€…Ñ¥½¸è€…É••µ•¹Ð¹É•©•Ñ•œ°(€€€€€€€…•¹Ðè½Ñ¡•É•¹Ð°(€€€€€€€µ•Ñ…‘…Ñ„èìÉ•…Í½¸èÁ••É•¥Í¥½¸¹É•…Í½¸€üü€¥¹Ù…±¥‘}½É}É•©•Ñ•‘}É•ÍÁ½¹Í”œô°(€€€€€ô¤ì(€€€€€É•ÑÕÉ¸ì(€€€€€€€‘¥ÍÕÍÍ¥½¹%èÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°(€€€€€€€ÍÑ…ÑÕÌè€%MUMM%9œ°(€€€€€€€Ý…¥Ñ¥¹½ÈèmÁ…É…µÌ¹…•¹Ñt°(€€€€€€€Á••É•ÁÑ•è™…±Í”°(€€€€€€€‘¥ÍÁ…Ñ¡MÑ…Ñ”è€=5A1Qœ°(€€€€€€€Á••ÉI•ÍÁ½¹Í”°(€€€€€ôì(€€€ô((€€€½¹ÍÐÁ••ÉÉ••µ•¹Ð€ôÑ¡¥Ì¹ÍÑ½É…”¹É•½É‘É••µ•¹Ð¡ì(€€€€€‘¥ÍÕÍÍ¥½¹%èÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°(€€€€€…•¹Ðè½Ñ¡•É•¹Ð°(€€€€€ÍÕµµ…ÉäèÁ…É…µÌ¹½¹±ÕÍ¥½¸°(€€€ô¤ì(€€€Ñ¡¥Ì¹…Õ‘¥Ð¹±½œ¡ì(€€€€€ÑÉ…•%è‘¥ÍÕÍÍ¥½¸¹ÑÉ…•%°(€€€€€‘¥ÍÕÍÍ¥½¹%èÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°(€€€€€…Ñ¥½¸è…É••µ•¹Ð¸‘í½Ñ¡•É•¹Ñõ€°(€€€€€…•¹Ðè½Ñ¡•É•¹Ð°(€€€€€µ•Ñ…‘…Ñ„èì‘•¥Í¥½¹!…Í èÁ••ÉÉ••µ•¹Ð¹‘•¥Í¥½¹!…Í °Í½ÕÉ”è€½¹¹•Ñ½É}½¹™¥Éµ…Ñ¥½¸œô°(€€€ô¤ì(€€€½¹ÍÐ½µÁ±•Ñ•€ôÑ¡¥Ì¹½µÁ±•Ñ•¥ÍÕÍÍ¥½¸¡‘¥ÍÕÍÍ¥½¸°Á…É…µÌ¹½¹±ÕÍ¥½¸°Á••ÉÉ••µ•¹Ð¹…É••‘	ä¤ì(€€€É•ÑÕÉ¸ì€¸¸¹½µÁ±•Ñ•°Á••É•ÁÑ•èÑÉÕ”°Á••ÉI•ÍÁ½¹Í”ôì(€€€ô™¥¹…±±äì(€€€€€¥˜€¡‘¥ÍÕÍÍ¥½¹1•…Í•=Ý¹•¤Ñ¡¥Ì¹ÍÑ½É…”¹É•±•…Í•¥ÍÕÍÍ¥½¹1•…Í”¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°Ñ¡¥Ì¹½Ý¹•É%¤ì(€€€ô(€ô((€…Íå¹Œ…¹•±¥ÍÕÍÍ¥½¸¡Á…É…µÌèì(€€€‘¥ÍÕÍÍ¥½¹%èÍÑÉ¥¹œì(€€€…•¹Ðè•¹ÑQåÁ”ì(€ô¤èAÉ½µ¥Í”ñ…¹•±¥ÍÕÍÍ¥½¹=ÕÑÁÕÐøì(€€€½¹ÍÐ‘¥ÍÕÍÍ¥½¸€ôÑ¡¥Ì¹ÍÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%¤ì(€€€¥˜€ …‘¥ÍÕÍÍ¥½¸¤Ñ¡É½Ü¹•ÜÉÉ½È¡¥ÍÕÍÍ¥½¸€‘íÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%‘ô¹½Ð™½Õ¹‘€¤ì(€€€¥˜€¡¥ÍQ•Éµ¥¹…°¡‘¥ÍÕÍÍ¥½¸¹ÍÑ…ÑÕÌ¤€˜˜‘¥ÍÕÍÍ¥½¸¹ÍÑ…ÑÕÌ€„ôô€9M}UMI}%M%=8œ¤ì(€€€€€Ñ¡É½Ü¹•ÜÉÉ½È¡¥ÍÕÍÍ¥½¸€‘íÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%‘ô¥Ì…±É•…‘ä€‘í‘¥ÍÕÍÍ¥½¸¹ÍÑ…ÑÕÍõ€¤ì(€€€ô(€€€¥˜€ …m‘¥ÍÕÍÍ¥½¸¹‘É¥Ù•È°‘¥ÍÕÍÍ¥½¸¹Á••Ét¹¥¹±Õ‘•Ì¡Á…É…µÌ¹…•¹Ð¤¤ì(€€€€€Ñ¡É½Ü¹•ÜÉÉ½È¡•¹Ð€‘íÁ…É…µÌ¹…•¹Ñô¥Ì¹½Ð„Á…ÉÑ¥¥Á…¹Ð¥¸‘¥ÍÕÍÍ¥½¸€‘íÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%‘õ€¤ì(€€€ô((€€€½¹ÍÐ…Ñ¥Ù”€ôÑ¡¥Ì¹¥¹±¥¡Ð¹•Ð¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%¤ì(€€€½¹ÍÐÉ•µ½Ñ•AÉ½Ù¥‘•ÉÑ¥Ù”€ô€……Ñ¥Ù”€˜˜m‘¥ÍÕÍÍ¥½¸¹‘É¥Ù•È°‘¥ÍÕÍÍ¥½¸¹Á••Ét¹Í½µ” ¡ÁÉ½Ù¥‘•È¤€ôø€ (€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹¡…ÍM•ÍÍ¥½¹1•…Í”¡ÁÉ½Ù¥‘•È°‘¥ÍÕÍÍ¥½¸¹ÁÉ½©•ÑA…Ñ °‘¥ÍÕÍÍ¥½¸¹¥¤(€€€€¤¤ì(€€€Ñ¡¥Ì¹…¹•±±…Ñ¥½¹I•ÅÕ•ÍÑÌ¹…‘¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%¤ì(€€€Ñ¡¥Ì¹…Õ‘¥Ð¹±½œ¡ì(€€€€€ÑÉ…•%è‘¥ÍÕÍÍ¥½¸¹ÑÉ…•%°(€€€€€‘¥ÍÕÍÍ¥½¹%è‘¥ÍÕÍÍ¥½¸¹¥°(€€€€€…Ñ¥½¸è€…¹•°¹É•ÅÕ•ÍÑ•œ°(€€€€€…•¹ÐèÁ…É…µÌ¹…•¹Ð°(€€€€€µ•Ñ…‘…Ñ„èìÁÉ½Ù¥‘•ÉÑ¥Ù”è	½½±•…¸¡…Ñ¥Ù”¤ô°(€€€ô¤ì(€€€ÑÉäì(€€€€€…Ñ¥Ù”ü¹½¹ÑÉ½±±•È¹…‰½ÉÐ ¤ì(€€€€€½¹ÍÐ½¹¹•Ñ½ÉÌ€ômÑ¡¥Ì¹½¹¹•Ñ½ÉÍm‘¥ÍÕÍÍ¥½¸¹‘É¥Ù•Ét°Ñ¡¥Ì¹½¹¹•Ñ½ÉÍm‘¥ÍÕÍÍ¥½¸¹Á••Éutì(€€€€€½¹ÍÐÉ•ÍÕ±ÑÌ€ô…Ý…¥ÐAÉ½µ¥Í”¹…±±M•ÑÑ±•¡½¹¹•Ñ½ÉÌ¹µ…À ¡½¹¹•Ñ½È¤€ôø½¹¹•Ñ½Èü¹…¹•°ü¸¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%¤¤¤ì(€€€€€½¹ÍÐ½¹¹•Ñ½É…¥±ÕÉ•Ì€ôÉ•ÍÕ±ÑÌ¹™¥±Ñ•È ¡É•ÍÕ±Ð¤€ôøÉ•ÍÕ±Ð¹ÍÑ…ÑÕÌ€ôôô€É•©•Ñ•œ¤ì(€€€€€½¹ÍÐÁÉ½Ù¥‘•ÉM•ÑÑ±•€ô€…É•µ½Ñ•AÉ½Ù¥‘•ÉÑ¥Ù”(€€€€€€€€˜˜€ ……Ñ¥Ù”ñð…Ý…¥ÐÝ…¥Ñ½É½µÁ±•Ñ¥½¸¡…Ñ¥Ù”¹‘½¹”°5…Ñ ¹µ¥¸ Õ|ÀÀÀ°Ñ¡¥Ì¹Ñ¥µ•½ÕÑ5Ì¤¤¤ì(€€€€€¥˜€¡½¹¹•Ñ½É…¥±ÕÉ•Ì¹±•¹Ñ €ø€Àñð€…ÁÉ½Ù¥‘•ÉM•ÑÑ±•¤ì(€€€€€€€½¹ÍÐÕÉÉ•¹Ð€ôÑ¡¥Ì¹ÍÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%¤ì(€€€€€€€¥˜€¡ÕÉÉ•¹Ð€˜˜€…¥ÍQ•Éµ¥¹…°¡ÕÉÉ•¹Ð¹ÍÑ…ÑÕÌ¤€˜˜ÕÉÉ•¹Ð¹ÍÑ…ÑÕÌ€„ôô€9M}UMI}%M%=8œ¤ì(€€€€€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹MÑ…ÑÕÌ¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°€9M}UMI}%M%=8œ¤ì(€€€€€€€ô(€€€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹¥ÍÁ…Ñ ¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°€%1œ°¹Õ±°¤ì(€€€€€€€Ñ¡¥Ì¹…Õ‘¥Ð¹±½œ¡ì(€€€€€€€€€ÑÉ…•%è‘¥ÍÕÍÍ¥½¸¹ÑÉ…•%°(€€€€€€€€€‘¥ÍÕÍÍ¥½¹%è‘¥ÍÕÍÍ¥½¸¹¥°(€€€€€€€€€…Ñ¥½¸è€…¹•°¹ÁÉ½Ù¥‘•É}Õ¹½¹™¥Éµ•œ°(€€€€€€€€€…•¹ÐèÁ…É…µÌ¹…•¹Ð°(€€€€€€€€€µ•Ñ…‘…Ñ„èì½¹¹•Ñ½É…¥±ÕÉ•Ìè½¹¹•Ñ½É…¥±ÕÉ•Ì¹±•¹Ñ °ÁÉ½Ù¥‘•ÉM•ÑÑ±•°É•µ½Ñ•AÉ½Ù¥‘•ÉÑ¥Ù”ô°(€€€€€€€ô¤ì(€€€€€€€Ñ¡É½Ü¹•ÜAÉ½Ù¥‘•ÉÉÉ½È %1œ°€AÉ½Ù¥‘•È…¹•±±…Ñ¥½¸½Õ±¹½Ð‰”½¹™¥Éµ•œ¤ì(€€€€€ô((€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹MÑ…ÑÕÌ¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°€911œ°ì(€€€€€€€•¹‘•‘Ðè¹•Ü…Ñ” ¤¹Ñ½%M=MÑÉ¥¹œ ¤°(€€€€€ô¤ì(€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹¥ÍÁ…Ñ ¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°¹Õ±°°¹Õ±°¤ì(€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹É•±•…Í•M•ÍÍ¥½¹1•…Í”¡‘¥ÍÕÍÍ¥½¸¹‘É¥Ù•È°‘¥ÍÕÍÍ¥½¸¹ÁÉ½©•ÑA…Ñ °‘¥ÍÕÍÍ¥½¸¹¥¤ì(€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹É•±•…Í•M•ÍÍ¥½¹1•…Í”¡‘¥ÍÕÍÍ¥½¸¹Á••È°‘¥ÍÕÍÍ¥½¸¹ÁÉ½©•ÑA…Ñ °‘¥ÍÕÍÍ¥½¸¹¥¤ì(€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹É•±•…Í•¥ÍÕÍÍ¥½¹1•…Í”¡‘¥ÍÕÍÍ¥½¸¹¥°Ñ¡¥Ì¹½Ý¹•É%¤ì(€€€€€Ñ¡¥Ì¹…Õ‘¥Ð¹±½œ¡ì(€€€€€€€ÑÉ…•%è‘¥ÍÕÍÍ¥½¸¹ÑÉ…•%°(€€€€€€€‘¥ÍÕÍÍ¥½¹%è‘¥ÍÕÍÍ¥½¸¹¥°(€€€€€€€…Ñ¥½¸è€…¹•°¹ÁÉ½Ù¥‘•É}½¹™¥Éµ•œ°(€€€€€€€…•¹ÐèÁ…É…µÌ¹…•¹Ð°(€€€€€€€µ•Ñ…‘…Ñ„èíô°(€€€€€ô¤ì(€€€€€Ñ¡¥Ì¹…Õ‘¥Ð¹±½œ¡ì(€€€€€€€ÑÉ…•%è‘¥ÍÕÍÍ¥½¸¹ÑÉ…•%°(€€€€€€€‘¥ÍÕÍÍ¥½¹%è‘¥ÍÕÍÍ¥½¸¹¥°(€€€€€€€…Ñ¥½¸è€‘¥ÍÕÍÍ¥½¸¹…¹•±±•œ°(€€€€€€€…•¹ÐèÁ…É…µÌ¹…•¹Ð°(€€€€€€€µ•Ñ…‘…Ñ„èíô°(€€€€€ô¤ì(€€€€€Ñ¡¥Ì¹…É¡¥Ù•¥ÍÕÍÍ¥½¹M•ÍÍ¥½¹Ì¡‘¥ÍÕÍÍ¥½¸¹¥¤ì(€€€€€É•ÑÕÉ¸ì‘¥ÍÕÍÍ¥½¹%è‘¥ÍÕÍÍ¥½¸¹¥°ÍÑ…ÑÕÌè€911œôì(€€€ô™¥¹…±±äì(€€€€€Ñ¡¥Ì¹…¹•±±…Ñ¥½¹I•ÅÕ•ÍÑÌ¹‘•±•Ñ”¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%¤ì(€€€ô(€ô((€…Íå¹ŒÍ¡ÕÑ‘½Ý¸¡É…•5Ì€ô€Õ|ÀÀÀ¤èAÉ½µ¥Í”ñÙ½¥øì(€€€¥˜€¡Ñ¡¥Ì¹Í¡ÕÑÑ¥¹½Ý¸¤É•ÑÕÉ¸ì(€€€¥˜€ …9Õµ‰•È¹¥Í%¹Ñ••È¡É…•5Ì¤ñðÉ…•5Ì€ð€ÀñðÉ…•5Ì€ø€ØÁ|ÀÀÀ¤ì(€€€€€Ñ¡É½Ü¹•ÜÉÉ½È É…•5ÌµÕÍÐ‰”…¸¥¹Ñ••È‰•ÑÝ••¸€À…¹€ØÀÀÀÀœ¤ì(€€€ô(€€€Ñ¡¥Ì¹Í¡ÕÑÑ¥¹½Ý¸€ôÑÉÕ”ì(€€€½¹ÍÐ…Ñ¥Ù”€ôl¸¸¹Ñ¡¥Ì¹¥¹±¥¡Ð¹•¹ÑÉ¥•Ì ¥tì(€€€™½È€¡½¹ÍÐm‘¥ÍÕÍÍ¥½¹%°½Á•É…Ñ¥½¹t½˜…Ñ¥Ù”¤ì(€€€€€Ñ¡¥Ì¹…¹•±±…Ñ¥½¹I•ÅÕ•ÍÑÌ¹…‘¡‘¥ÍÕÍÍ¥½¹%¤ì(€€€€€½Á•É…Ñ¥½¸¹½¹ÑÉ½±±•È¹…‰½ÉÐ ¤ì(€€€ô(€€€…Ý…¥ÐAÉ½µ¥Í”¹…±±M•ÑÑ±• (€€€€€…Ñ¥Ù”¹µ…À ¡m‘¥ÍÕÍÍ¥½¹%‘t¤€ôøì(€€€€€€€½¹ÍÐ‘¥ÍÕÍÍ¥½¸€ôÑ¡¥Ì¹ÍÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡‘¥ÍÕÍÍ¥½¹%¤ì(€€€€€€€¥˜€ …‘¥ÍÕÍÍ¥½¸¤É•ÑÕÉ¸AÉ½µ¥Í”¹É•Í½±Ù” ¤ì(€€€€€€€½¹ÍÐ½¹¹•Ñ½ÉÌ€ômÑ¡¥Ì¹½¹¹•Ñ½ÉÍm‘¥ÍÕÍÍ¥½¸¹‘É¥Ù•Ét°Ñ¡¥Ì¹½¹¹•Ñ½ÉÍm‘¥ÍÕÍÍ¥½¸¹Á••Éutì(€€€€€€€É•ÑÕÉ¸AÉ½µ¥Í”¹…±±M•ÑÑ±•¡½¹¹•Ñ½ÉÌ¹µ…À ¡½¹¹•Ñ½È¤€ôø½¹¹•Ñ½Èü¹…¹•°ü¸¡‘¥ÍÕÍÍ¥½¹%¤¤¤ì(€€€€€ô¤°(€€€€¤ì(€€€½¹ÍÐÍ•ÑÑ±•€ô…Ý…¥ÐAÉ½µ¥Í”¹…±°¡…Ñ¥Ù”¹µ…À¡…Íå¹Œ€¡m‘¥ÍÕÍÍ¥½¹%°½Á•É…Ñ¥½¹t¤€ôø€¡ì(€€€€€‘¥ÍÕÍÍ¥½¹%°(€€€€€‘½¹”è…Ý…¥ÐÝ…¥Ñ½É½µÁ±•Ñ¥½¸¡½Á•É…Ñ¥½¸¹‘½¹”°É…•5Ì¤°(€€€ô¤¤¤ì(€€€™½È€¡½¹ÍÐ¥Ñ•´½˜Í•ÑÑ±•¤ì(€€€€€¥˜€ …¥Ñ•´¹‘½¹”¤½¹Ñ¥¹Õ”ì(€€€€€½¹ÍÐ‘¥ÍÕÍÍ¥½¸€ôÑ¡¥Ì¹ÍÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡¥Ñ•´¹‘¥ÍÕÍÍ¥½¹%¤ì(€€€€€¥˜€ …‘¥ÍÕÍÍ¥½¸¤½¹Ñ¥¹Õ”ì(€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹É•±•…Í•M•ÍÍ¥½¹1•…Í”¡‘¥ÍÕÍÍ¥½¸¹‘É¥Ù•È°‘¥ÍÕÍÍ¥½¸¹ÁÉ½©•ÑA…Ñ °¥Ñ•´¹‘¥ÍÕÍÍ¥½¹%¤ì(€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹É•±•…Í•M•ÍÍ¥½¹1•…Í”¡‘¥ÍÕÍÍ¥½¸¹Á••È°‘¥ÍÕÍÍ¥½¸¹ÁÉ½©•ÑA…Ñ °¥Ñ•´¹‘¥ÍÕÍÍ¥½¹%¤ì(€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹É•±•…Í•¥ÍÕÍÍ¥½¹1•…Í”¡¥Ñ•´¹‘¥ÍÕÍÍ¥½¹%°Ñ¡¥Ì¹½Ý¹•É%¤ì(€€€ô(€€€™½È€¡½¹ÍÐm‘¥ÍÕÍÍ¥½¹%‘t½˜…Ñ¥Ù”¤Ñ¡¥Ì¹…¹•±±…Ñ¥½¹I•ÅÕ•ÍÑÌ¹‘•±•Ñ”¡‘¥ÍÕÍÍ¥½¹%¤ì(€ô((€…Íå¹ŒÉ•ÑÉå¥ÍÕÍÍ¥½¸¡Á…É…µÌèì(€€€‘¥ÍÕÍÍ¥½¹%èÍÑÉ¥¹œì(€€€…•¹Ðè•¹ÑQåÁ”ì(€ô¤èAÉ½µ¥Í”ñI•ÑÉå¥ÍÕÍÍ¥½¹=ÕÑÁÕÐøì(€€€½¹ÍÐ‘¥ÍÕÍÍ¥½¸€ôÑ¡¥Ì¹ÍÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%¤ì(€€€¥˜€ …‘¥ÍÕÍÍ¥½¸¤Ñ¡É½Ü¹•ÜÉÉ½È¡¥ÍÕÍÍ¥½¸€‘íÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%‘ô¹½Ð™½Õ¹‘€¤ì(€€€¥˜€ …m‘¥ÍÕÍÍ¥½¸¹‘É¥Ù•È°‘¥ÍÕÍÍ¥½¸¹Á••Ét¹¥¹±Õ‘•Ì¡Á…É…µÌ¹…•¹Ð¤¤ì(€€€€€Ñ¡É½Ü¹•ÜÉÉ½È¡•¹Ð€‘íÁ…É…µÌ¹…•¹Ñô¥Ì¹½Ð„Á…ÉÑ¥¥Á…¹Ð¥¸‘¥ÍÕÍÍ¥½¸€‘íÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%‘õ€¤ì(€€€ô(€€€¥˜€ ……¹I•ÑÉä¡‘¥ÍÕÍÍ¥½¸¹ÍÑ…ÑÕÌ¤¤ì(€€€€€Ñ¡É½Ü¹•ÜÉÉ½È¡¥ÍÕÍÍ¥½¸€‘íÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%‘ô…¹¹½Ð‰”É•ÑÉ¥•™É½´€‘í‘¥ÍÕÍÍ¥½¸¹ÍÑ…ÑÕÍõ€¤ì(€€€ô(€€€Ñ¡¥Ì¹•¹ÍÕÉ•9½¥ÍÁ…Ñ¡%¹±¥¡Ð¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%¤ì(€€€½¹ÍÐÉÕ¹Ñ¥µ”€ôÑ¡¥Ì¹É•…‘A••ÉIÕ¹Ñ¥µ”¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%¤ì(€€€¥˜€¡ÉÕ¹Ñ¥µ”€˜˜€ (€€€€€lMQIQ%9œ°€IU99%9œ°€]%Q%9}Q==0œ°€]%Q%9}AI5%MM%=8œ°€9IQ%9œ°€%1}MUMAQt¹¥¹±Õ‘•Ì¡ÉÕ¹Ñ¥µ”¹ÍÑ…Ñ”¤(€€€€€ñð€¡ÉÕ¹Ñ¥µ”¹ÍÑ…Ñ”€ôôô€MQ11œ€˜˜ÉÕ¹Ñ¥µ”¹ÁÉ½•ÍÍ±¥Ù”€„ôô™…±Í”¤(€€€€¤¤ì(€€€€€Ñ¡É½Ü¹•ÜÉÉ½È¡¥ÍÕÍÍ¥½¸€‘íÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%‘ô…¹¹½ÐÉ•ÑÉäÝ¡¥±”Á••ÈÉÕ¹Ñ¥µ”¥Ì€‘íÉÕ¹Ñ¥µ”¹ÍÑ…Ñ•ô€¡AI}MQ%11}IU99%9¥€¤ì(€€€ô(€€€¥˜€¡‘¥ÍÕÍÍ¥½¸¹É•ÑÉå½Õ¹Ð€øô‘¥ÍÕÍÍ¥½¸¹µ…áI•ÑÉ¥•Ì¤ì(€€€€€Ñ¡É½Ü¹•ÜÉÉ½È¡¥ÍÕÍÍ¥½¸€‘íÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%‘ô•á¡…ÕÍÑ•¥ÑÌµ…áI•ÑÉ¥•Ì‰Õ‘•Ñ€¤ì(€€€ô(€€€¥˜€¡‘¥ÍÕÍÍ¥½¸¹É½Õ¹‘½Õ¹Ð€øô‘¥ÍÕÍÍ¥½¸¹µ…áQÕÉ¹Ì¤ì(€€€€€Ñ¡É½Ü¹•ÜÉÉ½È¡¥ÍÕÍÍ¥½¸€‘íÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%‘ô•á¡…ÕÍÑ•¥ÑÌµ…áQÕÉ¹Ì‰Õ‘•Ñ€¤ì(€€€ô((€€€¥˜€¡‘¥ÍÕÍÍ¥½¸¹ÍÑ½ÁI•…Í½¸€ôôô€AI}IEUMQ}UMI}%M%=8œ¤ì(€€€€€Ñ¡É½Ü¹•ÜÉÉ½È (€€€€€€€¥ÍÕÍÍ¥½¸€‘íÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%‘ôÉ•ÅÕ¥É•Ì…¸•áÁ±¥¥ÐÉ•Á±å}Á••È‘•¥Í¥½¸ìÉ•ÑÉå}‘¥ÍÕÍÍ¥½¸…¹¹½ÐÉ•Á±…ä„Á••È‘•¥Í¥½¸É•ÅÕ•ÍÑ€°(€€€€€€¤ì(€€€ô(€€€¥˜€¡‘¥ÍÕÍÍ¥½¸¹ÍÑ½ÁI•…Í½¸€ôôô€5a}UIQ%=8œ(€€€€€ñð‘¥ÍÕÍÍ¥½¸¹ÍÑ½ÁI•…Í½¸€ôôô€5MM}	UPœ(€€€€€ñð‘¥ÍÕÍÍ¥½¸¹ÍÑ½ÁI•…Í½¸€ôôô€5a}QUI9Lœ¤ì(€€€€€Ñ¡É½Ü¹•ÜÉÉ½È¡¥ÍÕÍÍ¥½¸€‘íÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%‘ô…¹¹½ÐÉ•ÑÉä…™Ñ•È€‘í‘¥ÍÕÍÍ¥½¸¹ÍÑ½ÁI•…Í½¹õ€¤ì(€€€ô(€€€¥˜€¡‘¥ÍÕÍÍ¥½¸¹±…ÍÑÉÉ½È€˜˜€ …‘¥ÍÕÍÍ¥½¸¹±…ÍÑÉÉ½È¹É•ÑÉå…‰±”ñð‘¥ÍÕÍÍ¥½¸¹±…ÍÑÉÉ½È¹…µ‰¥Õ½ÕÌ¤¤ì(€€€€€Ñ¡É½Ü¹•ÜÉÉ½È (€€€€€€€¥ÍÕÍÍ¥½¸€‘íÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%‘ô…¹¹½ÐÉ•ÑÉäÁÉ½Ù¥‘•ÈÉ•ÍÕ±Ð€¡É•ÑÉå…‰±”ô‘í‘¥ÍÕÍÍ¥½¸¹±…ÍÑÉÉ½È¹É•ÑÉå…‰±•ô°…µ‰¥Õ½ÕÌô‘í‘¥ÍÕÍÍ¥½¸¹±…ÍÑÉÉ½È¹…µ‰¥Õ½ÕÍô¥€°(€€€€€€¤ì(€€€ô((€€€½¹ÍÐµ•ÍÍ…•Ì€ôÑ¡¥Ì¹ÍÑ½É…”¹•Ñ5•ÍÍ…•Ì¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%¤ì(€€€±•Ð™…¥±•‘5•ÍÍ…•%€ô‘¥ÍÕÍÍ¥½¸¹™…¥±•‘5•ÍÍ…•%ì(€€€±•Ð™…¥±•‘I••¥Ù•È€ô‘¥ÍÕÍÍ¥½¸¹™…¥±•‘¥ÍÁ…Ñ¡I••¥Ù•Èì(€€€±•Ð™…¥±•‘5•ÍÍ…”€ô™…¥±•‘5•ÍÍ…•%(€€€€€€üµ•ÍÍ…•Ì¹™¥¹ ¡µ•ÍÍ…”¤€ôøµ•ÍÍ…”¹¥€ôôô™…¥±•‘5•ÍÍ…•%¤(€€€€€€èÕ¹‘•™¥¹•ì(€€€½¹ÍÐ¡…Í…¥±ÕÉ•5•Ñ…‘…Ñ„€ô	½½±•…¸ (€€€€€™…¥±•‘5•ÍÍ…•%ñð™…¥±•‘I••¥Ù•Èñð‘¥ÍÕÍÍ¥½¸¹™…¥±•‘=Á•É…Ñ¥½¹-¥¹°(€€€€¤ì(€€€¥˜€¡¡…Í…¥±ÕÉ•5•Ñ…‘…Ñ„¤ì(€€€€€¥˜€ …™…¥±•‘5•ÍÍ…•%ñð€…™…¥±•‘I••¥Ù•Èñð‘¥ÍÕÍÍ¥½¸¹™…¥±•‘=Á•É…Ñ¥½¹-¥¹€„ôô€Á••É}µ•ÍÍ…”œ¤ì(€€€€€€€Ñ¡É½Ü¹•ÜÉÉ½È¡¥ÍÕÍÍ¥½¸€‘íÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%‘ô¡…Ì¹¼É•ÑÉå…‰±”™…¥±•Á••È‘¥ÍÁ…Ñ¡€¤ì(€€€€€ô(€€€€€¥˜€ …™…¥±•‘5•ÍÍ…”ñð™…¥±•‘5•ÍÍ…”¹É••¥Ù•È€„ôô™…¥±•‘I••¥Ù•È¤ì(€€€€€€€Ñ¡É½Ü¹•ÜÉÉ½È¡¥ÍÕÍÍ¥½¸€‘íÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%‘ô¡…Ì¥¹½¹Í¥ÍÑ•¹Ð™…¥±•‘¥ÍÁ…Ñ µ•Ñ…‘…Ñ…€¤ì(€€€€€ô(€€€ô•±Í”ì(€€€€€€¼¼I½ÝÌÉ•…Ñ•‰•™½É”™…¥±•µ‘¥ÍÁ…Ñ µ•Ñ…‘…Ñ„Ý…Ì¥¹ÑÉ½‘Õ•¡…Ù”¹¼(€€€€€€¼¼Á½¥¹Ñ•ÈÑ¼É•Á±…ä¸%¹™•È½¹±ä…¸Õ¹µ¥ÍÑ…­…‰±”Á••ÈÉ•ÅÕ•ÍÐì…±°(€€€€€€¼¼É•…Í½¸µ…Ý…É”É•ÑÉäÕ…É‘Ì…‰½Ù”ÍÑ¥±°…ÁÁ±ä¸(€€€€€½¹ÍÐ±•…å5•ÍÍ…”€ôµ•ÍÍ…•Ì¹…Ð ´Ä¤ì(€€€€€¥˜€ …±•…å5•ÍÍ…”ñð€…¥Í1•…åI•ÑÉå…‰±•A••É5•ÍÍ…”¡±•…å5•ÍÍ…”°‘¥ÍÕÍÍ¥½¸¤¤ì(€€€€€€€Ñ¡É½Ü¹•ÜÉÉ½È¡¥ÍÕÍÍ¥½¸€‘íÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%‘ô¡…Ì¹¼É•ÑÉå…‰±”™…¥±•Á••È‘¥ÍÁ…Ñ¡€¤ì(€€€€€ô(€€€€€™…¥±•‘5•ÍÍ…”€ô±•…å5•ÍÍ…”ì(€€€€€™…¥±•‘5•ÍÍ…•%€ô±•…å5•ÍÍ…”¹¥ì(€€€€€™…¥±•‘I••¥Ù•È€ô±•…å5•ÍÍ…”¹É••¥Ù•Èì(€€€ô(€€€¥˜€ …™…¥±•‘5•ÍÍ…”ñð€…™…¥±•‘5•ÍÍ…•%ñð€…™…¥±•‘I••¥Ù•È¤ì(€€€€€Ñ¡É½Ü¹•ÜÉÉ½È¡¥ÍÕÍÍ¥½¸€‘íÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%‘ô¡…Ì¥¹½¹Í¥ÍÑ•¹Ð™…¥±•‘¥ÍÁ…Ñ µ•Ñ…‘…Ñ…€¤ì(€€€ô(€€€Ñ¡¥Ì¹•¹ÍÕÉ•AÉ½Ù¥‘•É9½Ñ1•…Í•¡™…¥±•‘I••¥Ù•È°‘¥ÍÕÍÍ¥½¸¹ÁÉ½©•ÑA…Ñ ¤ì(€€€Ñ¡¥Ì¹ÍÑ½É…”¹…ÅÕ¥É•¥ÍÕÍÍ¥½¹1•…Í”¡ì(€€€€€‘¥ÍÕÍÍ¥½¹%èÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°(€€€€€ÁÉ½©•ÑA…Ñ è‘¥ÍÕÍÍ¥½¸¹ÁÉ½©•ÑA…Ñ °(€€€€€½Ý¹•É%èÑ¡¥Ì¹½Ý¹•É%°(€€€€€ÑÑ±5ÌèÑ¡¥Ì¹Ñ¥µ•½ÕÑ5Ì°(€€€ô¤ì(€€€±•Ð‘¥ÍÕÍÍ¥½¹1•…Í•=Ý¹•€ôÑÉÕ”ì(€€€ÑÉäì((€€€¥˜€¡‘¥ÍÕÍÍ¥½¸¹ÍÑ…ÑÕÌ€ôôô€%1œ¤ì(€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹MÑ…ÑÕÌ¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°€IQœ¤ì(€€€ô(€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹MÑ…ÑÕÌ¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°€%MUMM%9œ¤ì(€€€Ñ¡¥Ì¹ÅÕ•Õ•¥ÍÁ…Ñ ¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°™…¥±•‘I••¥Ù•È¤ì(€€€Ñ¡¥Ì¹…Õ‘¥Ð¹±½œ¡ì(€€€€€ÑÉ…•%è‘¥ÍÕÍÍ¥½¸¹ÑÉ…•%°(€€€€€‘¥ÍÕÍÍ¥½¹%è‘¥ÍÕÍÍ¥½¸¹¥°(€€€€€…Ñ¥½¸è€‘¥ÍÕÍÍ¥½¸¹É•ÑÉå}É•ÅÕ•ÍÑ•œ°(€€€€€…•¹ÐèÁ…É…µÌ¹…•¹Ð°(€€€€€µ•Ñ…‘…Ñ„èìÉ•ÑÉå½Õ¹Ðè‘¥ÍÕÍÍ¥½¸¹É•ÑÉå½Õ¹Ð°µ…áI•ÑÉ¥•Ìè‘¥ÍÕÍÍ¥½¸¹µ…áI•ÑÉ¥•Ìô°(€€€ô¤ì(€€€½¹ÍÐÁÉ•Ù¥½ÕÍ5•ÍÍ…•Ì€ôµ•ÍÍ…•Ì¹™¥±Ñ•È ¡µ•ÍÍ…”¤€ôøµ•ÍÍ…”¹¥€„ôô™…¥±•‘5•ÍÍ…•%¤ì(€€€¥˜€¡Ñ¡¥Ì¹…Íå¹¥ÍÁ…Ñ ¤ì(€€€€€Ñ¡¥Ì¹ÍÑ…ÉÑ	…­É½Õ¹‘¥ÍÁ…Ñ  (€€€€€€€Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°(€€€€€€€™…¥±•‘I••¥Ù•È°(€€€€€€€™…¥±•‘5•ÍÍ…”¹½¹Ñ•¹Ð°(€€€€€€€ÁÉ•Ù¥½ÕÍ5•ÍÍ…•Ì°(€€€€€€€ì(€€€€€€€€€‘¥ÍÕÍÍ¥½¹1•…Í•=Ý¹•èÑÉÕ”°(€€€€€€€€€™…¥±•‘5•ÍÍ…•%°(€€€€€€€€€½Á•É…Ñ¥½¹-¥¹è€Á••É}µ•ÍÍ…”œ°(€€€€€€€ô°(€€€€€€¤ì(€€€€€‘¥ÍÕÍÍ¥½¹1•…Í•=Ý¹•€ô™…±Í”ì(€€€€€É•ÑÕÉ¸ì(€€€€€€€‘¥ÍÕÍÍ¥½¹%èÁ…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°(€€€€€€€ÍÑ…ÑÕÌè€%MUMM%9œ°(€€€€€€€É•ÑÉå½Õ¹Ðè‘¥ÍÕÍÍ¥½¸¹É•ÑÉå½Õ¹Ð°(€€€€€€€‘¥ÍÁ…Ñ¡MÑ…Ñ”è€EUUœ°(€€€€€ôì(€€€ô(€€€½¹ÍÐÁ••ÉI•ÍÁ½¹Í”€ô…Ý…¥ÐÑ¡¥Ì¹‘¥ÍÁ…Ñ¡Q½•¹Ð (€€€€€Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°(€€€€€™…¥±•‘I••¥Ù•È°(€€€€€™…¥±•‘5•ÍÍ…”¹½¹Ñ•¹Ð°(€€€€€ÁÉ•Ù¥½ÕÍ5•ÍÍ…•Ì°(€€€€€ì(€€€€€€€‘¥ÍÕÍÍ¥½¹1•…Í•=Ý¹•èÑÉÕ”°(€€€€€€€™…¥±•‘5•ÍÍ…•%°(€€€€€€€½Á•É…Ñ¥½¹-¥¹è€Á••É}µ•ÍÍ…”œ°(€€€€€ô°(€€€€¤ì(€€€½¹ÍÐÕÉÉ•¹Ð€ôÑ¡¥Ì¹ÍÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%¤ì(€€€É•ÑÕÉ¸ì(€€€€€‘¥ÍÕÍÍ¥½¹%è‘¥ÍÕÍÍ¥½¸¹¥°(€€€€€ÍÑ…ÑÕÌèÕÉÉ•¹Ðü¹ÍÑ…ÑÕÌ€ôôô€9M}UMI}%M%=8œ€ü€9M}UMI}%M%=8œ€è€%MUMM%9œ°(€€€€€É•ÑÉå½Õ¹Ðè‘¥ÍÕÍÍ¥½¸¹É•ÑÉå½Õ¹Ð°(€€€€€‘¥ÍÁ…Ñ¡MÑ…Ñ”èÁ••ÉI•ÍÁ½¹Í”€ü€=5A1Qœ€è€%1œ°(€€€€€€¸¸¸¡Á••ÉI•ÍÁ½¹Í”€üìÁ••ÉI•ÍÁ½¹Í”ô€èíô¤°(€€€ôì(€€€ô™¥¹…±±äì(€€€€€¥˜€¡‘¥ÍÕÍÍ¥½¹1•…Í•=Ý¹•¤Ñ¡¥Ì¹ÍÑ½É…”¹É•±•…Í•¥ÍÕÍÍ¥½¹1•…Í”¡Á…É…µÌ¹‘¥ÍÕÍÍ¥½¹%°Ñ¡¥Ì¹½Ý¹•É%¤ì(€€€ô(€ô((€ÁÉ¥Ù…Ñ”…Íå¹Œ‘¥ÍÁ…Ñ¡Q½•¹Ð (€€€‘¥ÍÕÍÍ¥½¹%èÍÑÉ¥¹œ°(€€€É••¥Ù•Èè•¹ÑQåÁ”°(€€€ÁÉ½µÁÐèÍÑÉ¥¹œ°(€€€ÁÉ•Ù¥½ÕÍ5•ÍÍ…•Ìè5•ÍÍ…•mt°(€€€½ÁÑ¥½¹Ìèì(€€€€€ÕÁ‘…Ñ•…¥±ÕÉ•MÑ…ÑÕÌüè‰½½±•…¸ì(€€€€€½Õ¹ÑI½Õ¹üè‰½½±•…¸ì(€€€€€‘¥ÍÕÍÍ¥½¹1•…Í•=Ý¹•üè‰½½±•…¸ì(€€€€€…ÁÁ±å¥ÍÕÍÍ¥½¹A½±¥äüè‰½½±•…¸ì(€€€€€™…¥±•‘5•ÍÍ…•%üèÍÑÉ¥¹œð¹Õ±°ì(€€€€€½Á•É…Ñ¥½¹-¥¹üè¥ÍÕÍÍ¥½¹=Á•É…Ñ¥½¹-¥¹ì(€€€ô€ôíô°(€€¤èAÉ½µ¥Í”ñ5•ÍÍ…”ðÕ¹‘•™¥¹•øì(€€€½¹ÍÐ½¹¹•Ñ½È€ôÑ¡¥Ì¹½¹¹•Ñ½ÉÍmÉ••¥Ù•Étì(€€€½¹ÍÐ‘¥ÍÕÍÍ¥½¸€ôÑ¡¥Ì¹ÍÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡‘¥ÍÕÍÍ¥½¹%¤ì(€€€¥˜€ …‘¥ÍÕÍÍ¥½¸¤Ñ¡É½Ü¹•ÜÉÉ½È¡¥ÍÕÍÍ¥½¸€‘í‘¥ÍÕÍÍ¥½¹%‘ô¹½Ð™½Õ¹‘€¤ì(€€€¥˜€¡Ñ¡¥Ì¹Í¡ÕÑÑ¥¹½Ý¸¤ì(€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹¥ÍÁ…Ñ ¡‘¥ÍÕÍÍ¥½¹%°€%1œ°¹Õ±°¤ì(€€€€€¥˜€¡½ÁÑ¥½¹Ì¹‘¥ÍÕÍÍ¥½¹1•…Í•=Ý¹•¤Ñ¡¥Ì¹ÍÑ½É…”¹É•±•…Í•¥ÍÕÍÍ¥½¹1•…Í”¡‘¥ÍÕÍÍ¥½¹%°Ñ¡¥Ì¹½Ý¹•É%¤ì(€€€€€Ñ¡É½Ü¹•ÜAÉ½Ù¥‘•ÉÉÉ½È 911œ°€½±±…‰½É…Ñ¥½¸Í•ÉÙ¥”¥ÌÍ¡ÕÑÑ¥¹œ‘½Ý¸œ¤ì(€€€ô(€€€¥˜€¡Ñ¡¥Ì¹¥¹±¥¡Ð¹¡…Ì¡‘¥ÍÕÍÍ¥½¹%¤¤ì(€€€€€Ñ¡É½Ü¹•ÜAÉ½Ù¥‘•ÉÉÉ½È 	UMdœ°¥ÍÕÍÍ¥½¸€‘í‘¥ÍÕÍÍ¥½¹%‘ô…±É•…‘ä¡…Ì„ÁÉ½Ù¥‘•ÈÉ•ÅÕ•ÍÐ¥¸™±¥¡Ñ€¤ì(€€€ô(€€€½¹ÍÐ½¹ÑÉ½±±•È€ô¹•Ü‰½ÉÑ½¹ÑÉ½±±•È ¤ì(€€€½¹ÍÐ‘¥ÍÁ…Ñ¡%€ô‘ÍÁ|‘íÉ…¹‘½µUU% ¤¹É•Á±…” ¼´½œ°€œœ¤¹Í±¥” À°€ÄÈ¥õ€ì(€€€±•ÐÉ•Í½±Ù•½¹”„è€ ¤€ôøÙ½¥ì(€€€½¹ÍÐ½Á•É…Ñ¥½¸è%¹±¥¡Ñ=Á•É…Ñ¥½¸€ôì(€€€€€½¹ÑÉ½±±•È°(€€€€€‘½¹”è¹•ÜAÉ½µ¥Í”ñÙ½¥ø ¡É•Í½±Ù”¤€ôøìÉ•Í½±Ù•½¹”€ôÉ•Í½±Ù”ìô¤°(€€€€€É•Í½±Ù•½¹”è€ ¤€ôøÉ•Í½±Ù•½¹” ¤°(€€€ôì(€€€±•Ð±•…Í•ÅÕ¥É•€ô™…±Í”ì(€€€±•Ð‘¥ÍÕÍÍ¥½¹1•…Í•ÅÕ¥É•€ô½ÁÑ¥½¹Ì¹‘¥ÍÕÍÍ¥½¹1•…Í•=Ý¹•€ôôôÑÉÕ”ì(€€€±•Ð±•…Í•!•…ÉÑ‰•…ÐèI•ÑÕÉ¹QåÁ”ñÑåÁ•½˜Í•Ñ%¹Ñ•ÉÙ…°øðÕ¹‘•™¥¹•ì(€€€±•ÐÉÕ¹Ñ¥µ•5½¹¥Ñ½ÈèI•ÑÕÉ¹QåÁ”ñÑåÁ•½˜Í•Ñ%¹Ñ•ÉÙ…°øðÕ¹‘•™¥¹•ì(€€€±•ÐÑÉ…­•‘M•ÍÍ¥½¸èìÍ•ÍÍ¥½¹%èÍÑÉ¥¹œìµ•Ñ…‘…Ñ„èI•½ÉñÍÑÉ¥¹œ°Õ¹­¹½Ý¸øôðÕ¹‘•™¥¹•ì(€€€±•ÐÁÉ½Ù¥‘•ÉAÉ½µ¥Í”èAÉ½µ¥Í”ñA••ÉI•ÍÁ½¹Í”øðÕ¹‘•™¥¹•ì(€€€±•ÐÑ•Éµ¥¹…Ñ¥½¹½¹™¥Éµ•€ôÑÉÕ”ì(€€€±•ÐÍ•ÍÍ¥½¹1•…Í•…¥±ÕÉ•1½•€ô™…±Í”ì(€€€±•Ð‘¥ÍÕÍÍ¥½¹1•…Í•…¥±ÕÉ•1½•€ô™…±Í”ì(€€€Ñ¡¥Ì¹¥¹±¥¡Ð¹Í•Ð¡‘¥ÍÕÍÍ¥½¹%°½Á•É…Ñ¥½¸¤ì(€€€ÑÉäì(€€€€€¥˜€ …‘¥ÍÕÍÍ¥½¹1•…Í•ÅÕ¥É•¤ì(€€€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹…ÅÕ¥É•¥ÍÕÍÍ¥½¹1•…Í”¡ì(€€€€€€€€€‘¥ÍÕÍÍ¥½¹%°(€€€€€€€€€ÁÉ½©•ÑA…Ñ è‘¥ÍÕÍÍ¥½¸¹ÁÉ½©•ÑA…Ñ °(€€€€€€€€€½Ý¹•É%èÑ¡¥Ì¹½Ý¹•É%°(€€€€€€€€€ÑÑ±5ÌèÑ¡¥Ì¹Ñ¥µ•½ÕÑ5Ì°(€€€€€€€ô¤ì(€€€€€€€‘¥ÍÕÍÍ¥½¹1•…Í•ÅÕ¥É•€ôÑÉÕ”ì(€€€€€ô(€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹¥ÍÁ…Ñ ¡‘¥ÍÕÍÍ¥½¹%°€IU99%9œ°É••¥Ù•È¤ì(€€€€€½¹ÍÐÍÑ…ÉÑ•‘Ð€ô…Ñ”¹¹½Ü ¤ì(€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁÍ•ÉÑA••ÉIÕ¹Ñ¥µ”¡ì(€€€€€€€‘¥ÍÕÍÍ¥½¹%°(€€€€€€€‘¥ÍÁ…Ñ¡%°(€€€€€€€ÁÉ½Ù¥‘•ÈèÉ••¥Ù•È°(€€€€€€€ÍÑ…Ñ”è€MQIQ%9œ°(€€€€€€€ÍÑ…ÉÑ•‘Ð°(€€€€€€€±…ÍÑÑ¥Ù¥ÑåÐèÍÑ…ÉÑ•‘Ð°(€€€€€€€ÁÉ½•ÍÍ±¥Ù”èÕ¹‘•™¥¹•°(€€€€€€€½¹¹•Ñ¥½¹±¥Ù”èÕ¹‘•™¥¹•°(€€€€€€€Í•ÍÍ¥½¹±¥Ù”èÕ¹‘•™¥¹•°(€€€€€€€•±…ÁÍ•‘5Ìè€À°(€€€€€€€¥‘±•5Ìè€À°(€€€€€ô¤ì(€€€€€ÉÕ¹Ñ¥µ•5½¹¥Ñ½È€ôÍ•Ñ%¹Ñ•ÉÙ…°  ¤€ôøì(€€€€€€€Ñ¡¥Ì¹µ½¹¥Ñ½ÉA••ÉIÕ¹Ñ¥µ”¡‘¥ÍÕÍÍ¥½¹%°‘¥ÍÁ…Ñ¡%°½¹ÑÉ½±±•È¤ì(€€€€€ô°5…Ñ ¹µ…à ÈÔÀ°5…Ñ ¹µ¥¸ Å|ÀÀÀ°5…Ñ ¹™±½½È¡Ñ¡¥Ì¹¥‘±•Q¥µ•½ÕÑ5Ì€¼€Ð¤¤¤¤ì(€€€€€ÉÕ¹Ñ¥µ•5½¹¥Ñ½È¹Õ¹É•˜ü¸ ¤ì(€€€€€¥˜€ …½¹¹•Ñ½È¤ì(€€€€€€€Ñ¡¥Ì¹ÕÁ‘…Ñ•A••ÉIÕ¹Ñ¥µ”¡‘¥ÍÕÍÍ¥½¹%°‘¥ÍÁ…Ñ¡%°ìÍÑ…Ñ”è€%1œ°ÁÉ½•ÍÍ±¥Ù”è™…±Í”°½¹¹•Ñ¥½¹±¥Ù”è™…±Í”ô¤ì(€€€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹¥ÍÁ…Ñ ¡‘¥ÍÕÍÍ¥½¹%°€%1œ°¹Õ±°¤ì(€€€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹¥…¹½ÍÑ¥Œ¡‘¥ÍÕÍÍ¥½¹%°€AI=Y%I}II=Hœ°ì(€€€€€€€€€½‘”è€U9Y%1	1œ°(€€€€€€€€€µ•ÍÍ…”è€‘íÉ••¥Ù•Éô½¹¹•Ñ½È¥Ì¹½Ð½¹™¥ÕÉ•‘€°(€€€€€€€€€‰…­•¹èÉ••¥Ù•È°(€€€€€€€€€É•ÑÉå…‰±”èÑÉÕ”°(€€€€€€€€€…µ‰¥Õ½ÕÌè™…±Í”°(€€€€€€€€€…Ðè¹•Ü…Ñ” ¤¹Ñ½%M=MÑÉ¥¹œ ¤°(€€€€€€€ô¤ì(€€€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹…¥±ÕÉ”¡‘¥ÍÕÍÍ¥½¹%°ì(€€€€€€€€€É••¥Ù•È°(€€€€€€€€€µ•ÍÍ…•%è½ÁÑ¥½¹Ì¹™…¥±•‘5•ÍÍ…•%€üü¹Õ±°°(€€€€€€€€€½Á•É…Ñ¥½¹-¥¹è½ÁÑ¥½¹Ì¹½Á•É…Ñ¥½¹-¥¹€üü¹Õ±°°(€€€€€€€ô¤ì(€€€€€€€É•ÑÕÉ¸Õ¹‘•™¥¹•ì(€€€€€ô(€€€€€¥˜€ „¡…Ý…¥Ð½¹¹•Ñ½È¹¥ÍÙ…¥±…‰±” ¤¤¤ì(€€€€€€€Ñ¡É½Ü¹•ÜAÉ½Ù¥‘•ÉÉÉ½È U9Y%1	1œ°€‘íÉ••¥Ù•Éô½¹¹•Ñ½È¥Ì¹½Ð…Ù…¥±…‰±•€¤ì(€€€€€ô(€€€€€¥˜€¡…Ý…¥Ð½¹¹•Ñ½È¹¥Í	ÕÍä ¤¤ì(€€€€€€€Ñ¡É½Ü¹•ÜAÉ½Ù¥‘•ÉÉÉ½È 	UMdœ°€‘íÉ••¥Ù•ÉôÍ•ÍÍ¥½¸¥Ì‰ÕÍå€¤ì(€€€€€ô(€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹…ÅÕ¥É•M•ÍÍ¥½¹1•…Í”¡ì(€€€€€€€ÁÉ½Ù¥‘•ÈèÉ••¥Ù•È°(€€€€€€€ÁÉ½©•ÑA…Ñ è‘¥ÍÕÍÍ¥½¸¹ÁÉ½©•ÑA…Ñ °(€€€€€€€½Ý¹•É%è‘¥ÍÕÍÍ¥½¹%°(€€€€€€€ÑÑ±5ÌèÑ¡¥Ì¹Ñ¥µ•½ÕÑ5Ì°(€€€€€ô¤ì(€€€€€±•…Í•ÅÕ¥É•€ôÑÉÕ”ì(€€€€€±•…Í•!•…ÉÑ‰•…Ð€ôÍ•Ñ%¹Ñ•ÉÙ…°  ¤€ôøì(€€€€€€€ÑÉäì(€€€€€€€€€¥˜€ …Ñ¡¥Ì¹ÍÑ½É…”¹É•¹•ÝM•ÍÍ¥½¹1•…Í”¡É••¥Ù•È°‘¥ÍÕÍÍ¥½¸¹ÁÉ½©•ÑA…Ñ °‘¥ÍÕÍÍ¥½¹%°Ñ¡¥Ì¹Ñ¥µ•½ÕÑ5Ì¤¤ì(€€€€€€€€€€€¥˜€ …Í•ÍÍ¥½¹1•…Í•…¥±ÕÉ•1½•¤ì(€€€€€€€€€€€€€Í•ÍÍ¥½¹1•…Í•…¥±ÕÉ•1½•€ôÑÉÕ”ì(€€€€€€€€€€€€€Ñ¡¥Ì¹…Õ‘¥Ð¹±½œ¡ì(€€€€€€€€€€€€€€€ÑÉ…•%è‘¥ÍÕÍÍ¥½¸¹ÑÉ…•%°(€€€€€€€€€€€€€€€‘¥ÍÕÍÍ¥½¹%°(€€€€€€€€€€€€€€€…Ñ¥½¸è€±•…Í”¹Í•ÍÍ¥½¹}É•¹•Ý}™…¥±•œ°(€€€€€€€€€€€€€€€…•¹ÐèÉ••¥Ù•È°(€€€€€€€€€€€€€€€µ•Ñ…‘…Ñ„èìÁÉ½Ù¥‘•ÈèÉ••¥Ù•È°½Ý¹•É%è‘¥ÍÕÍÍ¥½¹%°ÁÉ½©•ÑA…Ñ è‘¥ÍÕÍÍ¥½¸¹ÁÉ½©•ÑA…Ñ ô°(€€€€€€€€€€€€€ô¤ì(€€€€€€€€€€€ô(€€€€€€€€€€€½¹ÑÉ½±±•È¹…‰½ÉÐ ¤ì(€€€€€€€€€ô(€€€€€€€€€¥˜€ …Ñ¡¥Ì¹ÍÑ½É…”¹É•¹•Ý¥ÍÕÍÍ¥½¹1•…Í”¡‘¥ÍÕÍÍ¥½¹%°Ñ¡¥Ì¹½Ý¹•É%°Ñ¡¥Ì¹Ñ¥µ•½ÕÑ5Ì¤¤ì(€€€€€€€€€€€¥˜€ …‘¥ÍÕÍÍ¥½¹1•…Í•…¥±ÕÉ•1½•¤ì(€€€€€€€€€€€€€‘¥ÍÕÍÍ¥½¹1•…Í•…¥±ÕÉ•1½•€ôÑÉÕ”ì(€€€€€€€€€€€€€Ñ¡¥Ì¹…Õ‘¥Ð¹±½œ¡ì(€€€€€€€€€€€€€€€ÑÉ…•%è‘¥ÍÕÍÍ¥½¸¹ÑÉ…•%°(€€€€€€€€€€€€€€€‘¥ÍÕÍÍ¥½¹%°(€€€€€€€€€€€€€€€…Ñ¥½¸è€±•…Í”¹‘¥ÍÕÍÍ¥½¹}É•¹•Ý}™…¥±•œ°(€€€€€€€€€€€€€€€…•¹Ðè€ÍåÍÑ•´œ°(€€€€€€€€€€€€€€€µ•Ñ…‘…Ñ„èì½Ý¹•É%èÑ¡¥Ì¹½Ý¹•É%°ÁÉ½©•ÑA…Ñ è‘¥ÍÕÍÍ¥½¸¹ÁÉ½©•ÑA…Ñ ô°(€€€€€€€€€€€€€ô¤ì(€€€€€€€€€€€ô(€€€€€€€€€€€½¹ÑÉ½±±•È¹…‰½ÉÐ ¤ì(€€€€€€€€€ô(€€€€€€€ô…Ñ €¡…ÕÍ”¤ì(€€€€€€€€€Ñ¡¥Ì¹…Õ‘¥Ð¹±½œ¡ì(€€€€€€€€€€€ÑÉ…•%è‘¥ÍÕÍÍ¥½¸¹ÑÉ…•%°(€€€€€€€€€€€‘¥ÍÕÍÍ¥½¹%°(€€€€€€€€€€€…Ñ¥½¸è€±•…Í”¹ÍÑ½É…•}•ÉÉ½Èœ°(€€€€€€€€€€€…•¹Ðè€ÍåÍÑ•´œ°(€€€€€€€€€€€µ•Ñ…‘…Ñ„èìÁÉ½Ù¥‘•ÈèÉ••¥Ù•È°½Ý¹•É%èÑ¡¥Ì¹½Ý¹•É%°•ÉÉ½ÈèÉ•‘…Ñ¥…¹½ÍÑ¥Œ¡…ÕÍ”¥¹ÍÑ…¹•½˜ÉÉ½È€ü…ÕÍ”¹µ•ÍÍ…”€èMÑÉ¥¹œ¡…ÕÍ”¤¤ô°(€€€€€€€€€ô¤ì(€€€€€€€€€½¹ÑÉ½±±•È¹…‰½ÉÐ ¤ì(€€€€€€€ô(€€€€€ô°5…Ñ ¹µ…à Å|ÀÀÀ°5…Ñ ¹™±½½È¡Ñ¡¥Ì¹Ñ¥µ•½ÕÑ5Ì€¼€Ì¤¤¤ì(€€€€€±•…Í•!•…ÉÑ‰•…Ð¹Õ¹É•˜ü¸ ¤ì((€€€€€½¹ÍÐ½±±…‰½É…Ñ¥½¹M•ÍÍ¥½¸€ô‘¥ÍÕÍÍ¥½¸¹½±±…‰½É…Ñ¥½¹M•ÍÍ¥½¹%(€€€€€€€€üÑ¡¥Ì¹ÍÑ½É…”¹•Ñ½±±…‰½É…Ñ¥½¹M•ÍÍ¥½¸¡‘¥ÍÕÍÍ¥½¸¹½±±…‰½É…Ñ¥½¹M•ÍÍ¥½¹%¤(€€€€€€€€è¹Õ±°ì(€€€€€½¹ÍÐÁ•ÉÍ¥ÍÑ•‘M•ÍÍ¥½¸€ô½±±…‰½É…Ñ¥½¹M•ÍÍ¥½¸(€€€€€€€€üÑ¡¥Ì¹ÍÑ½É…”¹•ÑM•ÍÍ¥½¹½É½±±…‰½É…Ñ¥½¸¡É••¥Ù•È°½±±…‰½É…Ñ¥½¹M•ÍÍ¥½¸¹¥°‘¥ÍÕÍÍ¥½¸¹ÁÉ½©•ÑA…Ñ ¤(€€€€€€€€è€…½±±…‰½É…Ñ¥½¹M•ÍÍ¥½¸(€€€€€€€€€€üÑ¡¥Ì¹ÍÑ½É…”¹•ÑM•ÍÍ¥½¹½É¥ÍÕÍÍ¥½¸¡É••¥Ù•È°‘¥ÍÕÍÍ¥½¹%°‘¥ÍÕÍÍ¥½¸¹ÁÉ½©•ÑA…Ñ ¤(€€€€€€€€€€è¹Õ±°ì(€€€€€¥˜€¡Á•ÉÍ¥ÍÑ•‘M•ÍÍ¥½¸¤ì(€€€€€€€ÑÉ…­•‘M•ÍÍ¥½¸€ôìÍ•ÍÍ¥½¹%èÁ•ÉÍ¥ÍÑ•‘M•ÍÍ¥½¸¹Í•ÍÍ¥½¹%°µ•Ñ…‘…Ñ„èÁ•ÉÍ¥ÍÑ•‘M•ÍÍ¥½¸¹µ•Ñ…‘…Ñ„ôì(€€€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•M•ÍÍ¥½¹MÑ…ÑÕÌ¡É••¥Ù•È°Á•ÉÍ¥ÍÑ•‘M•ÍÍ¥½¸¹Í•ÍÍ¥½¹%°€	I%}=]9œ°ì(€€€€€€€€€€¸¸¹Á•ÉÍ¥ÍÑ•‘M•ÍÍ¥½¸¹µ•Ñ…‘…Ñ„°(€€€€€€€€€‰É¥‘•=Ý¹•èÑÉÕ”°(€€€€€€€€€‘¥ÍÕÍÍ¥½¹%°(€€€€€€€€€€¸¸¸¡½±±…‰½É…Ñ¥½¹M•ÍÍ¥½¸€üì½±±…‰½É…Ñ¥½¹M•ÍÍ¥½¹%è½±±…‰½É…Ñ¥½¹M•ÍÍ¥½¸¹¥ô€èíô¤°(€€€€€€€ô¤ì(€€€€€ô(€€€½¹ÍÐÁÉ½Ù¥‘•ÉM•ÍÍ¥½¹-¥¹€ôÉ•…‘AÉ½Ù¥‘•ÉM•ÍÍ¥½¹-¥¹¡Á•ÉÍ¥ÍÑ•‘M•ÍÍ¥½¸ü¹µ•Ñ…‘…Ñ„¹Í•ÍÍ¥½¹-¥¹¤ì(€€€€€½¹ÍÐ½µÁ±•Ñ•‘I•ÍÁ½¹Í•Ì€ô‘¥ÍÕÍÍ¥½¸¹É½Õ¹‘½Õ¹Ðì(€€€€€½¹ÍÐ•™™•Ñ¥Ù•AÉ½µÁÐ€ô½ÁÑ¥½¹Ì¹…ÁÁ±å¥ÍÕÍÍ¥½¹A½±¥ä€ôôô™…±Í”(€€€€€€€€üÁÉ½µÁÐ(€€€€€€€€è‰Õ¥±‘¥ÍÕÍÍ¥½¹AÉ½µÁÐ¡ì(€€€€€€€€€€€µ½‘”è‘¥ÍÕÍÍ¥½¸¹µ½‘”°(€€€€€€€€€€€½µÁ±•Ñ•‘I•ÍÁ½¹Í•Ì°(€€€€€€€€€€€µ…áQÕÉ¹Ìè‘¥ÍÕÍÍ¥½¸¹µ…áQÕÉ¹Ì°(€€€€€€€€€€€ÁÉ½µÁÐ°(€€€€€€€€€ô¤ì(€€€€€ÁÉ½Ù¥‘•ÉAÉ½µ¥Í”€ô½¹¹•Ñ½È¹Í•¹‘¹‘]…¥Ð¡ì(€€€€€€€€€ÁÉ½©•ÑA…Ñ è‘¥ÍÕÍÍ¥½¸¹ÁÉ½©•ÑA…Ñ °(€€€€€€€€€ÁÉ½µÁÐè•™™•Ñ¥Ù•AÉ½µÁÐ°(€€€€€€€€€‘¥ÍÕÍÍ¥½¹%°(€€€€€€€€€‘¥ÍÁ…Ñ¡%°(€€€€€€€€€ÁÉ•Ù¥½ÕÍ5•ÍÍ…•Ì°(€€€€€€€€€ÁÉ½Ù¥‘•ÉM•ÍÍ¥½¹%èÁ•ÉÍ¥ÍÑ•‘M•ÍÍ¥½¸ü¹Í•ÍÍ¥½¹%°(€€€€€€€€€ÁÉ½Ù¥‘•ÉM•ÍÍ¥½¹-¥¹°(€€€€€€€€€Í¥¹…°è½¹ÑÉ½±±•È¹Í¥¹…°°(€€€€€€€€€½¹Ñ¥Ù¥Ñäè€¡…Ñ¥Ù¥Ñä¤€ôøÑ¡¥Ì¹É•½É‘A••ÉÑ¥Ù¥Ñä¡‘¥ÍÕÍÍ¥½¹%°‘¥ÍÁ…Ñ¡%°…Ñ¥Ù¥Ñä¤°(€€€€€€€€€½¹A•Éµ¥ÍÍ¥½¹I•ÅÕ•ÍÐè€¡É•ÅÕ•ÍÐ¤€ôøÑ¡¥Ì¹É•ÅÕ•ÍÑA••ÉA•Éµ¥ÍÍ¥½¸¡É•ÅÕ•ÍÐ°½¹ÑÉ½±±•È¹Í¥¹…°¤°(€€€€€€€ô¤ì(€€€€€½¹ÍÐÉ•ÍÁ½¹Í”€ô…Ý…¥ÐÝ¥Ñ¡Q¥µ•½ÕÐ (€€€€€€€ÁÉ½Ù¥‘•ÉAÉ½µ¥Í”°(€€€€€€€Ñ¡¥Ì¹ÑÕÉ¹!…É‘1¥µ¥Ñ5Ì°(€€€€€€€€ ¤€ôøì(€€€€€€€€€Ñ¡¥Ì¹ÕÁ‘…Ñ•A••ÉIÕ¹Ñ¥µ”¡‘¥ÍÕÍÍ¥½¹%°‘¥ÍÁ…Ñ¡%°ìÍÑ…Ñ”è€MQ11œô¤ì(€€€€€€€€€½¹ÑÉ½±±•È¹…‰½ÉÐ ¤ì(€€€€€€€ô°(€€€€€€¤ì((€€€€€¥˜€¡½¹ÑÉ½±±•È¹Í¥¹…°¹…‰½ÉÑ•¤ì(€€€€€€€Ñ¡É½Ü¹•ÜAÉ½Ù¥‘•ÉÉÉ½È 911œ°A••È€‘íÉ••¥Ù•ÉôÉ•ÅÕ•ÍÐÝ…Ì…¹•±±•‘€¤ì(€€€€€ô((€€€€€Ñ¡¥Ì¹ÕÁ‘…Ñ•A••ÉIÕ¹Ñ¥µ”¡‘¥ÍÕÍÍ¥½¹%°‘¥ÍÁ…Ñ¡%°ì(€€€€€€€ÍÑ…Ñ”è€=5A1Qœ°(€€€€€€€±…ÍÑÑ¥Ù¥ÑåÐè…Ñ”¹¹½Ü ¤°(€€€€€€€ÁÉ½•ÍÍ±¥Ù”è™…±Í”°(€€€€€€€½¹¹•Ñ¥½¹±¥Ù”è™…±Í”°(€€€€€ô¤ì((€€€€€Ñ¡¥Ì¹•¹ÍÕÉ•]¥Ñ¡¥¹	Õ‘•Ð¡‘¥ÍÕÍÍ¥½¸°É•ÍÁ½¹Í”¹½¹Ñ•¹Ð¤ì((€€€€€¥˜€¡É•ÍÁ½¹Í”¹…Ù…¥±…‰¥±¥Ñä¤ì(€€€€€€€Ñ¡¥Ì¹…Õ‘¥Ð¹±½œ¡ì(€€€€€€€€€ÑÉ…•%è‘¥ÍÕÍÍ¥½¸¹ÑÉ…•%°(€€€€€€€€€‘¥ÍÕÍÍ¥½¹%°(€€€€€€€€€…Ñ¥½¸è€Á••È¹…Ù…¥±…‰¥±¥Ñäœ°(€€€€€€€€€…•¹ÐèÉ••¥Ù•È°(€€€€€€€€€µ•Ñ…‘…Ñ„èì…Ù…¥±…‰¥±¥ÑäèÉ•ÍÁ½¹Í”¹…Ù…¥±…‰¥±¥Ñäô°(€€€€€€€ô¤ì(€€€€€ô((€€€€€½¹ÍÐÁÉ½Ù¥‘•ÉM•ÍÍ¥½¹%€ôÉ•ÍÁ½¹Í”¹ÁÉ½Ù¥‘•ÉM•ÍÍ¥½¹%ì(€€€€€¥˜€¡ÁÉ½Ù¥‘•ÉM•ÍÍ¥½¹%¤ì(€€€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹É•¥ÍÑ•ÉM•ÍÍ¥½¸¡ì(€€€€€€€€€ÁÉ½Ù¥‘•ÈèÉ••¥Ù•È°(€€€€€€€€€Í•ÍÍ¥½¹%èÁÉ½Ù¥‘•ÉM•ÍÍ¥½¹%°(€€€€€€€€€ÁÉ½©•ÑA…Ñ è‘¥ÍÕÍÍ¥½¸¹ÁÉ½©•ÑA…Ñ °(€€€€€€€€€ÍÑ…ÑÕÌè€%1œ°(€€€€€€€€€µ•Ñ…‘…Ñ„èì(€€€€€€€€€€€‘¥ÍÕÍÍ¥½¹%°(€€€€€€€€€€€‰É¥‘•=Ý¹•èÑÉÕ”°(€€€€€€€€€€€…Ù…¥±…‰¥±¥ÑäèÉ•ÍÁ½¹Í”¹…Ù…¥±…‰¥±¥Ñä€üü€	-I=U9œ°(€€€€€€€€€€€Í•ÍÍ¥½¹-¥¹èÉ•ÍÁ½¹Í”¹ÁÉ½Ù¥‘•ÉM•ÍÍ¥½¹-¥¹°(€€€€€€€€€€€€¸¸¸¡½±±…‰½É…Ñ¥½¹M•ÍÍ¥½¸€üì½±±…‰½É…Ñ¥½¹M•ÍÍ¥½¹%è½±±…‰½É…Ñ¥½¹M•ÍÍ¥½¸¹¥ô€èíô¤°(€€€€€€€€€ô°(€€€€€€€ô¤ì(€€€€€€€¥˜€¡½±±…‰½É…Ñ¥½¹M•ÍÍ¥½¸¤ì(€€€€€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹‰¥¹‘AÉ½Ù¥‘•ÉM•ÍÍ¥½¸¡ì(€€€€€€€€€€€½±±…‰½É…Ñ¥½¹M•ÍÍ¥½¹%è½±±…‰½É…Ñ¥½¹M•ÍÍ¥½¸¹¥°(€€€€€€€€€€€ÁÉ½Ù¥‘•ÈèÉ••¥Ù•È°(€€€€€€€€€€€Í•ÍÍ¥½¹%èÁÉ½Ù¥‘•ÉM•ÍÍ¥½¹%°(€€€€€€€€€ô¤ì(€€€€€€€ô(€€€€€ô((€€€€€½¹ÍÐµ•ÍÍ…”€ôÑ¡¥Ì¹ÍÑ½É…”¹É•…Ñ•5•ÍÍ…”¡ì(€€€€€€€‘¥ÍÕÍÍ¥½¹%°(€€€€€€€Í•¹‘•ÈèÉ••¥Ù•È°(€€€€€€€É••¥Ù•ÈèÉ••¥Ù•È€ôôô‘¥ÍÕÍÍ¥½¸¹‘É¥Ù•È€ü‘¥ÍÕÍÍ¥½¸¹Á••È€è‘¥ÍÕÍÍ¥½¸¹‘É¥Ù•È°(€€€€€€€É½±”è€É•ÍÁ½¹Í”œ°(€€€€€€€½¹Ñ•¹ÐèÉ•ÍÁ½¹Í”¹½¹Ñ•¹Ð°(€€€€€€€ÁÉ½©•ÑA…Ñ è‘¥ÍÕÍÍ¥½¸¹ÁÉ½©•ÑA…Ñ °(€€€€€€€ÁÉ½Ù¥‘•ÉM•ÍÍ¥½¹%°(€€€€€ô¤ì(€€€€€¥˜€¡½ÁÑ¥½¹Ì¹½Õ¹ÑI½Õ¹€„ôô™…±Í”¤Ñ¡¥Ì¹ÍÑ½É…”¹¥¹É•µ•¹Ñ¥ÍÕÍÍ¥½¹I½Õ¹¡‘¥ÍÕÍÍ¥½¹%¤ì(€€€€€¥˜€¡É•ÍÁ½¹Í”¹‰…­•¹‘MÝ¥Ñ¡•¤ì(€€€€€€€Ñ¡¥Ì¹…Õ‘¥Ð¹±½œ¡ì(€€€€€€€€€ÑÉ…•%è‘¥ÍÕÍÍ¥½¸¹ÑÉ…•%°(€€€€€€€€€‘¥ÍÕÍÍ¥½¹%°(€€€€€€€€€…Ñ¥½¸è€Á••È¹‰…­•¹‘}ÍÝ¥Ñ¡•œ°(€€€€€€€€€…•¹ÐèÉ••¥Ù•È°(€€€€€€€€€µ•Ñ…‘…Ñ„èÉ•ÍÁ½¹Í”¹‰…­•¹‘MÝ¥Ñ¡•°(€€€€€€€ô¤ì(€€€€€ô(€€€€€¥˜€¡ÑÉ…­•‘M•ÍÍ¥½¸¤ì(€€€€€€€½¹ÍÐÍ…µ•M•ÍÍ¥½¸€ôÁÉ½Ù¥‘•ÉM•ÍÍ¥½¹%€ôôôÑÉ…­•‘M•ÍÍ¥½¸¹Í•ÍÍ¥½¹%(€€€€€€€€€€˜˜€ …É•ÍÁ½¹Í”¹ÁÉ½Ù¥‘•ÉM•ÍÍ¥½¹-¥¹ñðÉ•ÍÁ½¹Í”¹ÁÉ½Ù¥‘•ÉM•ÍÍ¥½¹-¥¹€ôôôÁÉ½Ù¥‘•ÉM•ÍÍ¥½¹-¥¹¤ì(€€€€€€€¥˜€ …ÁÉ½Ù¥‘•ÉM•ÍÍ¥½¹%¤ì(€€€€€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•M•ÍÍ¥½¹MÑ…ÑÕÌ¡É••¥Ù•È°ÑÉ…­•‘M•ÍÍ¥½¸¹Í•ÍÍ¥½¹%°€%1œ°ÑÉ…­•‘M•ÍÍ¥½¸¹µ•Ñ…‘…Ñ„¤ì(€€€€€€€ô•±Í”¥˜€ …Í…µ•M•ÍÍ¥½¸¤ì(€€€€€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•M•ÍÍ¥½¹MÑ…ÑÕÌ¡É••¥Ù•È°ÑÉ…­•‘M•ÍÍ¥½¸¹Í•ÍÍ¥½¹%°€U9-9=]8œ°ì(€€€€€€€€€€€€¸¸¹ÑÉ…­•‘M•ÍÍ¥½¸¹µ•Ñ…‘…Ñ„°(€€€€€€€€€€€ÍÕÁ•ÉÍ•‘•‘	äèÁÉ½Ù¥‘•ÉM•ÍÍ¥½¹%°(€€€€€€€€€ô¤ì(€€€€€€€ô(€€€€€ô(€€€€€½¹ÍÐÍ¥¹…°€ô½ÁÑ¥½¹Ì¹…ÁÁ±å¥ÍÕÍÍ¥½¹A½±¥ä€ôôô™…±Í”€ü¹Õ±°€èÁ…ÉÍ•¥ÍÕÍÍ¥½¹M¥¹…°¡É•ÍÁ½¹Í”¹½¹Ñ•¹Ð¤ì(€€€€€¥˜€¡½ÁÑ¥½¹Ì¹…ÁÁ±å¥ÍÕÍÍ¥½¹A½±¥ä€„ôô™…±Í”¤ì(€€€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹M¥¹…°¡‘¥ÍÕÍÍ¥½¹%°Í¥¹…°¤ì(€€€€€ô(€€€€€½¹ÍÐÕÉÉ•¹Ñ™Ñ•ÉI•ÍÁ½¹Í”€ôÑ¡¥Ì¹ÍÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡‘¥ÍÕÍÍ¥½¹%¤ì(€€€€€¥˜€¡ÕÉÉ•¹Ñ™Ñ•ÉI•ÍÁ½¹Í”ü¹ÍÑ…ÑÕÌ€ôôô€AI}	UMdœ¤ì(€€€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹MÑ…ÑÕÌ¡‘¥ÍÕÍÍ¥½¹%°€%MUMM%9œ¤ì(€€€€€ô(€€€€€¥˜€¡Í¥¹…°€ôôô€9M}UMI}%M%=8œ¤ì(€€€€€€€½¹ÍÐÕÉÉ•¹Ð€ôÑ¡¥Ì¹ÍÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡‘¥ÍÕÍÍ¥½¹%¤ì(€€€€€€€¥˜€¡ÕÉÉ•¹Ðü¹ÍÑ…ÑÕÌ€ôôô€%MUMM%9œ¤ì(€€€€€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹MÑ…ÑÕÌ¡‘¥ÍÕÍÍ¥½¹%°€9M}UMI}%M%=8œ¤ì(€€€€€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹¥…¹½ÍÑ¥Œ¡‘¥ÍÕÍÍ¥½¹%°€AI}IEUMQ}UMI}%M%=8œ¤ì(€€€€€€€ô(€€€€€ô(€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹¥ÍÁ…Ñ ¡‘¥ÍÕÍÍ¥½¹%°€=5A1Qœ°¹Õ±°¤ì(€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹…¥±ÕÉ”¡‘¥ÍÕÍÍ¥½¹%°ì(€€€€€€€É••¥Ù•Èè¹Õ±°°(€€€€€€€µ•ÍÍ…•%è¹Õ±°°(€€€€€€€½Á•É…Ñ¥½¹-¥¹è¹Õ±°°(€€€€€ô¤ì(€€€€€Ñ¡¥Ì¹…Õ‘¥Ð¹±½œ¡ì(€€€€€€€ÑÉ…•%è‘¥ÍÕÍÍ¥½¸¹ÑÉ…•%°(€€€€€€€‘¥ÍÕÍÍ¥½¹%°(€€€€€€€…Ñ¥½¸è€Á••È¹É•ÍÁ½¹Í”œ°(€€€€€€€…•¹ÐèÉ••¥Ù•È°(€€€€€€€µ•Ñ…‘…Ñ„èì(€€€€€€€€€µ•ÍÍ…•%èµ•ÍÍ…”¹¥°(€€€€€€€€€‘ÕÉ…Ñ¥½¸èÉ•ÍÁ½¹Í”¹‘ÕÉ…Ñ¥½¸°(€€€€€€€€€µ½‘”è‘¥ÍÕÍÍ¥½¸¹µ½‘”°(€€€€€€€€€Á¡…Í”è‘¥ÍÕÍÍ¥½¹A¡…Í”¡‘¥ÍÕÍÍ¥½¸¹µ½‘”°½µÁ±•Ñ•‘I•ÍÁ½¹Í•Ì¤°(€€€€€€€€€Í¥¹…°°(€€€€€€€ô°(€€€€€ô¤ì(€€€€€É•ÑÕÉ¸µ•ÍÍ…”ì(€€€ô…Ñ €¡…ÕÍ”¤ì(€€€€€¥˜€¡ÁÉ½Ù¥‘•ÉAÉ½µ¥Í”¤ì(€€€€€€€Ñ•Éµ¥¹…Ñ¥½¹½¹™¥Éµ•€ô…Ý…¥ÐÝ…¥Ñ½É½µÁ±•Ñ¥½¸¡ÁÉ½Ù¥‘•ÉAÉ½µ¥Í”°Ñ¡¥Ì¹Ñ•Éµ¥¹…Ñ¥½¹É…•5Ì¤ì(€€€€€€€¥˜€ …Ñ•Éµ¥¹…Ñ¥½¹½¹™¥Éµ•¤ì(€€€€€€€€€Ñ¡¥Ì¹ÕÁ‘…Ñ•A••ÉIÕ¹Ñ¥µ”¡‘¥ÍÕÍÍ¥½¹%°‘¥ÍÁ…Ñ¡%°ì(€€€€€€€€€€€ÍÑ…Ñ”è€MQ11œ°(€€€€€€€€€€€ÁÉ½•ÍÍ±¥Ù”èÑÉÕ”°(€€€€€€€€€€€½¹¹•Ñ¥½¹±¥Ù”èÑÉÕ”°(€€€€€€€€€ô¤ì(€€€€€€€ô(€€€€€ô(€€€€€½¹ÍÐÉÕ¹Ñ¥µ”€ôÑ¡¥Ì¹ÍÑ½É…”¹•ÑA••ÉIÕ¹Ñ¥µ”¡‘¥ÍÕÍÍ¥½¹%¤ì(€€€€€¥˜€¡ÉÕ¹Ñ¥µ”€˜˜ÉÕ¹Ñ¥µ”¹‘¥ÍÁ…Ñ¡%€ôôô‘¥ÍÁ…Ñ¡%€˜˜ÉÕ¹Ñ¥µ”¹ÍÑ…Ñ”€„ôô€MQ11œ€˜˜Ñ•Éµ¥¹…Ñ¥½¹½¹™¥Éµ•¤ì(€€€€€€€Ñ¡¥Ì¹ÕÁ‘…Ñ•A••ÉIÕ¹Ñ¥µ”¡‘¥ÍÕÍÍ¥½¹%°‘¥ÍÁ…Ñ¡%°ìÍÑ…Ñ”è€%1œô¤ì(€€€€€ô(€€€€€ÑÉäì(€€€€€€€½¹ÍÐ‰•™½É•…¥±ÕÉ”€ôÑ¡¥Ì¹ÍÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡‘¥ÍÕÍÍ¥½¹%¤ì(€€€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹¥ÍÁ…Ñ ¡‘¥ÍÕÍÍ¥½¹%°€%1œ°¹Õ±°¤ì(€€€€€€€¥˜€¡‰•™½É•…¥±ÕÉ”ü¹ÍÑ…ÑÕÌ€ôôô€%MUMM%9œ¤ì(€€€€€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹¥…¹½ÍÑ¥Œ (€€€€€€€€€€€‘¥ÍÕÍÍ¥½¹%°(€€€€€€€€€€€€AI=Y%I}II=Hœ°(€€€€€€€€€€€‘¥…¹½ÍÑ¥É½µÉÉ½È¡…ÕÍ”°É••¥Ù•È°ÑÉ…­•‘M•ÍÍ¥½¸ü¹µ•Ñ…‘…Ñ„¹Í•ÍÍ¥½¹-¥¹¤°(€€€€€€€€€€¤ì(€€€€€€€ô(€€€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹…¥±ÕÉ”¡‘¥ÍÕÍÍ¥½¹%°ì(€€€€€€€€€É••¥Ù•È°(€€€€€€€€€µ•ÍÍ…•%è½ÁÑ¥½¹Ì¹™…¥±•‘5•ÍÍ…•%€üü¹Õ±°°(€€€€€€€€€½Á•É…Ñ¥½¹-¥¹è½ÁÑ¥½¹Ì¹½Á•É…Ñ¥½¹-¥¹€üü¹Õ±°°(€€€€€€€ô¤ì(€€€€€ô…Ñ ì(€€€€€€€€¼¼AÉ•Í•ÉÙ”Ñ¡”ÁÉ½Ù¥‘•È•ÉÉ½È¥˜Á•ÉÍ¥ÍÑ•¹”¥ÌÕ¹…Ù…¥±…‰±”‘ÕÉ¥¹œ™…¥±ÕÉ”¡…¹‘±¥¹œ¸(€€€€€ô(€€€€€Ñ¡¥Ì¹…Õ‘¥Ð¹±½œ¡ì(€€€€€€€ÑÉ…•%è‘¥ÍÕÍÍ¥½¸¹ÑÉ…•%°(€€€€€€€‘¥ÍÕÍÍ¥½¹%°(€€€€€€€…Ñ¥½¸è€•ÉÉ½Èœ°(€€€€€€€…•¹ÐèÉ••¥Ù•È°(€€€€€€€µ•Ñ…‘…Ñ„èì•ÉÉ½Èè…ÕÍ”¥¹ÍÑ…¹•½˜ÉÉ½È€ü…ÕÍ”¹µ•ÍÍ…”€èMÑÉ¥¹œ¡…ÕÍ”¤ô°(€€€€€ô¤ì(€€€€€½¹ÍÐÕÉÉ•¹Ð€ôÑ¡¥Ì¹ÍÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡‘¥ÍÕÍÍ¥½¹%¤ì(€€€€€¥˜€¡ÑÉ…­•‘M•ÍÍ¥½¸¤ì(€€€€€€€ÑÉäì(€€€€€€€€€Ñ¡¥Ì¹ÍÑ½É…”¹ÕÁ‘…Ñ•M•ÍÍ¥½¹MÑ…ÑÕÌ¡É••¥Ù•È°ÑÉ…­•‘M•ÍÍ¥½¸¹Í•ÍÍ¥½¹%°€U9-9=]8œ°ì(€€€€€€€€€€€€¸¸¹ÑÉ…­•‘M•ÍÍ¥½¸¹µ•Ñ…‘…Ñ„°(€€€€€€€€€€€±…ÍÑÉÉ½Èè…ÕÍ”¥¹ÍÑ…¹•½˜ÉÉ½È€ü…ÕÍ”¹µ•ÍÍ…”€èMÑÉ¥¹œ¡…ÕÍ”¤°(€€€€€€€€€ô¤ì(€€€€€€€ô…Ñ ì(€€€€€€€€€€¼¼Q¡”ÁÉ½Ù¥‘•Èµ…ä¡…Ù”É•µ½Ù•Ñ¡”Í•ÍÍ¥½¸Ý¡¥±”Ñ¡”É•ÅÕ•ÍÐ™…¥±•¸(€€€€€€€ô(€€€€€ô(€€€€€¥˜€¡½ÁÑ¥½¹Ì¹ÕÁ‘…Ñ•…¥±ÕÉ•MÑ…ÑÕÌ€„ôô™…±Í”€˜˜ÕÉÉ•¹Ð€˜˜ÕÉÉ•¹Ð¹ÍÑ…ÑÕÌ€ôôô€%MUMM%9œ¤ì(€€€€€€€½¹ÍÐ¹•áÑMÑ…ÑÕÌ€ô½¹ÑÉ½±±•È¹Í¥¹…°¹…‰½ÉÑ•€˜˜Ñ¡¥Ì¹…¹•±±…Ñ¥½¹I•ÅÕ•ÍÑÌ¹¡…Ì¡‘¥ÍÕÍÍ¥½¹%¤(€€€€€€€€€€ü€911œ(€€€€€€€€€€è±…ÍÍ¥™å…¥±ÕÉ”¡…ÕÍ”¤ì(€€€€€€€¥˜€¡¹•áÑMÑ…ÑÕÌ€ôôô€AI}	UMdœ¤ì(€€€€€€€€€Ñ¡¥Ì¹…Õ‘¥Ð¹±½œ¡ì(€€€€€€€€€€€ÑÉ…•%è‘¥ÍÕÍÍ¥½¸¹ÑÉ…•%°(€€€€€€€ƒntÖÚ$z{-®éÜj×&ö6W74Æ—fS¢7F—f—G’ç&ö6W74Æ—fRÀ¢6öææV7F–öäÆ—fS¢7F—f—G’æ6öææV7F–öäÆ—fRÀ¢6W76–öäÆ—fS¢7F—f—G’ç6W76–öäÆ—fRÀ¢FWF–Ã¢7F—f—G’æFWF–ÂÀ¢ÒÀ¢Ò“°¢Ò6F6‚°¢òò'VçF–ÖRWfVçBW'6—7FVæ6R×W7Bæ÷B'&V²F†R&÷f–FW"G&ç7÷'Bà¢Ð¢Ð ¢&—fFRÖöæ—F÷%VW%'VçF–ÖR€¢F—67W76–öä–C¢7G&–ærÀ¢F—7F6„–C¢7G&–ærÀ¢6öçG&öÆÆW#¢&÷'D6öçG&öÆÆW"À¢“¢fö–B°¢6öç7B7W'&VçBÒF†—2ç7F÷&vRævWEVW%'VçF–ÖR†F—67W76–öä–B“°¢–b‚7W'&VçBÇÂ7W'&VçBæF—7F6„–BÓÒF—7F6„–B’&WGW&ã°¢–b…²t4ôÕÄUDTBrÂtd”ÄTBuÒæ–æ6ÇVFW2†7W'&VçBç7FFR’’&WGW&ã°¢–b†7W'&VçBç7FFRÓÓÒu5DÄÄTBr’&WGW&ã°¢6öç7Bæ÷rÒFFRææ÷r‚“°¢6öç7BVÆ6VD×2Òæ÷rÒ7W'&VçBç7F'FVDC°¢6öç7B–FÆT×2Òæ÷rÒ7W'&VçBæÆ7D7F—f—G”C°¢ÆWBæW‡E7FFS¢VW%'VçF–ÖU†6RÒ7W'&VçBç7FFS°¢ÆWB6†÷VÆD&÷'BÒfÇ6S°¢–b†7W'&VçBç&ö6W74Æ—fRÓÓÒfÇ6R’°¢æW‡E7FFRÒtd”ÄTBs°¢6†÷VÆD&÷'BÒG'VS°¢ÒVÇ6R–b†VÆ6VD×2ãÒF†—2çGW&ä†&DÆ–Ö—D×2’°¢æW‡E7FFRÒu5DÄÄTBs°¢6†÷VÆD&÷'BÒG'VS°¢ÒVÇ6R–b†7W'&VçBç7FFRÓÓÒu5D%D”ärrbbVÆ6VD×2ãÒF†—2ç7F'GWF–ÖV÷WD×2’°¢æW‡E7FFRÒu5DÄÄTBs°¢6†÷VÆD&÷'BÒG'VS°¢ÒVÇ6R–b†7W'&VçBç7FFRÓÒut•D”äuõU$Ô•54”ôârbb–FÆT×2ãÒF†—2æ–FÆUF–ÖV÷WD×2’°¢æW‡E7FFRÒ–FÆT×2ãÒF†—2æ–FÆUF–ÖV÷WD×2²F†—2ç7FÆÄw&6T×2bb7W'&VçBæ7W'&VçEFööÀ¢òu5DÄÄTBp¢¢t”DÄUõ5U5T5DTBs°¢6†÷VÆD&÷'BÒæW‡E7FFRÓÓÒu5DÄÄTBs°¢Ð¢–b†æW‡E7FFRÓÒ7W'&VçBç7FFR’F†—2çWFFUVW%'VçF–ÖR†F—67W76–öä–BÂF—7F6„–BÂ²7FFS¢æW‡E7FFRÒ“°¢–b‡6†÷VÆD&÷'Bbb6öçG&öÆÆW"ç6–væÂæ&÷'FVB’6öçG&öÆÆW"æ&÷'B‚“°¢Ð ¢&—fFRVç7W&TæôF—7F6„–äfÆ–v‡B†F—67W76–öä–C¢7G&–ær“¢fö–B°¢–b‡F†—2æ–äfÆ–v‡Bæ†2†F—67W76–öä–B’’°¢F‡&÷ræWr&÷f–FW$W'&÷"‚t%U5’rÂF—67W76–öâG¶F—67W76–öä–GÒÇ&VG’†2&÷f–FW"&WVW7B–âfÆ–v‡F“°¢Ð¢Ð ¢&—fFRVç7W&U&÷f–FW$æ÷DÆV6VB‡&÷f–FW#¢vVçEG—RÂ&ö¦V7EFƒ¢7G&–ær“¢fö–B°¢–b‡F†—2ç7F÷&vRæ†56W76–öäÆV6R‡&÷f–FW"Â&ö¦V7EF‚’’°¢F‡&÷ræWr6W76–öä'W7”W'&÷"†6W76–öâf÷"G·&÷f–FW'Ò—2Ç&VG’ÆV6VBf÷"&ö¦V7BG·&ö¦V7EF‡Ö“°¢Ð¢Ð ¢&—fFR7F'D&6¶w&÷VæDF—7F6‚€¢F—67W76–öä–C¢7G&–ærÀ¢&V6V—fW#¢vVçEG—RÀ¢&ö×C¢7G&–ærÀ¢&Wf–÷W4ÖW76vW3¢ÖW76vUµÒÀ¢÷F–öç3¢°¢WFFTf–ÇW&U7FGW3ó¢&ööÆVã°¢6÷VçE&÷VæCó¢&ööÆVã°¢F—67W76–öäÆV6T÷væVCó¢&ööÆVã°¢Ç”F—67W76–öåöÆ–7“ó¢&ööÆVã°¢f–ÆVDÖW76vT–Có¢7G&–ærÂçVÆÃ°¢÷W&F–öä¶–æCó¢F—67W76–öä÷W&F–öä¶–æC°¢ÒÒ·ÒÀ¢“¢fö–B°¢fö–BF†—2æF—7F6…FôvVçB†F—67W76–öä–BÂ&V6V—fW"Â&ö×BÂ&Wf–÷W4ÖW76vW2Â÷F–öç2’æ6F6‚‚‚’Óâ°¢òòF—7F6…FôvVçBW'6—7G2æBVF—G2F†Rf–ÇW&S²F†R6ÆÆW"Ç&VG¢òò&V6V—fVBâ66WFVB7–æ6‡&öæ÷W2&WVW7Bà¢Ò“°¢Ð ¢&—fFRVWVTF—7F6‚†F—67W76–öä–C¢7G&–ærÂ&V6V—fW#¢vVçEG—R“¢fö–B°¢F†—2ç7F÷&vRçWFFTF—67W76–öäF–væ÷7F–2†F—67W76–öä–BÂçVÆÂÂçVÆÂ“°¢F†—2ç7F÷&vRçWFFTF—67W76–öäF—7F6‚†F—67W76–öä–BÂuTUTTBrÂ&V6V—fW"“°¢Ð ¢&—fFR7F'D&6¶w&÷VæDw&VVÖVçD6öæf—&ÖF–öâ€¢F—67W76–öä–C¢7G&–ærÀ¢vVçC¢vVçEG—RÀ¢÷F†W$vVçC¢vVçEG—RÀ¢6öæ6ÇW6–öã¢7G&–ærÀ¢FV6—6–öä†6ƒ¢7G&–ærÀ¢&ö×C¢7G&–ærÀ¢&Wf–÷W4ÖW76vW3¢ÖW76vUµÒÀ¢f–ÆVDÖW76vT–C¢7G&–ærÂçVÆÂÀ¢“¢fö–B°¢fö–BF†—2æF—7F6…FôvVçB€¢F—67W76–öä–BÀ¢÷F†W$vVçBÀ¢&ö×BÀ¢&Wf–÷W4ÖW76vW2À¢°¢WFFTf–ÇW&U7FGW3¢fÇ6RÀ¢6÷VçE&÷VæC¢fÇ6RÀ¢F—67W76–öäÆV6T÷væVC¢G'VRÀ¢Ç”F—67W76–öåöÆ–7“¢fÇ6RÀ¢f–ÆVDÖW76vT–BÀ¢÷W&F–öä¶–æC¢vw&VVÖVçEö6öæf—&ÖF–öârÀ¢ÒÀ¢’çF†Vâ‚‡VW%&W7öç6R’Óâ°¢–b‚VW%&W7öç6R’&WGW&ã°¢6öç7BFV6—6–öâÒ'6Tw&VVÖVçE&W7öç6R‡VW%&W7öç6Ræ6öçFVçBÂFV6—6–öä†6‚“°¢6öç7BF—67W76–öâÒF†—2ç7F÷&vRævWDF—67W76–öâ†F—67W76–öä–B“°¢–b‚F—67W76–öâÇÂ—5FW&Ö–æÂ†F—67W76–öâç7FGW2’ÇÂ—5W6VB†F—67W76–öâç7FGW2’’&WGW&ã°¢–b‚FV6—6–öâæ66WFVB’°¢F†—2ç7F÷&vRçWFFTF—67W76–öäF—7F6‚†F—67W76–öä–BÂt4ôÕÄUDTBrÂvVçB“°¢F†—2æVF—BæÆör‡°¢G&6T–C¢F—67W76–öâçG&6T–BÀ¢F—67W76–öä–BÀ¢7F–öã¢vw&VVÖVçBç&V¦V7FVBrÀ¢vVçC¢÷F†W$vVçBÀ¢ÖWFFF¢²&V6öã¢FV6—6–öâç&V6öâóòv–çfÆ–Eö÷%÷&V¦V7FVE÷&W7öç6RrÒÀ¢Ò“°¢&WGW&ã°¢Ð¢6öç7BVW$w&VVÖVçBÒF†—2ç7F÷&vRç&V6÷&Dw&VVÖVçB‡°¢F—67W76–öä–BÀ¢vVçC¢÷F†W$vVçBÀ¢7VÖÖ'“¢6öæ6ÇW6–öâÀ¢Ò“°¢F†—2æVF—BæÆör‡°¢G&6T–C¢F—67W76–öâçG&6T–BÀ¢F—67W76–öä–BÀ¢7F–öã¢w&VVÖVçBâG¶÷F†W$vVçGÖÀ¢vVçC¢÷F†W$vVçBÀ¢ÖWFFF¢²FV6—6–öä†6ƒ¢VW$w&VVÖVçBæFV6—6–öä†6‚Â6÷W&6S¢v6öææV7F÷%ö6öæf—&ÖF–öârÒÀ¢Ò“°¢F†—2æ6ö×ÆWFTF—67W76–öâ†F—67W76–öâÂ6öæ6ÇW6–öâÂVW$w&VVÖVçBæw&VVD'’“°¢Ò’æ6F6‚‚†6W6R’Óâ°¢6öç7BF—67W76–öâÒF†—2ç7F÷&vRævWDF—67W76–öâ†F—67W76–öä–B“°¢F†—2æVF—BæÆör‡°¢G&6T–C¢F—67W76–öãòçG&6T–BóòG%òG¶F—67W76–öä–GÖÀ¢F—67W76–öä–BÀ¢7F–öã¢vw&VVÖVçBææ÷F–f–6F–öåöf–ÆVBrÀ¢vVçC¢vVçBÓÓÒ÷F†W$vVçBòF—67W76–öãòæG&—fW"óò÷F†W$vVçB¢÷F†W$vVçBÀ¢ÖWFFF¢²W'&÷#¢6W6R–ç7Fæ6VöbW'&÷"ò6W6RæÖW76vR¢7G&–ær†6W6R’ÒÀ¢Ò“°¢Ò“°¢Ð ¢&—fFRVç7W&Uv—F†–ä'VFvWB†F—67W76–öã¢°¢–C¢7G&–æs°¢7&VFVDC¢7G&–æs°¢7FGW3¢7G&–æs°¢ÒÂW‡G&6öçFVçBÒrr“¢fö–B°¢6öç7BVÆ6VBÒFFRææ÷r‚’ÒFFRç'6R†F—67W76–öâæ7&VFVDB“°¢–b†VÆ6VBâF†—2æÖ„GW&F–öä×2’°¢F†—2ç7F÷&vRçWFFTF—67W76–öå7FGW2†F—67W76–öâæ–BÂuD”ÔTõUBrÂ²VæFVDC¢æWrFFR‚’çFô•4õ7G&–ær‚’Ò“°¢F†—2ç7F÷&vRçWFFTF—67W76–öäF–væ÷7F–2†F—67W76–öâæ–BÂtÔ…ôEU$D”ôâr“°¢F†—2æVF—BæÆör‡°¢G&6T–C¢F†—2ç7F÷&vRævWDF—67W76–öâ†F—67W76–öâæ–B“òçG&6T–BóòG%òG¶F—67W76–öâæ–GÖÀ¢F—67W76–öä–C¢F—67W76–öâæ–BÀ¢7F–öã¢vF—67W76–öâçF–ÖV÷WBrÀ¢vVçC¢w7—7FVÒrÀ¢ÖWFFF¢²&V6öã¢vÖ…öGW&F–öârÂÖ„GW&F–öä×3¢F†—2æÖ„GW&F–öä×2ÒÀ¢Ò“°¢F‡&÷ræWrW'&÷"†F—67W76–öâG¶F—67W76–öâæ–GÒW†6VVFVBÖ‚GW&F–öæ“°¢Ð¢6öç7B7W'&VçDÆVæwF‚ÒF†—2ç7F÷&vRævWDÖW76vW2†F—67W76–öâæ–B¢ç&VGV6R‚‡F÷FÂÂÖW76vR’ÓâF÷FÂ²ÖW76vRæ6öçFVçBæÆVæwF‚Â“°¢–b†7W'&VçDÆVæwF‚²W‡G&6öçFVçBæÆVæwF‚âF†—2æÖ…F÷FÄÖW76vT6†'2’°¢F†—2ç7F÷&vRçWFFTF—67W76–öå7FGW2†F—67W76–öâæ–BÂuD”ÔTõUBrÂ²VæFVDC¢æWrFFR‚’çFô•4õ7G&–ær‚’Ò“°¢F†—2ç7F÷&vRçWFFTF—67W76–öäF–væ÷7F–2†F—67W76–öâæ–BÂtÔU54tUô%TDtUBr“°¢F†—2æVF—BæÆör‡°¢G&6T–C¢F†—2ç7F÷&vRævWDF—67W76–öâ†F—67W76–öâæ–B“òçG&6T–BóòG%òG¶F—67W76–öâæ–GÖÀ¢F—67W76–öä–C¢F—67W76–öâæ–BÀ¢7F–öã¢vF—67W76–öâçF–ÖV÷WBrÀ¢vVçC¢w7—7FVÒrÀ¢ÖWFFF¢²&V6öã¢vÖ…÷F÷FÅöÖW76vUö6†'2rÂÖ…F÷FÄÖW76vT6†'3¢F†—2æÖ…F÷FÄÖW76vT6†'2ÒÀ¢Ò“°¢F‡&÷ræWrW'&÷"†F—67W76–öâG¶F—67W76–öâæ–GÒW†6VVFVBÖW76vR'VFvWF“°¢Ð¢Ð ¢&—fFR6ö×ÆWFTF—67W76–öâ€¢F—67W76–öã¢²–C¢7G&–æs²7FGW3¢7G&–æs²G&6T–C¢7G&–ærÒÀ¢6öæ6ÇW6–öã¢7G&–ærÀ¢w&VVD'“¢vVçEG—UµÒÀ¢“¢6Æ÷6TF—67W76–öä÷WGWB°¢–b†F—67W76–öâç7FGW2ÓÒtu$TTBr’°¢F†—2ç7F÷&vRçWFFTF—67W76–öå7FGW2†F—67W76–öâæ–BÂtu$TTBr“°¢Ð¢6öç7BFV6—6–öâÒF†—2ç7F÷&vRævWDFV6—6–öä'”F—67W76–öâ†F—67W76–öâæ–B’óòF†—2ç7F÷&vRæ7&VFTFV6—6–öâ‡°¢F—67W76–öä–C¢F—67W76–öâæ–BÀ¢7VÖÖ'“¢6öæ6ÇW6–öâÀ¢6†ævW3¢µÒÀ¢w&VVD'’À¢Ò“°¢F†—2æVF—BæÆör‡°¢G&6T–C¢F—67W76–öâçG&6T–BÀ¢F—67W76–öä–C¢F—67W76–öâæ–BÀ¢7F–öã¢vFV6—6–öâæ7&VFVBrÀ¢vVçC¢w7—7FVÒrÀ¢ÖWFFF¢²FV6—6–öä–C¢FV6—6–öâæ–BÂFV6—6–öä†6ƒ¢FV6—6–öâæFV6—6–öä†6‚ÒÀ¢Ò“°¢F†—2ç7F÷&vRçWFFTF—67W76–öå7FGW2†F—67W76–öâæ–BÂt4ôÕÄUDTBrÂ°¢6öæ6ÇW6–öâÀ¢VæFVDC¢æWrFFR‚’çFô•4õ7G&–ær‚’À¢Ò“°¢F†—2ç7F÷&vRçWFFTF—67W76–öäF—7F6‚†F—67W76–öâæ–BÂçVÆÂÂçVÆÂ“°¢F†—2ç7F÷&vRç&VÆV6U6W76–öäÆV6R‚v6ÆVFRrÂF†—2ç7F÷&vRævWDF—67W76–öâ†F—67W76–öâæ–B’ç&ö¦V7EF‚ÂF—67W76–öâæ–B“°¢F†—2ç7F÷&vRç&VÆV6U6W76–öäÆV6R‚v6öFW‚rÂF†—2ç7F÷&vRævWDF—67W76–öâ†F—67W76–öâæ–B’ç&ö¦V7EF‚ÂF—67W76–öâæ–B“°¢F†—2æVF—BæÆör‡°¢G&6T–C¢F—67W76–öâçG&6T–BÀ¢F—67W76–öä–C¢F—67W76–öâæ–BÀ¢7F–öã¢vF—67W76–öâæ6Æ÷6VBrÀ¢vVçC¢w7—7FVÒrÀ¢ÖWFFF¢²FV6—6–öä–C¢FV6—6–öâæ–BÒÀ¢Ò“°¢F†—2æ&6†—fTF—67W76–öå6W76–öç2†F—67W76–öâæ–B“°¢&WGW&â²F—67W76–öä–C¢F—67W76–öâæ–BÂ7FGW3¢t4ôÕÄUDTBrÂFV6—6–öä–C¢FV6—6–öâæ–BÓ°¢Ð ¢&—fFR&6†—fTF—67W76–öå6W76–öç2†F—67W76–öä–C¢7G&–ær“¢fö–B°¢–b‚F†—2æ&6†—fU6W76–öç4öä6Æ÷6R’&WGW&ã°¢6öç7BF—67W76–öâÒF†—2ç7F÷&vRævWDF—67W76–öâ†F—67W76–öä–B“°¢6öç7B6öÆÆ&÷&F–öå6W76–öâÒF—67W76–öãòæ6öÆÆ&÷&F–öå6W76–öä–@¢òF†—2ç7F÷&vRævWD6öÆÆ&÷&F–öå6W76–öâ†F—67W76–öâæ6öÆÆ&÷&F–öå6W76–öä–B¢¢çVÆÃ°¢–b†6öÆÆ&÷&F–öå6W76–öâbb6öÆÆ&÷&F–öå6W76–öâçöÆ–7’ÓÒvg&W6‚r’°¢F†—2æVF—BæÆör‡°¢G&6T–C¢F—67W76–öãòçG&6T–BóòG%òG¶F—67W76–öä–GÖÀ¢F—67W76–öä–BÀ¢7F–öã¢w6W76–öâæ&6†—fU÷6†&VE÷6¶—VBrÀ¢vVçC¢w7—7FVÒrÀ¢ÖWFFF¢²6öÆÆ&÷&F–öå6W76–öä–C¢6öÆÆ&÷&F–öå6W76–öâæ–BÂöÆ–7“¢6öÆÆ&÷&F–öå6W76–öâçöÆ–7’ÒÀ¢Ò“°¢&WGW&ã°¢Ð¢f÷"†6öç7B6W76–öâöbF†—2ç7F÷&vRæÆ—7E6W76–öç4f÷$F—67W76–öâ†F—67W76–öä–B’’°¢6öç7B6öææV7F÷"ÒF†—2æ6öææV7F÷'5·6W76–öâç&÷f–FW%Ó°¢6öç7B¶–æBÒ&VE&÷f–FW%6W76–öä¶–æB‡6W76–öâæÖWFFFç6W76–öä¶–æB“°¢fö–B&öÖ—6Rç&W6öÇfR†6öææV7F÷#òæ&6†—fU6W76–öãòâ‡6W76–öâç6W76–öä–BÂ¶–æB’óòfÇ6R¢çF†Vâ‚†&6†—fVB’Óâ°¢–b†&6†—fVB’F†—2ç7F÷&vRçWFFU6W76–öå7FGW2‡6W76–öâç&÷f–FW"Â6W76–öâç6W76–öä–BÂt$4„•dTBrÂ6W76–öâæÖWFFF“°¢F†—2æVF—BæÆör‡°¢G&6T–C¢F†—2ç7F÷&vRævWDF—67W76–öâ†F—67W76–öä–B“òçG&6T–BóòG%òG¶F—67W76–öä–GÖÀ¢F—67W76–öä–BÀ¢7F–öã¢&6†—fVBòw6W76–öâæ&6†—fVBr¢w6W76–öâæ&6†—fU÷Vç7W÷'FVBrÀ¢vVçC¢6W76–öâç&÷f–FW"À¢ÖWFFF¢²6W76–öä–C¢6W76–öâç6W76–öä–BÂ6W76–öä¶–æC¢¶–æBóòçVÆÂÒÀ¢Ò“°¢Ò¢æ6F6‚‚†6W6R’ÓâF†—2æVF—BæÆör‡°¢G&6T–C¢F†—2ç7F÷&vRævWDF—67W76–öâ†F—67W76–öä–B“òçG&6T–BóòG%òG¶F—67W76–öä–GÖÀ¢F—67W76–öä–BÀ¢7F–öã¢w6W76–öâæ&6†—fUöf–ÆVBrÀ¢vVçC¢6W76–öâç&÷f–FW"À¢ÖWFFF¢²6W76–öä–C¢6W76–öâç6W76–öä–BÂW'&÷#¢&VF7DF–væ÷7F–2†6W6R–ç7Fæ6VöbW'&÷"ò6W6RæÖW76vR¢7G&–ær†6W6R’’ÒÀ¢Ò’“°¢Ð¢Ð§Ð ¦gVæ7F–öâ'V–ÆDw&VVÖVçE&ö×B†6öæ6ÇW6–öã¢7G&–ærÂFV6—6–öä†6ƒ¢7G&–ær“¢7G&–ær°¢&WGW&â°¢tvVçD'&–FvRw&VVÖVçB6öæf—&ÖF–öâ&WVW7BârÀ¢u&Wf–WrF†R6æöæ–6Â6öæ6ÇW6–öâ&VÆ÷rv–ç7BF†RF—67W76–öâ6öçFW‡BârÀ¢tFòæ÷B6ÆÂvVçD'&–FvRFööÇ2â&WGW&âW†7FÇ’öæR¥4ôâö&¦V7BæBæòÖ&¶F÷vâârÀ¢W6R²&vVçF'&–FvTFV6—6–öâ#¢&66WB"Â&FV6—6–öä†6‚#¢"G¶FV6—6–öä†6‡Ò'ÒöæÇ’–b–÷R66WB—BVæ6†ævVBæÀ¢÷F†W'v—6RW6R²&vVçF'&–FvTFV6—6–öâ#¢'&V¦V7B"Â&FV6—6–öä†6‚#¢"G¶FV6—6–öä†6‡Ò"Â'&V6öâ#¢&'&–Vb&V6öâ'ÒæÀ¢t6æöæ–6Â6öæ6ÇW6–öã¢rÀ¢6öæ6ÇW6–öâÀ¢Òæ¦ö–â‚uÆåÆâr“°§Ð ¦gVæ7F–öâ'6Tw&VVÖVçE&W7öç6R€¢6öçFVçC¢7G&–ærÀ¢W‡V7FVD†6ƒ¢7G&–ærÀ¢“¢²66WFVC¢&ööÆVã²&V6öãó¢7G&–ærÒ°¢6öç7B7F'BÒ6öçFVçBæ–æFW„öb‚w²r“°¢6öç7BVæBÒ6öçFVçBæÆ7D–æFW„öb‚wÒr“°¢–b‡7F'BÂÇÂVæBÃÒ7F'B’&WGW&â²66WFVC¢fÇ6RÂ&V6öã¢vÖ—76–æuö§6öåö6öæf—&ÖF–öârÓ°¢G'’°¢6öç7BfÇVRÒ¥4ôâç'6R†6öçFVçBç6Æ–6R‡7F'BÂVæB²’’2&V6÷&CÇ7G&–ærÂVæ¶æ÷vãã°¢–b‡fÇVRæFV6—6–öä†6‚ÓÒW‡V7FVD†6‚’&WGW&â²66WFVC¢fÇ6RÂ&V6öã¢vFV6—6–öåö†6…öÖ—6ÖF6‚rÓ°¢–b‡fÇVRævVçF'&–FvTFV6—6–öâÓÓÒv66WBr’&WGW&â²66WFVC¢G'VRÓ°¢&WGW&â°¢66WFVC¢fÇ6RÀ¢&V6öã¢G—VöbfÇVRç&V6öâÓÓÒw7G&–ærròfÇVRç&V6öâ¢wVW%÷&V¦V7FVBrÀ¢Ó°¢Ò6F6‚°¢&WGW&â²66WFVC¢fÇ6RÂ&V6öã¢v–çfÆ–Eö§6öåö6öæf—&ÖF–öârÓ°¢Ð§Ð ¦gVæ7F–öâ&VE&÷f–FW%6W76–öä¶–æB‡fÇVS¢Væ¶æ÷vâ“¢&÷f–FW%6W76–öä¶–æBÂVæFVf–æVB°¢&WGW&âfÇVRÓÓÒv6ÆVFRÖ6Æ’rÇÂfÇVRÓÓÒv6öFW‚Ö6Æ’rÇÂfÇVRÓÓÒv6öFW‚Ö×6W'fW"p¢òfÇVP¢¢VæFVf–æVC°§Ð ¦gVæ7F–öâ76W'E'F–6—çG2†G&—fW#¢vVçEG—RÂVW#¢vVçEG—R“¢fö–B°¢–b†G&—fW"ÓÓÒVW"’F‡&÷ræWrW'&÷"‚tF—67W76–öâG&—fW"æBVW"×W7B&RF–ffW&VçBvVçG2r“°§Ð ¦gVæ7F–öâF—67W76–öäÖöFU&æ²†ÖöFS¢F—67W76–öäÖöFR“¢çVÖ&W"°¢&WGW&âÖöFRÓÓÒw&Wf–Wrrò¢ÖöFRÓÓÒvF—67W76–öârò¢#°§Ð ¦gVæ7F–öâ—4ÆVv7•&WG'–&ÆUVW$ÖW76vR€¢ÖW76vS¢ÖW76vRÀ¢F—67W76–öã¢–6³ÄF—67W76–öâÂvG&—fW"rÂwVW"sâÀ¢“¢&ööÆVâ°¢6öç7BW‡V7FVE&V6V—fW"ÒÖW76vRç6VæFW"ÓÓÒF—67W76–öâæG&—fW"òF—67W76–öâçVW"¢F—67W76–öâæG&—fW#°¢&WGW&â†ÖW76vRç&öÆRÓÓÒw&÷÷6ÂrÇÂÖW76vRç&öÆRÓÓÒw&W7öç6Rr¢bbÖW76vRç6VæFW"ÓÒÖW76vRç&V6V—fW ¢bbÖW76vRç&V6V—fW"ÓÓÒW‡V7FVE&V6V—fW#°§Ð ¦gVæ7F–öâ76W'EFW‡B‡fÇVS¢7G&–ærÂÆ&VÃ¢7G&–ær“¢fö–B°¢–b‡G—VöbfÇVRÓÒw7G&–ærrÇÂfÇVRçG&–Ò‚’æÆVæwF‚ÓÓÒ’°¢F‡&÷ræWrW'&÷"†G¶Æ&VÇÒ×W7B&RæöâÖV×G’7G&–æv“°¢Ð§Ð ¦7–æ2gVæ7F–öâv—F…F–ÖV÷WCÅCâ‡&öÖ—6S¢&öÖ—6SÅCâÂF–ÖV÷WD×3¢çVÖ&W"ÂöåF–ÖV÷WCó¢‚’Óâfö–B“¢&öÖ—6SÅCâ°¢–b‚çVÖ&W"æ—4f–æ—FR‡F–ÖV÷WD×2’ÇÂF–ÖV÷WD×2ÃÒ’&WGW&â&öÖ—6S°¢ÆWBF–ÖW#¢&WGW&åG—SÇG—Vöb6WEF–ÖV÷WCâÂVæFVf–æVC°¢G'’°¢&WGW&âv—B&öÖ—6Rç&6R…°¢&öÖ—6RÀ¢æWr&öÖ—6SÅCâ‚…òÂ&V¦V7B’Óâ°¢F–ÖW"Ò6WEF–ÖV÷WB‚‚’Óâ°¢öåF–ÖV÷WCòâ‚“°¢&V¦V7B†æWr&÷f–FW$W'&÷"‚uD”ÔTõUBrÂVW"6öææV7F÷"F–ÖVB÷WBgFW"G·F–ÖV÷WD×7Ö×6’“°¢ÒÂF–ÖV÷WD×2“°¢Ò’À¢Ò“°¢Òf–æÆÇ’°¢–b‡F–ÖW"’6ÆV%F–ÖV÷WB‡F–ÖW"“°¢Ð§Ð ¦gVæ7F–öâ6Æ76–g”f–ÇW&R†6W6S¢Væ¶æ÷vâ“¢td”ÄTBrÂuTU%ô%U5’rÂuD”ÔTõUBrÂt4ä4TÄÄTBrÂtäTTE5õU4U%ôDT4•4”ôâr°¢–b†6W6R–ç7Fæ6Vöb6W76–öä'W7”W'&÷"’&WGW&âuTU%ô%U5’s°¢–b†—5&÷f–FW$W'&÷$Æ–¶R†6W6R’’°¢–b†6W6RæÖ&–wV÷W2’&WGW&âtäTTE5õU4U%ôDT4•4”ôâs°¢–b†6W6Ræ6öFRÓÓÒt%U5’rÇÂ6W6Ræ6öFRÓÓÒuTäd”Ä$ÄRr’&WGW&âuTU%ô%U5’s°¢–b†6W6Ræ6öFRÓÓÒuD”ÔTõUBr’&WGW&âuD”ÔTõUBs°¢–b†6W6Ræ6öFRÓÓÒt4ä4TÄÄTBr’&WGW&ât4ä4TÄÄTBs°¢Ð¢6öç7BÖW76vRÒ6W6R–ç7Fæ6VöbW'&÷"ò6W6RæÖW76vRçFôÆ÷vW$66R‚’¢7G&–ær†6W6R’çFôÆ÷vW$66R‚“°¢–b†ÖW76vRæ–æ6ÇVFW2‚v'W7’r’ÇÂÖW76vRæ–æ6ÇVFW2‚væ÷Bf–Æ&ÆRr’’&WGW&âuTU%ô%U5’s°¢–b†ÖW76vRæ–æ6ÇVFW2‚wF–ÖVB÷WBr’ÇÂÖW76vRæ–æ6ÇVFW2‚wF–ÖV÷WBr’ÇÂÖW76vRæ–æ6ÇVFW2‚vGW&F–öâr’’&WGW&âuD”ÔTõUBs°¢&WGW&âtd”ÄTBs°§Ð ¦gVæ7F–öâF–væ÷7F–4g&öÔW'&÷"†6W6S¢Væ¶æ÷vâÂ&V6V—fW#¢vVçEG—RÂ&6¶VæC¢Væ¶æ÷vâ’°¢6öç7BÖW76vRÒ&VF7DF–væ÷7F–2†6W6R–ç7Fæ6VöbW'&÷"ò6W6RæÖW76vR¢7G&–ær†6W6R’“°¢&WGW&â°¢6öFS¢—5&÷f–FW$W'&÷$Æ–¶R†6W6R’ò6W6Ræ6öFR¢td”ÄTBrÀ¢ÖW76vRÀ¢&6¶VæC¢—5&÷f–FW$W'&÷$Æ–¶R†6W6R’bb6W6Ræ&6¶Væ@¢ò6W6Ræ&6¶Væ@¢¢G—Vöb&6¶VæBÓÓÒw7G&–ærrò&6¶VæB¢&V6V—fW"À¢&WG'–&ÆS¢—5&÷f–FW$W'&÷$Æ–¶R†6W6R’ò6W6Rç&WG'–&ÆR¢G'VRÀ¢Ö&–wV÷W3¢—5&÷f–FW$W'&÷$Æ–¶R†6W6R’ò6W6RæÖ&–wV÷W2¢fÇ6RÀ¢C¢æWrFFR‚’çFô•4õ7G&–ær‚’À¢Ó°§Ð ¦gVæ7F–öâ—5&÷f–FW$W'&÷$Æ–¶R‡fÇVS¢Væ¶æ÷vâ“¢fÇVR—2&÷f–FW$W'&÷"°¢–b†—5&÷f–FW$W'&÷"‡fÇVR’’&WGW&âG'VS°¢–b‚‡G—VöbfÇVRÓÒvö&¦V7BrbbG—VöbfÇVRÓÒvgVæ7F–öâr’ÇÂfÇVRÓÓÒçVÆÂ’&WGW&âfÇ6S°¢6öç7B6æF–FFRÒfÇVR2²æÖSó¢Væ¶æ÷vã²6öFSó¢Væ¶æ÷vã²Ö&–wV÷W3ó¢Væ¶æ÷vâÓ°¢&WGW&â6æF–FFRææÖRÓÓÒu&÷f–FW$W'&÷"p¢bbG—Vöb6æF–FFRæ6öFRÓÓÒw7G&–ærp¢bbG—Vöb6æF–FFRæÖ&–wV÷W2ÓÓÒv&ööÆVâs°§Ð ¦gVæ7F–öâ&VF7DF–væ÷7F–2‡fÇVS¢7G&–ær“¢7G&–ær°¢&WGW&âfÇVP¢ç&WÆ6R‚ò‡Fö¶VçÇ77v÷&GÆ•µòÕÓö¶W’•Ç2¥³£ÕÕÇ2¥µåÇ3µÒ²öv’ÂrCÕµ$TD5DTEÒr¢ç6Æ–6RƒÂEó“b“°§Ð ¦gVæ7F–öâ—4÷væW%&ö6W74Æ—fR†÷væW$–C¢7G&–ær“¢&ööÆVâ°¢6öç7BÖF6‚Òõæ6öÆÆ&÷&F–öã¢…ÆB²“¢òæW†V2†÷væW$–B“°¢–b‚ÖF6‚’&WGW&âfÇ6S°¢G'’°¢&ö6W72æ¶–ÆÂ„çVÖ&W"†ÖF6…³Ò’Â“°¢&WGW&âG'VS°¢Ò6F6‚°¢&WGW&âfÇ6S°¢Ð§Ð ¦7–æ2gVæ7F–öâv—Df÷$6ö×ÆWF–öâ‡&öÖ—6S¢&öÖ—6SÇVæ¶æ÷vãâÂF–ÖV÷WD×3¢çVÖ&W"“¢&öÖ—6SÆ&ööÆVãâ°¢ÆWBF–ÖW#¢&WGW&åG—SÇG—Vöb6WEF–ÖV÷WCâÂVæFVf–æVC°¢G'’°¢&WGW&âv—B&öÖ—6Rç&6R…°¢&öÖ—6RçF†Vâ‚‚’ÓâG'VRÂ‚’ÓâG'VR’À¢æWr&öÖ—6SÆ&ööÆVãâ‚‡&W6öÇfR’Óâ²F–ÖW"Ò6WEF–ÖV÷WB‚‚’Óâ&W6öÇfR†fÇ6R’ÂF–ÖV÷WD×2“²Ò’À¢Ò“°¢Òf–æÆÇ’°¢–b‡F–ÖW"’6ÆV%F–ÖV÷WB‡F–ÖW"“°¢Ð§Ð 

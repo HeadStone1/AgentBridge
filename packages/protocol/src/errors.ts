@@ -33,5 +33,12 @@ export class SessionBusyError extends Error {
 }
 
 export function isProviderError(value: unknown): value is ProviderError {
-  return value instanceof ProviderError;
+  if (value instanceof ProviderError) return true;
+  // Keep classification working when an error crosses a package or worker
+  // boundary and is backed by a second copy of this module.
+  if ((typeof value !== 'object' && typeof value !== 'function') || value === null) return false;
+  const candidate = value as { name?: unknown; code?: unknown; ambiguous?: unknown };
+  return candidate.name === 'ProviderError'
+    && typeof candidate.code === 'string'
+    && typeof candidate.ambiguous === 'boolean';
 }

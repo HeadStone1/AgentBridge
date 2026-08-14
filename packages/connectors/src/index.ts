@@ -1,5 +1,5 @@
 import type { Message } from '@agentbridge/protocol';
-import type { AgentType, PeerAvailability } from '@agentbridge/protocol';
+import type { AgentType, PeerActivity, PeerAvailability, PeerPermissionRequestInput, PermissionDecision } from '@agentbridge/protocol';
 
 export type ProviderSessionKind = 'claude-cli' | 'codex-cli' | 'codex-app-server';
 
@@ -39,10 +39,13 @@ export interface AgentConnector {
     projectPath: string;
     prompt: string;
     discussionId: string;
+    dispatchId?: string;
     previousMessages?: Message[];
     providerSessionId?: string;
     providerSessionKind?: ProviderSessionKind;
     signal?: AbortSignal;
+    onActivity?: (activity: PeerActivity) => void;
+    onPermissionRequest?: (request: PeerPermissionRequestInput) => Promise<PermissionDecision>;
   }): Promise<PeerResponse>;
 
   /**
@@ -63,5 +66,7 @@ export { CodexAppServerConnector } from './codexAppServer.js';
 export { CodexAutoConnector } from './codexAuto.js';
 export { discoverCodexCommands } from './codexDiscovery.js';
 export { buildPeerPrompt } from './prompt.js';
+export { HeadlessPeerPolicy } from './policy.js';
+export type { HeadlessPolicyDecision, HeadlessPolicyRequest } from './policy.js';
 export type { CodexBackendSelection, CodexAutoConnectorOptions } from './codexAuto.js';
 export type { CodexBackendMode, CodexCommandCandidate, CodexDiscoveryOptions } from './codexDiscovery.js';

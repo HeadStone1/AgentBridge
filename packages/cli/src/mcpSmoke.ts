@@ -40,9 +40,9 @@ export async function runMcpSmoke(
         timer = setTimeout(() => reject(new Error(`MCP SDK smoke test timed out after ${timeoutMs}ms`)), timeoutMs);
       }),
     ]);
-    return tools.length === 8
+    return tools.length === 11
       ? { status: 'PASS', detail: 'MCP SDK connect → initialize → tools/list completed.', tools }
-      : { status: 'FAIL', detail: `MCP tools/list returned ${tools.length} tools; expected 8.`, tools };
+      : { status: 'FAIL', detail: `MCP tools/list returned ${tools.length} tools; expected 11.`, tools };
   } catch (cause) {
     return {
       status: 'FAIL',

@@ -1,15 +1,23 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import type { Message } from '@agentbridge/protocol';
+import type {
+  Message,
+  PeerActivity,
+  PeerPermissionRequestInput,
+  PermissionDecision,
+} from '@agentbridge/protocol';
 import { ProviderError, isProviderError } from '@agentbridge/protocol';
 import type { AgentConnector, PeerResponse } from './index.js';
 import { buildPeerPrompt } from './prompt.js';
+import { HeadlessPeerPolicy } from './policy.js';
 
 export interface CodexAppServerConnectorOptions {
   /** App executable or wrapper that supports `app-server` over stdio. */
   command?: string;
   /** Arguments placed before the App Server subcommand (useful for node fixtures/wrappers). */
   serverArgs?: string[];
+  /** Legacy alias for the absolute provider hard limit. */
   timeoutMs?: number;
+  hardTimeoutMs?: number;
   startupTimeoutMs?: number;
   model?: string;
   stderrBufferBytes?: number;
@@ -28,7 +36,7 @@ export class CodexAppServerConnector implements AgentConnector {
   readonly agentType = 'codex' as const;
   private readonly command: string;
   private readonly serverArgs: string[];
-  private readonly timeoutMs: number;
+  private readonly hardTimeoutMs: number;
   private readonly startupTimeoutMs: number;
   private readonly model?: string;
   private readonly stderrBufferBytes: number;
@@ -44,16 +52,22 @@ export class CodexAppServerConnector implements AgentConnector {
   private availability?: Promise<boolean>;
   private stderrTail = '';
   private readonly activeTurns = new Map<string, { threadId: string; turnId?: string }>();
+  private activeActivity?: (activity: PeerActivity) => void;
+  private activePermissionRequest?: (request: PeerPermissionRequestInput) => Promise<PermissionDecision>;
+  private activePolicy?: HeadlessPeerPolicy;
+  private activeDiscussionId?: string;
+  private activeDispatchId?: string;
+  private processHeartbeat?: ReturnType<typeof setInterval>;
 
   constructor(options: CodexAppServerConnectorOptions = {}) {
     this.command = options.command ?? process.env.AGENTBRIDGE_CODEX_APP_COMMAND ?? '';
     this.serverArgs = options.serverArgs ?? [];
-    this.timeoutMs = options.timeoutMs ?? 120_000;
+    this.hardTimeoutMs = options.hardTimeoutMs ?? options.timeoutMs ?? 30 * 60 * 1_000;
     this.startupTimeoutMs = options.startupTimeoutMs ?? 15_000;
     this.model = options.model;
     this.stderrBufferBytes = options.stderrBufferBytes ?? 256 * 1024;
-    if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1_000 || this.timeoutMs > 600_000) {
-      throw new Error('Codex App Server timeoutMs must be an integer between 1000 and 600000');
+    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1_000 || this.hardTimeoutMs > 7 * 24 * 60 * 60 * 1_000) {
+      throw new Error('Codex App Server hardTimeoutMs must be an integer between 1000 and 604800000');
     }
     if (!Number.isInteger(this.startupTimeoutMs) || this.startupTimeoutMs < 1_000 || this.startupTimeoutMs > 600_000) {
       throw new Error('Codex App Server startupTimeoutMs must be an integer between 1000 and 600000');
@@ -85,16 +99,33 @@ export class CodexAppServerConnector implements AgentConnector {
     projectPath: string;
     prompt: string;
     discussionId: string;
+    dispatchId?: string;
     previousMessages?: Message[];
     providerSessionId?: string;
     providerSessionKind?: 'claude-cli' | 'codex-cli' | 'codex-app-server';
     signal?: AbortSignal;
+    onActivity?: (activity: PeerActivity) => void;
+    onPermissionRequest?: (request: PeerPermissionRequestInput) => Promise<PermissionDecision>;
   }): Promise<PeerResponse> {
     return this.runSerial(async () => {
       if (!this.command.trim()) {
         throw new Error('Codex App Server command is not configured; set AGENTBRIDGE_CODEX_APP_COMMAND');
       }
-      await this.ensureServer();
+      this.activeActivity = context.onActivity;
+      this.activePermissionRequest = context.onPermissionRequest;
+      this.activePolicy = new HeadlessPeerPolicy(context.projectPath);
+      this.activeDiscussionId = context.discussionId;
+      this.activeDispatchId = context.dispatchId;
+      try {
+        await this.ensureServer();
+      } catch (error) {
+        this.activeActivity = undefined;
+        this.activePermissionRequest = undefined;
+        this.activePolicy = undefined;
+        this.activeDiscussionId = undefined;
+        this.activeDispatchId = undefined;
+        throw error;
+      }
       const started = Date.now();
       this.inFlight = true;
       let turnStarted = false;
@@ -151,6 +182,11 @@ export class CodexAppServerConnector implements AgentConnector {
         throw enriched;
       } finally {
         this.inFlight = false;
+        this.activeActivity = undefined;
+        this.activePermissionRequest = undefined;
+        this.activePolicy = undefined;
+        this.activeDiscussionId = undefined;
+        this.activeDispatchId = undefined;
       }
     });
   }
@@ -198,12 +234,22 @@ export class CodexAppServerConnector implements AgentConnector {
     });
     this.child = child;
     this.stderrTail = '';
+    this.activeActivity?.({ kind: 'process_started', at: Date.now(), processAlive: true, connectionAlive: false });
+    this.processHeartbeat = setInterval(() => {
+      if (this.child === child && child.exitCode === null) {
+        this.activeActivity?.({ kind: 'process_heartbeat', at: Date.now(), processAlive: true, connectionAlive: this.initialized });
+      }
+    }, 1_000);
+    this.processHeartbeat.unref?.();
     child.stderr.on('data', (chunk: Buffer | string) => {
       this.stderrTail = `${this.stderrTail}${chunk.toString()}`.slice(-this.stderrBufferBytes);
     });
     child.stdout.on('data', (chunk: Buffer | string) => this.consume(chunk.toString()));
     child.once('error', (error) => this.failPending(error instanceof Error ? error : new Error(String(error))));
     child.once('close', (code, signal) => {
+      if (this.processHeartbeat) clearInterval(this.processHeartbeat);
+      this.processHeartbeat = undefined;
+      this.activeActivity?.({ kind: 'process_exited', at: Date.now(), processAlive: false, connectionAlive: false, detail: `${code ?? 'null'}:${signal ?? 'none'}` });
       if (this.child === child) {
         this.initialized = false;
         this.child = undefined;
@@ -218,13 +264,14 @@ export class CodexAppServerConnector implements AgentConnector {
     }, this.startupTimeoutMs);
     this.notify('initialized', {});
     this.initialized = true;
+    this.activeActivity?.({ kind: 'provider_event', at: Date.now(), processAlive: true, connectionAlive: true, sessionAlive: true, detail: 'initialized' });
   }
 
   private async startThread(projectPath: string): Promise<string> {
     const response = await this.request('thread/start', {
       cwd: projectPath,
-      approvalPolicy: 'never',
-      sandbox: 'readOnly',
+      approvalPolicy: 'on-request',
+      sandbox: 'workspace-write',
       serviceName: 'agentbridge',
       ...(this.model ? { model: this.model } : {}),
     }, this.startupTimeoutMs);
@@ -234,8 +281,9 @@ export class CodexAppServerConnector implements AgentConnector {
   }
 
   private async collectTurn(threadId: string, turnId: string | undefined): Promise<string> {
-    const chunks: string[] = [];
-    const deadline = Date.now() + this.timeoutMs;
+    const deltaChunks: string[] = [];
+    let finalItemText: string | undefined;
+    const deadline = Date.now() + this.hardTimeoutMs;
     while (Date.now() < deadline) {
       const event = await this.nextEvent(deadline - Date.now());
       const params = isRecord(event.params) ? event.params : {};
@@ -245,9 +293,9 @@ export class CodexAppServerConnector implements AgentConnector {
       if (turnId && eventTurnId && eventTurnId !== turnId) continue;
 
       const delta = readString(params.delta);
-      if (delta && isDeltaMethod(event.method)) appendUniqueText(chunks, delta);
+      if (delta && isDeltaMethod(event.method)) deltaChunks.push(delta);
       const itemText = readNestedString(params, ['item', 'text']);
-      if (itemText && isMessageItem(params.item)) appendUniqueText(chunks, itemText);
+      if (itemText && isMessageItem(params.item)) finalItemText = itemText;
       if (isTurnFailure(event.method)) {
         const status = readTurnStatus(params);
         throw new ProviderError(
@@ -272,14 +320,13 @@ export class CodexAppServerConnector implements AgentConnector {
             `Codex App Server turn completed with status ${status}`,
           );
         }
-        const finalText = readNestedString(params, ['turn', 'text']) ?? readString(params.text);
-        if (finalText) appendUniqueText(chunks, finalText);
-        const content = chunks.join('');
+        const finalText = readNestedString(params, ['turn', 'text']) ?? readString(params.text) ?? finalItemText;
+        const content = finalText ?? deltaChunks.join('');
         if (!content) throw new ProviderError('PROTOCOL', 'Codex App Server completed without an agent message');
         return content;
       }
     }
-    throw new ProviderError('TIMEOUT', `Codex App Server turn timed out after ${this.timeoutMs}ms`);
+    throw new ProviderError('TIMEOUT', `Codex App Server turn timed out after ${this.hardTimeoutMs}ms`);
   }
 
   private request(method: string, params: JsonObject, timeoutMs: number): Promise<JsonObject> {
@@ -320,6 +367,33 @@ export class CodexAppServerConnector implements AgentConnector {
       if (!line.trim()) continue;
       let message: JsonObject;
       try { message = JSON.parse(line) as JsonObject; } catch { continue; }
+      const method = typeof message.method === 'string' ? message.method : undefined;
+      const params = isRecord(message.params) ? message.params : {};
+      this.activeActivity?.({
+        kind: 'provider_event',
+        at: Date.now(),
+        processAlive: true,
+        connectionAlive: this.initialized,
+        sessionAlive: true,
+        detail: method,
+      });
+      if (method && isDeltaMethod(method)) {
+        this.activeActivity?.({ kind: 'output', at: Date.now(), processAlive: true, connectionAlive: true, sessionAlive: true });
+      }
+      if (method && /turn[/.](start|started)/i.test(method)) {
+        this.activeActivity?.({ kind: 'turn_started', at: Date.now(), processAlive: true, connectionAlive: true, sessionAlive: true });
+      } else if (method && isTurnCompleted(method)) {
+        this.activeActivity?.({ kind: 'turn_completed', at: Date.now(), processAlive: true, connectionAlive: true, sessionAlive: true });
+      }
+      const tool = readString(params.tool)
+        ?? readString(params.toolName)
+        ?? readNestedString(params, ['item', 'name'])
+        ?? readNestedString(params, ['item', 'command']);
+      if (method && isToolStartedMethod(method)) {
+        this.activeActivity?.({ kind: 'tool_started', at: Date.now(), currentTool: tool ?? method, processAlive: true, connectionAlive: true, sessionAlive: true });
+      } else if (method && isToolCompletedMethod(method)) {
+        this.activeActivity?.({ kind: 'tool_completed', at: Date.now(), currentTool: tool, processAlive: true, connectionAlive: true, sessionAlive: true });
+      }
       const id = typeof message.id === 'number' ? message.id : undefined;
       if (id !== undefined && this.pending.has(id)) {
         const pending = this.pending.get(id)!;
@@ -327,7 +401,7 @@ export class CodexAppServerConnector implements AgentConnector {
         if (isRecord(message.error)) pending.reject(providerErrorFromMessage(message.error));
         else pending.resolve(isRecord(message.result) ? message.result : {});
       } else if (typeof message.method === 'string' && message.id !== undefined) {
-        this.respondToServerRequest(message);
+        void this.respondToServerRequest(message);
       } else if (typeof message.method === 'string') {
         const waiter = this.eventWaiters.shift();
         if (waiter) waiter(message);
@@ -336,14 +410,39 @@ export class CodexAppServerConnector implements AgentConnector {
     }
   }
 
-  private respondToServerRequest(message: JsonObject): void {
+  private async respondToServerRequest(message: JsonObject): Promise<void> {
     if (!this.child || this.child.exitCode !== null || this.child.killed) return;
     const method = String(message.method);
     const id = message.id;
-    const response = /approval/i.test(method)
-      ? { id, result: { decision: 'decline' } }
+    const policy = this.activePolicy?.decide({
+      method,
+      params: isRecord(message.params) ? message.params : undefined,
+    }) ?? 'DENY';
+    let decision: PermissionDecision | undefined;
+    if (/approval|permission/i.test(method) && policy === 'NEEDS_USER_DECISION' && this.activePermissionRequest) {
+      const params = isRecord(message.params) ? message.params : {};
+      try {
+        decision = await this.activePermissionRequest({
+          discussionId: this.activeDiscussionId ?? '',
+          dispatchId: this.activeDispatchId ?? '',
+          provider: 'codex',
+          method,
+          actionType: readString(params.actionType) ?? readString(params.toolName) ?? 'provider_action',
+          command: readString(params.command) ?? readString(params.cmd),
+          paths: readStringArray(params.paths) ?? (readString(params.path) ? [readString(params.path)!] : undefined),
+          reason: readString(params.reason) ?? readString(params.message),
+          risk: 'unknown',
+        });
+      } catch {
+        decision = 'deny';
+      }
+    }
+    const response = /approval|permission/i.test(method)
+      ? { id, result: { decision: decision === 'approve' || policy === 'ALLOW' ? 'allow' : 'decline', reason: decision ?? policy } }
       : { id, error: { code: -32601, message: `AgentBridge cannot satisfy interactive request ${method}` } };
-    this.child.stdin.write(`${JSON.stringify(response)}\n`);
+    if (this.child && this.child.exitCode === null && !this.child.killed) {
+      this.child.stdin.write(`${JSON.stringify(response)}\n`);
+    }
   }
 
   private nextEvent(timeoutMs: number): Promise<JsonObject> {
@@ -384,10 +483,12 @@ export class CodexAppServerConnector implements AgentConnector {
     this.child = undefined;
     this.initialized = false;
     this.availability = undefined;
+    if (this.processHeartbeat) clearInterval(this.processHeartbeat);
+    this.processHeartbeat = undefined;
     this.buffer = '';
     this.events.splice(0, this.events.length);
     if (child && child.exitCode === null) {
-      try { child.kill(); } catch { return; }
+      try { child.kill(); } catch { /* continue with the SIGKILL fallback */ }
       const forceKillTimer = setTimeout(() => {
         if (child.exitCode === null) {
           try { child.kill('SIGKILL'); } catch { /* child close will report the failure */ }
@@ -427,6 +528,14 @@ function isDeltaMethod(method: unknown): boolean {
   return typeof method === 'string' && /agent.?message.*delta/i.test(method);
 }
 
+function isToolStartedMethod(method: unknown): boolean {
+  return typeof method === 'string' && /(tool|item|command|exec).*(start|begin|started)/i.test(method);
+}
+
+function isToolCompletedMethod(method: unknown): boolean {
+  return typeof method === 'string' && /(tool|item|command|exec).*(complete|finish|end|completed|finished)/i.test(method);
+}
+
 function isMessageItem(value: unknown): boolean {
   if (!isRecord(value)) return false;
   const type = readString(value.type);
@@ -441,17 +550,10 @@ function isTurnFailure(method: unknown): boolean {
   return method === 'turn/failed' || method === 'turn.failed' || method === 'error';
 }
 
-function appendUniqueText(chunks: string[], text: string): void {
-  const current = chunks.join('');
-  if (!current) {
-    chunks.push(text);
-  } else if (text === current || current.endsWith(text)) {
-    return;
-  } else if (text.startsWith(current)) {
-    chunks.splice(0, chunks.length, text);
-  } else {
-    chunks.push(text);
-  }
+function readStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const result = value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+  return result.length > 0 ? result : undefined;
 }
 
 function providerErrorFromMessage(message: JsonObject): ProviderError {

@@ -2,12 +2,14 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import type { AgentConnector, PeerResponse } from './index.js';
 import { ProviderError } from '@agentbridge/protocol';
-import type { Message } from '@agentbridge/protocol';
+import type { Message, PeerActivity, PeerPermissionRequestInput, PermissionDecision } from '@agentbridge/protocol';
 import { buildPeerPrompt } from './prompt.js';
 
 export interface ClaudeConnectorOptions {
   command?: string;
+  /** Legacy alias for the absolute provider hard limit. */
   timeoutMs?: number;
+  hardTimeoutMs?: number;
   extraArgs?: string[];
 }
 
@@ -21,15 +23,15 @@ export interface ClaudeConnectorOptions {
 export class ClaudeConnector implements AgentConnector {
   readonly agentType = 'claude' as const;
   private readonly command: string;
-  private readonly timeoutMs: number;
+  private readonly hardTimeoutMs: number;
   private readonly extraArgs: string[];
 
   constructor(options: ClaudeConnectorOptions = {}) {
     this.command = options.command ?? 'claude';
-    this.timeoutMs = options.timeoutMs ?? 120_000;
+    this.hardTimeoutMs = options.hardTimeoutMs ?? options.timeoutMs ?? 30 * 60 * 1_000;
     this.extraArgs = options.extraArgs ?? [];
-    if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1_000 || this.timeoutMs > 600_000) {
-      throw new Error('Claude connector timeoutMs must be an integer between 1000 and 600000');
+    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1_000 || this.hardTimeoutMs > 7 * 24 * 60 * 60 * 1_000) {
+      throw new Error('Claude connector hardTimeoutMs must be an integer between 1000 and 604800000');
     }
   }
 
@@ -56,8 +58,11 @@ export class ClaudeConnector implements AgentConnector {
     providerSessionId?: string;
     providerSessionKind?: 'claude-cli' | 'codex-cli' | 'codex-app-server';
     signal?: AbortSignal;
+    onActivity?: (activity: PeerActivity) => void;
+    onPermissionRequest?: (request: PeerPermissionRequestInput) => Promise<PermissionDecision>;
   }): Promise<PeerResponse> {
     const started = Date.now();
+    context.onActivity?.({ kind: 'turn_started', at: started, processAlive: true, connectionAlive: true });
     const canResume = Boolean(context.providerSessionId)
       && (!context.providerSessionKind || context.providerSessionKind === 'claude-cli');
     let sessionId = canResume ? context.providerSessionId! : randomUUID();
@@ -67,8 +72,9 @@ export class ClaudeConnector implements AgentConnector {
       this.command,
       [...this.buildArgs(sessionId, resumed), prompt],
       context.projectPath,
-      this.timeoutMs,
+      this.hardTimeoutMs,
       context.signal,
+      context.onActivity,
     );
 
     // Provider-side sessions can be deleted independently. Rebuild a fresh
@@ -81,8 +87,9 @@ export class ClaudeConnector implements AgentConnector {
         this.command,
         [...this.buildArgs(sessionId, false), prompt],
         context.projectPath,
-        this.timeoutMs,
+        this.hardTimeoutMs,
         context.signal,
+        context.onActivity,
       );
     }
     if (result.exitCode !== 0) {
@@ -91,6 +98,7 @@ export class ClaudeConnector implements AgentConnector {
 
     const parsed = parseClaudeOutput(result.stdout);
     const providerSessionId = parsed.sessionId ?? sessionId;
+    context.onActivity?.({ kind: 'turn_completed', at: Date.now(), processAlive: false, connectionAlive: false });
     return {
       content: parsed.content,
       duration: Date.now() - started,
@@ -153,6 +161,7 @@ function runProcess(
   cwd: string,
   timeoutMs: number,
   signal?: AbortSignal,
+  onActivity?: (activity: PeerActivity) => void,
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -166,12 +175,14 @@ function runProcess(
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
     let termination: { code: 'CANCELLED' | 'TIMEOUT'; message: string } | undefined;
     const finish = (action: () => void) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
       if (forceKillTimer) clearTimeout(forceKillTimer);
+      if (heartbeat) clearInterval(heartbeat);
       signal?.removeEventListener('abort', onAbort);
       action();
     };
@@ -189,8 +200,22 @@ function runProcess(
     const onAbort = () => terminate({ code: 'CANCELLED', message: 'Claude CLI request was cancelled' });
     signal?.addEventListener('abort', onAbort, { once: true });
 
-    child.stdout?.on('data', (chunk: Buffer | string) => { stdout += chunk.toString(); });
-    child.stderr?.on('data', (chunk: Buffer | string) => { stderr += chunk.toString(); });
+    onActivity?.({ kind: 'process_started', at: Date.now(), processAlive: true, connectionAlive: true });
+    heartbeat = setInterval(() => {
+      if (!settled && child.exitCode === null) {
+        onActivity?.({ kind: 'process_heartbeat', at: Date.now(), processAlive: true, connectionAlive: true });
+      }
+    }, 1_000);
+    heartbeat.unref?.();
+
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+      onActivity?.({ kind: 'output', at: Date.now(), processAlive: true, connectionAlive: true });
+    });
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+      onActivity?.({ kind: 'provider_event', at: Date.now(), processAlive: true, connectionAlive: true });
+    });
     child.once('error', (error) => {
       const failure = termination
         ? new ProviderError(termination.code, termination.message, { cause: error })
@@ -198,6 +223,7 @@ function runProcess(
       finish(() => reject(failure));
     });
     child.once('close', (exitCode) => {
+      onActivity?.({ kind: 'process_exited', at: Date.now(), processAlive: false, connectionAlive: false, detail: String(exitCode ?? '') });
       if (termination) {
         finish(() => reject(new ProviderError(termination!.code, termination!.message)));
       } else {
