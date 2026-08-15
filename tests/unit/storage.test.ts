@@ -27,7 +27,23 @@ describe('Storage', () => {
       expect(d.roundCount).toBe(0);
       expect(d.maxTurns).toBe(12);
       expect(d.mode).toBe('discussion');
+      expect(d.orchestration).toBe('single-turn');
       expect(d.lastSignal).toBeNull();
+    });
+
+    it('persists the automatic discussion policy and pending operation', () => {
+      const d = storage.createDiscussion({
+        topic: 'Automatic discussion',
+        driver: 'claude',
+        traceId: 'tr_automatic_policy',
+        orchestration: 'automatic',
+      });
+      storage.updateDiscussionPending(d.id, 'automatic_turn', 'msg_seed');
+      expect(storage.getDiscussion(d.id)).toMatchObject({
+        orchestration: 'automatic',
+        pendingOperationKind: 'automatic_turn',
+        pendingMessageId: 'msg_seed',
+      });
     });
 
     it('persists and clears the latest convergence signal', () => {

@@ -16,7 +16,7 @@ describe('release MCP SDK smoke stability', () => {
       cwd: repositoryRoot,
       encoding: 'utf8',
       windowsHide: true,
-    }).trim()).toBe('0.7.3');
+    }).trim()).toBe('0.7.4');
   });
 
   it('completes 30 consecutive SDK handshakes without timeout', async () => {

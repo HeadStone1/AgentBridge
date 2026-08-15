@@ -9,6 +9,7 @@ import type {
   DiscussionError,
   DiscussionStopReason,
   DiscussionOperationKind,
+  DiscussionOrchestration,
   DiscussionMode,
   DiscussionSignal,
   Message,
@@ -41,6 +42,7 @@ export interface StoragePort {
     maxTurns?: number;
     maxRetries?: number;
     collaborationSessionId?: string;
+    orchestration?: DiscussionOrchestration;
   }): Discussion;
   createCollaborationSession(data: {
     projectPath: string;
@@ -74,12 +76,14 @@ export interface StoragePort {
   recoverOrphanedDiscussions(isOwnerAlive: (ownerId: string) => boolean): Discussion[];
   updateDiscussionStatus(id: string, status: DiscussionStatus, extra?: Partial<Discussion>): void;
   updateDiscussionMode(id: string, mode: DiscussionMode): void;
+  updateDiscussionPolicy(id: string, mode: DiscussionMode, orchestration: DiscussionOrchestration): void;
   updateDiscussionDispatch(id: string, state: DispatchState | null, waitingFor?: AgentType | null): void;
   updateDiscussionFailure(id: string, failure: {
     receiver: AgentType | null;
     messageId: string | null;
     operationKind: DiscussionOperationKind | null;
   }): void;
+  updateDiscussionPending(id: string, operationKind: DiscussionOperationKind | null, messageId: string | null): void;
   updateDiscussionSignal(id: string, signal: DiscussionSignal | null): void;
   updateDiscussionDiagnostic(id: string, stopReason: DiscussionStopReason | null, lastError?: DiscussionError | null): void;
   incrementDiscussionRound(id: string): Discussion;
@@ -111,6 +115,7 @@ export interface StoragePort {
     summary: string;
     changes?: string[];
   }): { decisionHash: string; agreedBy: AgentType[] };
+  clearAgreements(discussionId: string): void;
   acquireSessionLease(data: {
     provider: AgentType;
     projectPath: string;

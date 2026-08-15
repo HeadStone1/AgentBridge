@@ -41,7 +41,7 @@ function buildTools(agentType: AgentType): Tool[] {
   return [
     {
       name: 'ask_peer',
-      description: 'Start a discussion with the other coding agent. The request may be queued asynchronously; inspect get_discussion for the peer response or final decision.',
+      description: 'Start a peer interaction. review performs one independent review; discussion and deep-discussion automatically alternate both providers until agreement or an unresolved user decision. Both providers must be configured; automatic modes never silently downgrade to single-turn. Follow nextAction=WAIT with wait_discussion/watch_discussion and do not return an intermediate response as final.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -51,9 +51,9 @@ function buildTools(agentType: AgentType): Tool[] {
           mode: {
             type: 'string',
             enum: [...DISCUSSION_MODES],
-            description: 'Depth contract (defaults: review=3, discussion=12, deep-discussion=20 successful responses)',
+            description: 'Depth contract: review is single-turn; discussion and deep-discussion are automatic alternating runs that converge on agreement or pause for user decision, with safety ceilings of 12 and 20 successful provider responses',
           },
-          maxTurns: { type: 'integer', minimum: 1, maximum: 50, description: 'Safety ceiling for successful provider responses; overrides the mode default' },
+          maxTurns: { type: 'integer', minimum: 1, maximum: 50, description: 'Safety ceiling for substantive provider responses; agreement confirmations do not consume it' },
           sessionPolicy: { type: 'string', enum: ['auto', 'reuse', 'fresh'], description: 'Provider session policy (default: auto)' },
         },
         required: ['peer', 'message'],
@@ -61,7 +61,7 @@ function buildTools(agentType: AgentType): Tool[] {
     },
     {
       name: 'reply_peer',
-      description: 'Continue an existing discussion. The reply may be queued asynchronously; inspect get_discussion for the peer response.',
+      description: 'Continue a manual/review discussion, or provide the requested user decision after an automatic discussion pauses. Automatic runs reject concurrent replies while nextAction=WAIT.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -87,7 +87,7 @@ function buildTools(agentType: AgentType): Tool[] {
     },
     {
       name: 'wait_discussion',
-      description: 'Wait for an asynchronous discussion to receive a new message or leave its queued/running state without changing discussion status.',
+      description: 'Wait for a queued/running discussion message. Automatic discussions may wake on intermediate messages; continue waiting while nextAction=WAIT.',
       inputSchema: {
         type: 'object',
         properties: {

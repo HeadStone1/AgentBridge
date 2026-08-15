@@ -30,6 +30,7 @@ describe('CollaborationService', () => {
       topic: 'review',
       initialMessage: 'Please review this plan',
       traceId: 'tr_test',
+      mode: 'review',
     });
 
     const first = await collaboration.closeDiscussion({
@@ -74,6 +75,17 @@ describe('CollaborationService', () => {
             };
           },
         },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => ({
+            content: prompt.includes('agreement confirmation request')
+              ? '{"agentbridgeDecision":"accept","decisionHash":"' + /decisionHash":"([^"]+)"/.exec(prompt)?.[1] + '"}'
+              : 'acknowledged\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+            duration: 1,
+          }),
+        },
       },
     );
     const started = await agreementCollaboration.initiateDiscussion({
@@ -82,6 +94,7 @@ describe('CollaborationService', () => {
       topic: 'automatic agreement',
       initialMessage: 'Review the conclusion',
       traceId: 'tr_auto_agreement',
+      mode: 'review',
     });
 
     const closed = await agreementCollaboration.closeDiscussion({
@@ -97,6 +110,130 @@ describe('CollaborationService', () => {
     agreementStorage.close();
   });
 
+  it('does not silently downgrade automatic discussion when a connector is missing', async () => {
+    await expect(collaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'missing connector',
+      initialMessage: 'Both agents must review this.',
+      traceId: 'tr_missing_connector',
+      mode: 'discussion',
+    })).rejects.toMatchObject({
+      code: 'UNAVAILABLE',
+    });
+    expect(storage.listDiscussions()).toHaveLength(0);
+  });
+
+  it('pauses immediately when the peer declares an unresolved disagreement', async () => {
+    const disagreementStorage = new Storage(':memory:');
+    const service = new CollaborationService(
+      disagreementStorage,
+      new AuditService(disagreementStorage),
+      { maxTurns: 1 },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => ({
+            content: 'Choose the safer migration.\n[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE]',
+            duration: 1,
+          }),
+        },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => ({
+            content: JSON.stringify({
+              agentbridgeDecision: 'reject',
+              decisionHash: /decisionHash":"([^"]+)"/.exec(prompt)?.[1],
+              resolution: 'user_decision',
+              reason: 'The risk tolerance is a product choice.',
+            }),
+            duration: 1,
+          }),
+        },
+      },
+    );
+
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'unresolved disagreement',
+      initialMessage: 'Choose a migration strategy.',
+      traceId: 'tr_unresolved_disagreement',
+      mode: 'discussion',
+    });
+
+    expect(started.status).toBe('NEEDS_USER_DECISION');
+    expect(disagreementStorage.getDiscussion(started.discussionId)).toMatchObject({
+      status: 'NEEDS_USER_DECISION',
+      stopReason: 'UNRESOLVED_DISAGREEMENT',
+      lastSignal: 'NEEDS_USER_DECISION',
+      roundCount: 1,
+    });
+    disagreementStorage.close();
+  });
+
+  it('continues after a resolvable rejection and confirms the revised conclusion', async () => {
+    const continuationStorage = new Storage(':memory:');
+    let codexTurns = 0;
+    let claudeTurns = 0;
+    const service = new CollaborationService(
+      continuationStorage,
+      new AuditService(continuationStorage),
+      { maxTurns: 2 },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => ({
+            content: `Candidate ${++codexTurns}.\n[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE]`,
+            duration: 1,
+          }),
+        },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => {
+            claudeTurns += 1;
+            const hash = /decisionHash":"([^"]+)"/.exec(prompt)?.[1];
+            return {
+              content: claudeTurns === 1
+                ? JSON.stringify({
+                    agentbridgeDecision: 'reject',
+                    decisionHash: hash,
+                    resolution: 'continue',
+                    reason: 'Add the rollback condition.',
+                  })
+                : JSON.stringify({ agentbridgeDecision: 'accept', decisionHash: hash }),
+              duration: 1,
+            };
+          },
+        },
+      },
+    );
+
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'resolvable rejection',
+      initialMessage: 'Propose a safe rollout.',
+      traceId: 'tr_resolvable_rejection',
+      mode: 'discussion',
+    });
+
+    expect(started.status).toBe('COMPLETED');
+    expect(codexTurns).toBe(2);
+    expect(claudeTurns).toBe(2);
+    expect(continuationStorage.getDiscussion(started.discussionId)?.roundCount).toBe(2);
+    expect(continuationStorage.getDiscussion(started.discussionId)?.conclusion).toContain('Candidate 2');
+    continuationStorage.close();
+  });
+
   it('rejects a changed conclusion after the first acceptance', async () => {
     const started = await collaboration.initiateDiscussion({
       driver: 'claude',
@@ -104,6 +241,7 @@ describe('CollaborationService', () => {
       topic: 'review',
       initialMessage: 'Please review this plan',
       traceId: 'tr_test_2',
+      mode: 'review',
     });
 
     await collaboration.closeDiscussion({
@@ -126,6 +264,7 @@ describe('CollaborationService', () => {
       topic: 'review',
       initialMessage: 'Please review this plan',
       traceId: 'tr_test_3',
+      mode: 'review',
     });
 
     await expect(collaboration.replyToDiscussion({
@@ -153,6 +292,7 @@ describe('CollaborationService', () => {
       topic: 'three rounds',
       initialMessage: 'round one',
       traceId: 'tr_chain',
+      mode: 'review',
     });
     await connectedCollaboration.replyToDiscussion({
       discussionId: started.discussionId,
@@ -179,6 +319,246 @@ describe('CollaborationService', () => {
     connectedStorage.close();
   });
 
+  it('automatically completes as soon as one provider proposes and the other confirms', async () => {
+    const autoStorage = new Storage(':memory:');
+    let codexTurns = 0;
+    let claudeTurns = 0;
+    const autoCollaboration = new CollaborationService(
+      autoStorage,
+      new AuditService(autoStorage),
+      { timeoutMs: 5_000, maxTurns: 1 },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            codexTurns += 1;
+            return { content: 'Codex canonical conclusion.\n[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE]', duration: 1 };
+          },
+        },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => {
+            claudeTurns += 1;
+            return {
+              content: prompt.includes('agreement confirmation request')
+                ? '{"agentbridgeDecision":"accept","decisionHash":"' + /decisionHash":"([^"]+)"/.exec(prompt)?.[1] + '"}'
+                : 'Claude challenge and revision.\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+              duration: 1,
+            };
+          },
+        },
+      },
+    );
+
+    const started = await autoCollaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'automatic discussion',
+      initialMessage: 'Compare the two approaches and reach a conclusion.',
+      traceId: 'tr_automatic_discussion',
+      mode: 'discussion',
+    });
+
+    expect(started.orchestration).toBe('automatic');
+    expect(started.status).toBe('COMPLETED');
+    expect(claudeTurns).toBe(1);
+    expect(codexTurns).toBe(1);
+    const result = await autoCollaboration.getDiscussion(started.discussionId);
+    expect(result.discussion.roundCount).toBe(1);
+    expect(result.decision?.agreedBy).toEqual(['claude', 'codex']);
+    expect(result.messages.some((message) => message.sender === 'claude' && message.role === 'response')).toBe(true);
+    expect(result.messages.some((message) => message.sender === 'codex' && message.role === 'response')).toBe(true);
+    autoStorage.close();
+  });
+
+  it('keeps asynchronous automatic discussions in WAIT until the final decision', async () => {
+    const asyncStorage = new Storage(':memory:');
+    let codexTurns = 0;
+    const asyncCollaboration = new CollaborationService(
+      asyncStorage,
+      new AuditService(asyncStorage),
+      { timeoutMs: 5_000, asyncDispatch: true },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            codexTurns += 1;
+            return {
+              content: codexTurns === 2
+                ? 'Candidate answer.\n[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE]'
+                : 'Position.\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+              duration: 1,
+            };
+          },
+        },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => ({
+            content: prompt.includes('agreement confirmation request')
+              ? '{"agentbridgeDecision":"accept","decisionHash":"' + /decisionHash":"([^"]+)"/.exec(prompt)?.[1] + '"}'
+              : 'Challenge.\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+            duration: 1,
+          }),
+        },
+      },
+    );
+
+    const started = await asyncCollaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'async automatic discussion',
+      initialMessage: 'Reach a bounded conclusion asynchronously.',
+      traceId: 'tr_async_automatic',
+      mode: 'discussion',
+    });
+    expect(started.nextAction).toBe('WAIT');
+
+    let snapshot = await asyncCollaboration.waitForDiscussion(started.discussionId, 5_000, started.messageId);
+    while (snapshot.nextAction === 'WAIT') {
+      snapshot = await asyncCollaboration.waitForDiscussion(
+        started.discussionId,
+        5_000,
+        snapshot.messages.at(-1)?.id ?? started.messageId,
+      );
+    }
+    expect(snapshot.discussion.status).toBe('COMPLETED');
+    expect(snapshot.nextAction).toBe('NONE');
+    expect(snapshot.discussion.roundCount).toBe(3);
+    asyncStorage.close();
+  });
+
+  it('does not impose a deeper minimum before accepting a conclusion', async () => {
+    const deepStorage = new Storage(':memory:');
+    let codexTurns = 0;
+    const deepCollaboration = new CollaborationService(
+      deepStorage,
+      new AuditService(deepStorage),
+      { timeoutMs: 5_000 },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            codexTurns += 1;
+            return {
+              content: codexTurns === 3
+                ? 'Deep canonical answer.\n[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE]'
+                : 'Deep evidence.\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+              duration: 1,
+            };
+          },
+        },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => ({
+            content: prompt.includes('agreement confirmation request')
+              ? '{"agentbridgeDecision":"accept","decisionHash":"' + /decisionHash":"([^"]+)"/.exec(prompt)?.[1] + '"}'
+              : 'Deep rebuttal.\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+            duration: 1,
+          }),
+        },
+      },
+    );
+
+    const started = await deepCollaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'deep automatic discussion',
+      initialMessage: 'Test a deeper decision loop.',
+      traceId: 'tr_deep_automatic',
+      mode: 'deep-discussion',
+    });
+    const result = await deepCollaboration.getDiscussion(started.discussionId);
+    expect(result.discussion.status).toBe('COMPLETED');
+    expect(result.discussion.roundCount).toBe(5);
+    expect(result.messages.filter((message) => message.role === 'response').length).toBe(6);
+    deepStorage.close();
+  });
+
+  it('retries a failed automatic turn on the same discussion', async () => {
+    const retryStorage = new Storage(':memory:');
+    let codexCalls = 0;
+    const retryCollaboration = new CollaborationService(
+      retryStorage,
+      new AuditService(retryStorage),
+      { timeoutMs: 5_000, asyncDispatch: true },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            codexCalls += 1;
+            if (codexCalls === 1) throw new ProviderError('UNAVAILABLE', 'temporary provider outage');
+            return {
+              content: codexCalls === 3
+                ? 'Retry conclusion.\n[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE]'
+                : 'Retry position.\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+              duration: 1,
+            };
+          },
+        },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => ({
+            content: prompt.includes('agreement confirmation request')
+              ? '{"agentbridgeDecision":"accept","decisionHash":"' + /decisionHash":"([^"]+)"/.exec(prompt)?.[1] + '"}'
+              : 'Retry challenge.\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+            duration: 1,
+          }),
+        },
+      },
+    );
+
+    const started = await retryCollaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'automatic retry',
+      initialMessage: 'Recover this automatic discussion after a transient outage.',
+      traceId: 'tr_automatic_retry',
+      mode: 'discussion',
+    });
+    let failed = await retryCollaboration.waitForDiscussion(started.discussionId, 5_000, started.messageId);
+    while (failed.discussion.status === 'DISCUSSING') {
+      failed = await retryCollaboration.waitForDiscussion(
+        started.discussionId,
+        5_000,
+        failed.messages.at(-1)?.id ?? started.messageId,
+      );
+    }
+    expect(failed.discussion.status).toBe('PEER_BUSY');
+
+    await retryCollaboration.retryDiscussion({ discussionId: started.discussionId, agent: 'claude' });
+    let completed = await retryCollaboration.waitForDiscussion(
+      started.discussionId,
+      5_000,
+      failed.messages.at(-1)?.id ?? started.messageId,
+    );
+    while (completed.discussion.status === 'DISCUSSING') {
+      completed = await retryCollaboration.waitForDiscussion(
+        started.discussionId,
+        5_000,
+        completed.messages.at(-1)?.id ?? started.messageId,
+      );
+    }
+    expect(completed.discussion.status).toBe('COMPLETED');
+    expect(completed.decision?.summary).toBe('Retry conclusion.');
+    retryStorage.close();
+  });
+
   it('reuses provider sessions across discussions by default and creates fresh sessions on request', async () => {
     const calls: Array<{ provider: string; sessionId?: string; discussionId: string }> = [];
     const connectedStorage = new Storage(':memory:');
@@ -200,12 +580,15 @@ describe('CollaborationService', () => {
     );
     const first = await connectedCollaboration.initiateDiscussion({
       driver: 'claude', peer: 'codex', topic: 'first', initialMessage: 'one', projectPath: '/project', traceId: 'tr_reuse_1',
+      mode: 'review',
     });
     const second = await connectedCollaboration.initiateDiscussion({
       driver: 'claude', peer: 'codex', topic: 'second', initialMessage: 'two', projectPath: '/project', traceId: 'tr_reuse_2',
+      mode: 'review',
     });
     const fresh = await connectedCollaboration.initiateDiscussion({
       driver: 'claude', peer: 'codex', topic: 'fresh', initialMessage: 'three', projectPath: '/project', traceId: 'tr_reuse_3', sessionPolicy: 'fresh',
+      mode: 'review',
     });
 
     expect(connectedStorage.getDiscussion(first.discussionId)?.collaborationSessionId)
@@ -243,6 +626,7 @@ describe('CollaborationService', () => {
     const first = await service.initiateDiscussion({
       driver: 'claude', peer: 'codex', topic: 'fresh first', initialMessage: 'one',
       projectPath: '/fresh-project', traceId: 'tr_fresh_first', sessionPolicy: 'fresh',
+      mode: 'review',
     });
     await service.replyToDiscussion({
       discussionId: first.discussionId,
@@ -252,6 +636,7 @@ describe('CollaborationService', () => {
     const second = await service.initiateDiscussion({
       driver: 'claude', peer: 'codex', topic: 'fresh second', initialMessage: 'two',
       projectPath: '/fresh-project', traceId: 'tr_fresh_second', sessionPolicy: 'fresh',
+      mode: 'review',
     });
 
     expect(calls).toEqual([
@@ -295,10 +680,12 @@ describe('CollaborationService', () => {
     const first = await service.initiateDiscussion({
       driver: 'claude', peer: 'codex', topic: 'shared first', initialMessage: 'one',
       projectPath: '/shared-project', traceId: 'tr_shared_first',
+      mode: 'review',
     });
     const second = await service.initiateDiscussion({
       driver: 'claude', peer: 'codex', topic: 'shared second', initialMessage: 'two',
       projectPath: '/shared-project', traceId: 'tr_shared_second',
+      mode: 'review',
     });
 
     await service.cancelDiscussion({ discussionId: second.discussionId, agent: 'claude' });
@@ -340,6 +727,7 @@ describe('CollaborationService', () => {
       topic: 'unavailable',
       initialMessage: 'probe',
       traceId: 'tr_unavailable',
+      mode: 'review',
     })).rejects.toThrow('not available');
     expect(peerStorage.listDiscussions()[0].status).toBe('PEER_BUSY');
     expect(() => peerStorage.acquireSessionLease({
@@ -359,6 +747,7 @@ describe('CollaborationService', () => {
       topic: 'cancel',
       initialMessage: 'stop this discussion',
       traceId: 'tr_cancel',
+      mode: 'review',
     });
 
     const cancelled = await cancelCollaboration.cancelDiscussion({
@@ -383,8 +772,797 @@ describe('CollaborationService', () => {
       topic: 'budget',
       initialMessage: 'a'.repeat(600),
       traceId: 'tr_budget',
+      mode: 'review',
     });
 
     await expect(budgetCollaboration.replyToDiscussion({
       discussionId: started.discussionId,
-      Û5¶‰žËkºwµç@½¹ÍÐÉ•ÑÉå½±±…‰½É…Ñ¥½¸€ô¹•Ü½±±…‰½É…Ñ¥½¹M•ÉÙ¥” (€€€€€É•ÑÉåMÑ½É…”°(€€€€€¹•ÜÕ‘¥ÑM•ÉÙ¥”¡É•ÑÉåMÑ½É…”¤°(€€€€€íô°(€€€€€ì(€€€€€€€½‘•àèì(€€€€€€€€€…•¹ÑQåÁ”è€½‘•àœ°(€€€€€€€€€¥ÍÙ…¥±…‰±”è…Íå¹Œ€ ¤€ôøÑÉÕ”°(€€€€€€€€€¥Í	ÕÍäè…Íå¹Œ€ ¤€ôø™…±Í”°(€€€€€€€€€Í•¹‘¹‘]…¥Ðè…Íå¹Œ€¡½¹Ñ•áÐ¤€ôøì(€€€€€€€€€€€…ÑÑ•µÁÑÌ€¬ô€Äì(€€€€€€€€€€€¥˜€¡…ÑÑ•µÁÑÌ€ôôô€Ä¤Ñ¡É½Ü¹•ÜÉÉ½È Í¥µÕ±…Ñ•½¹¹•Ñ½È™…¥±ÕÉ”œ¤ì(€€€€€€€€€€€É•ÑÕÉ¸ì(€€€€€€€€€€€€€½¹Ñ•¹Ðè€É•ÑÉäÍÕ••‘•œ°(€€€€€€€€€€€€€‘ÕÉ…Ñ¥½¸è€Ä°(€€€€€€€€€€€ôì(€€€€€€€€€ô°(€€€€€€€ô°(€€€€€ô°(€€€€¤ì((€€€±•Ð‘¥ÍÕÍÍ¥½¹%€ô€œœì(€€€…Ý…¥Ð•áÁ•Ð¡É•ÑÉå½±±…‰½É…Ñ¥½¸¹¥¹¥Ñ¥…Ñ•¥ÍÕÍÍ¥½¸¡ì(€€€€€‘É¥Ù•Èè€±…Õ‘”œ°(€€€€€Á••Èè€½‘•àœ°(€€€€€Ñ½Á¥Œè€É•ÑÉäœ°(€€€€€¥¹¥Ñ¥…±5•ÍÍ…”è€É•ÑÉäµ”œ°(€€€€€ÑÉ…•%è€ÑÉ}É•ÑÉäœ°(€€€ô¤¤¹É•©•ÑÌ¹Ñ½Q¡É½Ü Í¥µÕ±…Ñ•½¹¹•Ñ½È™…¥±ÕÉ”œ¤ì(€€€‘¥ÍÕÍÍ¥½¹%€ôÉ•ÑÉåMÑ½É…”¹±¥ÍÑ¥ÍÕÍÍ¥½¹Ì ¥lÁt¹¥ì(€€€•áÁ•Ð¡É•ÑÉåMÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡‘¥ÍÕÍÍ¥½¹%¤ü¹ÍÑ…ÑÕÌ¤¹Ñ½	” %1œ¤ì(€€€•áÁ•Ð¡É•ÑÉåMÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡‘¥ÍÕÍÍ¥½¹%¤ü¹‘¥ÍÁ…Ñ¡MÑ…Ñ”¤¹Ñ½	” %1œ¤ì(€€€•áÁ•Ð¡É•ÑÉåMÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡‘¥ÍÕÍÍ¥½¹%¤ü¹É•ÑÉå½Õ¹Ð¤¹Ñ½	” Ä¤ì(€€€•áÁ•Ð¡É•ÑÉåMÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡‘¥ÍÕÍÍ¥½¹%¤¤¹Ñ½5…Ñ¡=‰©•Ð¡ì(€€€€€™…¥±•‘¥ÍÁ…Ñ¡I••¥Ù•Èè€½‘•àœ°(€€€€€™…¥±•‘5•ÍÍ…•%èÉ•ÑÉåMÑ½É…”¹•Ñ5•ÍÍ…•Ì¡‘¥ÍÕÍÍ¥½¹%¥lÁt¹¥°(€€€€€™…¥±•‘=Á•É…Ñ¥½¹-¥¹è€Á••É}µ•ÍÍ…”œ°(€€€ô¤ì((€€€½¹ÍÐÉ•ÑÉ¥•€ô…Ý…¥ÐÉ•ÑÉå½±±…‰½É…Ñ¥½¸¹É•ÑÉå¥ÍÕÍÍ¥½¸¡ì‘¥ÍÕÍÍ¥½¹%°…•¹Ðè€±…Õ‘”œô¤ì(€€€•áÁ•Ð¡É•ÑÉ¥•¹ÍÑ…ÑÕÌ¤¹Ñ½	” %MUMM%9œ¤ì(€€€•áÁ•Ð¡É•ÑÉ¥•¹É•ÑÉå½Õ¹Ð¤¹Ñ½	” Ä¤ì(€€€•áÁ•Ð¡É•ÑÉ¥•¹Á••ÉI•ÍÁ½¹Í”ü¹½¹Ñ•¹Ð¤¹Ñ½	” É•ÑÉäÍÕ••‘•œ¤ì(€€€•áÁ•Ð¡…ÑÑ•µÁÑÌ¤¹Ñ½	” È¤ì(€€€•áÁ•Ð¡É•ÑÉåMÑ½É…”¹•Ñ5•ÍÍ…•Ì¡‘¥ÍÕÍÍ¥½¹%¤¤¹Ñ½!…Ù•1•¹Ñ  È¤ì(€€€É•ÑÉåMÑ½É…”¹±½Í” ¤ì(€ô¤ì((€¥Ð ­••ÁÌ±•…ä™…¥±•‘¥ÍÕÍÍ¥½¹ÌÉ•ÑÉå…‰±”Ý¡•¸‘¥ÍÁ…Ñ µ•Ñ…‘…Ñ„¥Ì…‰Í•¹Ðœ°…Íå¹Œ€ ¤€ôøì(€€€½¹ÍÐ±•…åMÑ½É…”€ô¹•ÜMÑ½É…” œéµ•µ½Éäèœ¤ì(€€€±•Ð…ÑÑ•µÁÑÌ€ô€Àì(€€€½¹ÍÐ±•…å½±±…‰½É…Ñ¥½¸€ô¹•Ü½±±…‰½É…Ñ¥½¹M•ÉÙ¥” (€€€€€±•…åMÑ½É…”°(€€€€€¹•ÜÕ‘¥ÑM•ÉÙ¥”¡±•…åMÑ½É…”¤°(€€€€€íô°(€€€€€ì(€€€€€€€½‘•àèì(€€€€€€€€€…•¹ÑQåÁ”è€½‘•àœ°(€€€€€€€€€¥ÍÙ…¥±…‰±”è…Íå¹Œ€ ¤€ôøÑÉÕ”°(€€€€€€€€€¥Í	ÕÍäè…Íå¹Œ€ ¤€ôø™…±Í”°(€€€€€€€€€Í•¹‘¹‘]…¥Ðè…Íå¹Œ€ ¤€ôøì(€€€€€€€€€€€…ÑÑ•µÁÑÌ€¬ô€Äì(€€€€€€€€€€€¥˜€¡…ÑÑ•µÁÑÌ€ôôô€Ä¤Ñ¡É½Ü¹•ÜÉÉ½È ±•…ä½¹¹•Ñ½È™…¥±ÕÉ”œ¤ì(€€€€€€€€€€€É•ÑÕÉ¸ì½¹Ñ•¹Ðè€±•…äÉ•ÑÉäÍÕ••‘•œ°‘ÕÉ…Ñ¥½¸è€Äôì(€€€€€€€€€ô°(€€€€€€€ô°(€€€€€ô°(€€€€¤ì((€€€…Ý…¥Ð•áÁ•Ð¡±•…å½±±…‰½É…Ñ¥½¸¹¥¹¥Ñ¥…Ñ•¥ÍÕÍÍ¥½¸¡ì(€€€€€‘É¥Ù•Èè€±…Õ‘”œ°(€€€€€Á••Èè€½‘•àœ°(€€€€€Ñ½Á¥Œè€±•…äÉ•ÑÉäœ°(€€€€€¥¹¥Ñ¥…±5•ÍÍ…”è€É•ÑÉä±•…äÉ•ÅÕ•ÍÐœ°(€€€€€ÑÉ…•%è€ÑÉ}±•…å}É•ÑÉäœ°(€€€ô¤¤¹É•©•ÑÌ¹Ñ½Q¡É½Ü ±•…ä½¹¹•Ñ½È™…¥±ÕÉ”œ¤ì(€€€½¹ÍÐ‘¥ÍÕÍÍ¥½¸€ô±•…åMÑ½É…”¹±¥ÍÑ¥ÍÕÍÍ¥½¹Ì ¥lÁtì(€€€½¹ÍÐ‘…Ñ…‰…Í”€ô€¡±•…åMÑ½É…”…ÌÕ¹­¹½Ý¸…Ìì(€€€€€‘ˆèìÁÉ•Á…É”¡ÍÅ°èÍÑÉ¥¹œ¤èìÉÕ¸ ¸¸¹Á…É…µÌèÕ¹­¹½Ý¹mt¤èÕ¹­¹½Ý¸ôôì(€€€ô¤¹‘ˆì(€€€‘…Ñ…‰…Í”¹ÁÉ•Á…É” (€€€€€€UAQ‘¥ÍÕÍÍ¥½¹ÌMP™…¥±•‘}‘¥ÍÁ…Ñ¡}É••¥Ù•È€ô9U10°™…¥±•‘}µ•ÍÍ…•}¥€ô9U10°™…¥±•‘}½Á•É…Ñ¥½¹}­¥¹€ô9U10]!I¥€ô€üœ°(€€€€¤¹ÉÕ¸¡‘¥ÍÕÍÍ¥½¸¹¥¤ì((€€€½¹ÍÐÉ•ÑÉ¥•€ô…Ý…¥Ð±•…å½±±…‰½É…Ñ¥½¸¹É•ÑÉå¥ÍÕÍÍ¥½¸¡ì(€€€€€‘¥ÍÕÍÍ¥½¹%è‘¥ÍÕÍÍ¥½¸¹¥°(€€€€€…•¹Ðè€±…Õ‘”œ°(€€€ô¤ì(€€€•áÁ•Ð¡É•ÑÉ¥•¹Á••ÉI•ÍÁ½¹Í”ü¹½¹Ñ•¹Ð¤¹Ñ½	” ±•…äÉ•ÑÉäÍÕ••‘•œ¤ì(€€€•áÁ•Ð¡…ÑÑ•µÁÑÌ¤¹Ñ½	” È¤ì(€€€±•…åMÑ½É…”¹±½Í” ¤ì(€ô¤ì((€¥Ð É•ÑÉ¥•Ì„É•ÑÉå…‰±”¹½¸µ…µ‰¥Õ½ÕÌÁÉ½Ù¥‘•ÈÑ¥µ•½ÕÐœ°…Íå¹Œ€ ¤€ôøì(€€€½¹ÍÐÑ¥µ•½ÕÑMÑ½É…”€ô¹•ÜMÑ½É…” œéµ•µ½Éäèœ¤ì(€€€±•Ð…ÑÑ•µÁÑÌ€ô€Àì(€€€½¹ÍÐÍ•ÉÙ¥”€ô¹•Ü½±±…‰½É…Ñ¥½¹M•ÉÙ¥” (€€€€€Ñ¥µ•½ÕÑMÑ½É…”°(€€€€€¹•ÜÕ‘¥ÑM•ÉÙ¥”¡Ñ¥µ•½ÕÑMÑ½É…”¤°(€€€€€íô°(€€€€€ì(€€€€€€€½‘•àèì(€€€€€€€€€…•¹ÑQåÁ”è€½‘•àœ°(€€€€€€€€€¥ÍÙ…¥±…‰±”è…Íå¹Œ€ ¤€ôøÑÉÕ”°(€€€€€€€€€¥Í	ÕÍäè…Íå¹Œ€ ¤€ôø™…±Í”°(€€€€€€€€€Í•¹‘¹‘]…¥Ðè…Íå¹Œ€ ¤€ôøì(€€€€€€€€€€€…ÑÑ•µÁÑÌ€¬ô€Äì(€€€€€€€€€€€¥˜€¡…ÑÑ•µÁÑÌ€ôôô€Ä¤ì(€€€€€€€€€€€€€Ñ¡É½Ü¹•ÜAÉ½Ù¥‘•ÉÉÉ½È Q%5=UPœ°€ÁÉ½Ù¥‘•ÈÑ¥µ•½ÕÐœ°ì(€€€€€€€€€€€€€€€É•ÑÉå…‰±”èÑÉÕ”°(€€€€€€€€€€€€€€€…µ‰¥Õ½ÕÌè™…±Í”°(€€€€€€€€€€€€€ô¤ì(€€€€€€€€€€€ô(€€€€€€€€€€€É•ÑÕÉ¸ì½¹Ñ•¹Ðè€Ñ¥µ•½ÕÐÉ•ÑÉäÍÕ••‘•œ°‘ÕÉ…Ñ¥½¸è€Äôì(€€€€€€€€€ô°(€€€€€€€ô°(€€€€€ô°(€€€€¤ì(€€€½¹ÍÐÁ•¹‘¥¹œ€ôÍ•ÉÙ¥”¹¥¹¥Ñ¥…Ñ•¥ÍÕÍÍ¥½¸¡ì(€€€€€‘É¥Ù•Èè€±…Õ‘”œ°(€€€€€Á••Èè€½‘•àœ°(€€€€€Ñ½Á¥Œè€É•ÑÉå…‰±”Ñ¥µ•½ÕÐœ°(€€€€€¥¹¥Ñ¥…±5•ÍÍ…”è€I•ÑÉäÑ¡¥ÌÑ¥µ•½ÕÐ¸œ°(€€€€€ÑÉ…•%è€ÑÉ}É•ÑÉå…‰±•}Ñ¥µ•½ÕÐœ°(€€€ô¤ì(€€€…Ý…¥Ð•áÁ•Ð¡Á•¹‘¥¹œ¤¹É•©•ÑÌ¹Ñ½5…Ñ¡=‰©•Ð¡ì½‘”è€Q%5=UPœô¤ì(€€€½¹ÍÐ‘¥ÍÕÍÍ¥½¸€ôÑ¥µ•½ÕÑMÑ½É…”¹±¥ÍÑ¥ÍÕÍÍ¥½¹Ì ¥lÁtì(€€€•áÁ•Ð¡‘¥ÍÕÍÍ¥½¸¤¹Ñ½5…Ñ¡=‰©•Ð¡ì(€€€€€ÍÑ…ÑÕÌè€Q%5=UPœ°(€€€€€±…ÍÑÉÉ½ÈèìÉ•ÑÉå…‰±”èÑÉÕ”°…µ‰¥Õ½ÕÌè™…±Í”ô°(€€€€€™…¥±•‘¥ÍÁ…Ñ¡I••¥Ù•Èè€½‘•àœ°(€€€ô¤ì(€€€½¹ÍÐÉ•ÑÉ¥•€ô…Ý…¥ÐÍ•ÉÙ¥”¹É•ÑÉå¥ÍÕÍÍ¥½¸¡ì‘¥ÍÕÍÍ¥½¹%è‘¥ÍÕÍÍ¥½¸¹¥°…•¹Ðè€±…Õ‘”œô¤ì(€€€•áÁ•Ð¡É•ÑÉ¥•¹Á••ÉI•ÍÁ½¹Í”ü¹½¹Ñ•¹Ð¤¹Ñ½	” Ñ¥µ•½ÕÐÉ•ÑÉäÍÕ••‘•œ¤ì(€€€•áÁ•Ð¡…ÑÑ•µÁÑÌ¤¹Ñ½	” È¤ì(€€€Ñ¥µ•½ÕÑMÑ½É…”¹±½Í” ¤ì(€ô¤ì((€¥Ð ‘½•Ì¹½ÐÉ•ÑÉä„Á••ÈµÉ•ÅÕ•ÍÑ•ÕÍ•È‘•¥Í¥½¸½ÈÉ•Á±…ä¥ÐÑ¼Ñ¡”ÝÉ½¹œÁÉ½Ù¥‘•Èœ°…Íå¹Œ€ ¤€ôøì(€€€½¹ÍÐÍ¥¹…±MÑ½É…”€ô¹•ÜMÑ½É…” œéµ•µ½Éäèœ¤ì(€€€±•Ð…ÑÑ•µÁÑÌ€ô€Àì(€€€½¹ÍÐÍ•ÉÙ¥”€ô¹•Ü½±±…‰½É…Ñ¥½¹M•ÉÙ¥” (€€€€€Í¥¹…±MÑ½É…”°(€€€€€¹•ÜÕ‘¥ÑM•ÉÙ¥”¡Í¥¹…±MÑ½É…”¤°(€€€€€íô°(€€€€€ì(€€€€€€€½‘•àèì(€€€€€€€€€…•¹ÑQåÁ”è€½‘•àœ°(€€€€€€€€€¥ÍÙ…¥±…‰±”è…Íå¹Œ€ ¤€ôøÑÉÕ”°(€€€€€€€€€¥Í	ÕÍäè…Íå¹Œ€ ¤€ôø™…±Í”°(€€€€€€€€€Í•¹‘¹‘]…¥Ðè…Íå¹Œ€ ¤€ôøì(€€€€€€€€€€€…ÑÑ•µÁÑÌ€¬ô€Äì(€€€€€€€€€€€É•ÑÕÉ¸ì(€€€€€€€€€€€€€½¹Ñ•¹Ðè€¡½½Í”„Á…Ñ ¹q¹m9Q	I%}M%90è9M}UMI}%M%=9tœ°(€€€€€€€€€€€€€‘ÕÉ…Ñ¥½¸è€Ä°(€€€€€€€€€€€ôì(€€€€€€€€€ô°(€€€€€€€ô°(€€€€€ô°(€€€€¤ì(€€€½¹ÍÐÍÑ…ÉÑ•€ô…Ý…¥ÐÍ•ÉÙ¥”¹¥¹¥Ñ¥…Ñ•¥ÍÕÍÍ¥½¸¡ì(€€€€€‘É¥Ù•Èè€±…Õ‘”œ°(€€€€€Á••Èè€½‘•àœ°(€€€€€Ñ½Á¥Œè€É•ÑÉä‘¥É•Ñ¥½¸œ°(€€€€€¥¹¥Ñ¥…±5•ÍÍ…”è€¡½½Í”„Á…Ñ ¸œ°(€€€€€ÑÉ…•%è€ÑÉ}É•ÑÉå}‘¥É•Ñ¥½¸œ°(€€€ô¤ì((€€€…Ý…¥Ð•áÁ•Ð¡Í•ÉÙ¥”¹É•ÑÉå¥ÍÕÍÍ¥½¸¡ì(€€€€€‘¥ÍÕÍÍ¥½¹%èÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%°(€€€€€…•¹Ðè€±…Õ‘”œ°(€€€ô¤¤¹É•©•ÑÌ¹Ñ½Q¡É½Ü •áÁ±¥¥ÐÉ•Á±å}Á••È‘•¥Í¥½¸œ¤ì(€€€•áÁ•Ð¡…ÑÑ•µÁÑÌ¤¹Ñ½	” Ä¤ì(€€€•áÁ•Ð¡Í¥¹…±MÑ½É…”¹•Ñ5•ÍÍ…•Ì¡ÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%¤¹…Ð ´Ä¤ü¹É••¥Ù•È¤¹Ñ½	” ±…Õ‘”œ¤ì(€€€Í¥¹…±MÑ½É…”¹±½Í” ¤ì(€ô¤ì((€¥Ð ‘½•Ì¹½ÐÉ•ÑÉä…¸…µ‰¥Õ½ÕÌÁÉ½Ù¥‘•ÈÉ•ÍÕ±Ðœ°…Íå¹Œ€ ¤€ôøì(€€€½¹ÍÐ…µ‰¥Õ½ÕÍMÑ½É…”€ô¹•ÜMÑ½É…” œéµ•µ½Éäèœ¤ì(€€€½¹ÍÐÍ•ÉÙ¥”€ô¹•Ü½±±…‰½É…Ñ¥½¹M•ÉÙ¥” (€€€€€…µ‰¥Õ½ÕÍMÑ½É…”°(€€€€€¹•ÜÕ‘¥ÑM•ÉÙ¥”¡…µ‰¥Õ½ÕÍMÑ½É…”¤°(€€€€€íô°(€€€€€ì(€€€€€€€½‘•àèì(€€€€€€€€€…•¹ÑQåÁ”è€½‘•àœ°(€€€€€€€€€¥ÍÙ…¥±…‰±”è…Íå¹Œ€ ¤€ôøÑÉÕ”°(€€€€€€€€€¥Í	ÕÍäè…Íå¹Œ€ ¤€ôø™…±Í”°(€€€€€€€€€Í•¹‘¹‘]…¥Ðè…Íå¹Œ€ ¤€ôøì(€€€€€€€€€€€Ñ¡É½Ü¹•ÜAÉ½Ù¥‘•ÉÉÉ½È %1œ°€ÑÕÉ¸ÍÑ…ÉÑ•‰•™½É”ÑÉ…¹ÍÁ½ÉÐ™…¥±ÕÉ”œ°ì(€€€€€€€€€€€€€…µ‰¥Õ½ÕÌèÑÉÕ”°(€€€€€€€€€€€ô¤ì(€€€€€€€€€ô°(€€€€€€€ô°(€€€€€ô°(€€€€¤ì(€€€½¹ÍÐÁ•¹‘¥¹œ€ôÍ•ÉÙ¥”¹¥¹¥Ñ¥…Ñ•¥ÍÕÍÍ¥½¸¡ì(€€€€€‘É¥Ù•Èè€±…Õ‘”œ°(€€€€€Á••Èè€½‘•àœ°(€€€€€Ñ½Á¥Œè€…µ‰¥Õ½ÕÌÉ•ÑÉäœ°(€€€€€¥¹¥Ñ¥…±5•ÍÍ…”è€IÕ¸Ñ¡”½Á•É…Ñ¥½¸¸œ°(€€€€€ÑÉ…•%è€ÑÉ}…µ‰¥Õ½ÕÍ}É•ÑÉäœ°(€€€ô¤ì(€€€…Ý…¥Ð•áÁ•Ð¡Á•¹‘¥¹œ¤¹É•©•ÑÌ¹Ñ½Q¡É½Ü ÑÕÉ¸ÍÑ…ÉÑ•‰•™½É”ÑÉ…¹ÍÁ½ÉÐ™…¥±ÕÉ”œ¤ì(€€€½¹ÍÐ‘¥ÍÕÍÍ¥½¸€ô…µ‰¥Õ½ÕÍMÑ½É…”¹±¥ÍÑ¥ÍÕÍÍ¥½¹Ì ¥lÁtì(€€€•áÁ•Ð¡‘¥ÍÕÍÍ¥½¸¤¹Ñ½5…Ñ¡=‰©•Ð¡ì(€€€€€ÍÑ…ÑÕÌè€9M}UMI}%M%=8œ°(€€€€€±…ÍÑÉÉ½Èèì…µ‰¥Õ½ÕÌèÑÉÕ”ô°(€€€€€™…¥±•‘¥ÍÁ…Ñ¡I••¥Ù•Èè€½‘•àœ°(€€€€€™…¥±•‘=Á•É…Ñ¥½¹-¥¹è€Á••É}µ•ÍÍ…”œ°(€€€ô¤ì(€€€…Ý…¥Ð•áÁ•Ð¡Í•ÉÙ¥”¹É•ÑÉå¥ÍÕÍÍ¥½¸¡ì(€€€€€‘¥ÍÕÍÍ¥½¹%è‘¥ÍÕÍÍ¥½¸¹¥°(€€€€€…•¹Ðè€±…Õ‘”œ°(€€€ô¤¤¹É•©•ÑÌ¹Ñ½Q¡É½Ü …µ‰¥Õ½ÕÌõÑÉÕ”œ¤ì(€€€…µ‰¥Õ½ÕÍMÑ½É…”¹±½Í” ¤ì(€ô¤ì((€¥Ð É•ÍÑ½É•Ì„ÁÉ½Ù¥‘•ÈÍ•ÍÍ¥½¸™É½´ME1¥Ñ”…™Ñ•ÈÑ¡”½±±…‰½É…Ñ¥½¸ÁÉ½•ÍÌÉ•ÍÑ…ÉÑÌœ°…Íå¹Œ€ ¤€ôøì(€€€½¹ÍÐ‘¥É•Ñ½Éä€ôµ­‘Ñ•µÁMå¹Œ¡©½¥¸¡ÑµÁ‘¥È ¤°€…•¹Ñ‰É¥‘”µÍ•ÍÍ¥½¸µÉ•ÍÑ…ÉÐ´œ¤¤ì(€€€½¹ÍÐ‘‰A…Ñ €ô©½¥¸¡‘¥É•Ñ½Éä°€…•¹Ñ‰É¥‘”¹ÍÅ±¥Ñ”œ¤ì(€€€ÑÉäì(€€€€€½¹ÍÐ™¥ÉÍÑMÑ½É…”€ô¹•ÜMÑ½É…”¡‘‰A…Ñ ¤ì(€€€€€½¹ÍÐ™¥ÉÍÑ½±±…‰½É…Ñ¥½¸€ô¹•Ü½±±…‰½É…Ñ¥½¹M•ÉÙ¥” (€€€€€€€™¥ÉÍÑMÑ½É…”°(€€€€€€€¹•ÜÕ‘¥ÑM•ÉÙ¥”¡™¥ÉÍÑMÑ½É…”¤°(€€€€€€€ìÑ¥µ•½ÕÑ5Ìè€Õ|ÀÀÀô°(€€€€€€€ì½‘•àè¹•Ü½‘•á½¹¹•Ñ½È¡ì½µµ…¹èÁÉ½•ÍÌ¹•á•A…Ñ °•áÑÉ…ÉÌèm½‘•á¥áÑÕÉ•t°Ñ¥µ•½ÕÑ5Ìè€Õ|ÀÀÀô¤ô°(€€€€€€¤ì(€€€€€½¹ÍÐÍÑ…ÉÑ•€ô…Ý…¥Ð™¥ÉÍÑ½±±…‰½É…Ñ¥½¸¹¥¹¥Ñ¥…Ñ•¥ÍÕÍÍ¥½¸¡ì(€€€€€€€‘É¥Ù•Èè€±…Õ‘”œ°(€€€€€€€Á••Èè€½‘•àœ°(€€€€€€€Ñ½Á¥Œè€É•ÍÑ…ÉÐÉ•½Ù•Éäœ°(€€€€€€€¥¹¥Ñ¥…±5•ÍÍ…”è€™¥ÉÍÐÉ½Õ¹œ°(€€€€€€€ÁÉ½©•ÑA…Ñ è‘¥É•Ñ½Éä°(€€€€€€€ÑÉ…•%è€ÑÉ}É•ÍÑ…ÉÐœ°(€€€€€ô¤ì(€€€€€™¥ÉÍÑMÑ½É…”¹±½Í” ¤ì((€€€€€½¹ÍÐÍ•½¹‘MÑ½É…”€ô¹•ÜMÑ½É…”¡‘‰A…Ñ ¤ì(€€€€€½¹ÍÐÍ•½¹‘½±±…‰½É…Ñ¥½¸€ô¹•Ü½±±…‰½É…Ñ¥½¹M•ÉÙ¥” (€€€€€€€Í•½¹‘MÑ½É…”°(€€€€€€€¹•ÜÕ‘¥ÑM•ÉÙ¥”¡Í•½¹‘MÑ½É…”¤°(€€€€€€€ìÑ¥µ•½ÕÑ5Ìè€Õ|ÀÀÀô°(€€€€€€€ì½‘•àè¹•Ü½‘•á½¹¹•Ñ½È¡ì½µµ…¹èÁÉ½•ÍÌ¹•á•A…Ñ °•áÑÉ…ÉÌèm½‘•á¥áÑÕÉ•t°Ñ¥µ•½ÕÑ5Ìè€Õ|ÀÀÀô¤ô°(€€€€€€¤ì(€€€€€½¹ÍÐ½¹Ñ¥¹Õ•€ô…Ý…¥ÐÍ•½¹‘½±±…‰½É…Ñ¥½¸¹É•Á±åQ½¥ÍÕÍÍ¥½¸¡ì(€€€€€€€‘¥ÍÕÍÍ¥½¹%èÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%°(€€€€€€€Í•¹‘•Èè€±…Õ‘”œ°(€€€€€€€É•Á±äè€Í•½¹É½Õ¹œ°(€€€€€ô¤ì(€€€€€•áÁ•Ð¡½¹Ñ¥¹Õ•¹Á••ÉI•ÍÁ½¹Í”ü¹½¹Ñ•¹Ð¤¹Ñ½	” É•ÍÕµ•½‘•àÉ•ÍÁ½¹Í”œ¤ì(€€€€€•áÁ•Ð¡Í•½¹‘MÑ½É…”¹•ÑM•ÍÍ¥½¹½É¥ÍÕÍÍ¥½¸ ½‘•àœ°ÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%°‘¥É•Ñ½Éä¤ü¹Í•ÍÍ¥½¹%¤(€€€€€€€€¹Ñ½	” Ñ¡É•…‘}™…­•}½‘•àœ¤ì(€€€€€Í•½¹‘MÑ½É…”¹±½Í” ¤ì(€€€ô™¥¹…±±äì(€€€€€ÉµMå¹Œ¡‘¥É•Ñ½Éä°ìÉ•ÕÉÍ¥Ù”èÑÉÕ”°™½É”èÑÉÕ”ô¤ì(€€€ô(€ô¤ì((€¥Ð µ…É­Ì„ÍÕÁ•ÉÍ•‘•ÁÉ½Ù¥‘•ÈÍ•ÍÍ¥½¸U9-9=]8…™Ñ•È‰…­•¹™…±±‰…¬œ°…Íå¹Œ€ ¤€ôøì(€€€½¹ÍÐ™…±±‰…­MÑ½É…”€ô¹•ÜMÑ½É…” œéµ•µ½Éäèœ¤ì(€€€½¹ÍÐ‘¥ÍÕÍÍ¥½¸€ô™…±±‰…­MÑ½É…”¹É•…Ñ•¥ÍÕÍÍ¥½¸¡ì(€€€€€Ñ½Á¥Œè€™…±±‰…¬ÍÑ…ÑÕÌœ°(€€€€€‘É¥Ù•Èè€±…Õ‘”œ°(€€€€€Á••Èè€½‘•àœ°(€€€€€ÁÉ½©•ÑA…Ñ èÁÉ½•ÍÌ¹Ý ¤°(€€€€€ÑÉ…•%è€ÑÉ}™…±±‰…­}ÍÑ…ÑÕÌœ°(€€€ô¤ì(€€€™…±±‰…­MÑ½É…”¹É•¥ÍÑ•ÉM•ÍÍ¥½¸¡ì(€€€€€ÁÉ½Ù¥‘•Èè€½‘•àœ°(€€€€€Í•ÍÍ¥½¹%è€Ñ¡É•…‘}½±‘}…ÁÁ}Í•ÉÙ•Èœ°(€€€€€ÁÉ½©•ÑA…Ñ èÁÉ½•ÍÌ¹Ý ¤°(€€€€€ÍÑ…ÑÕÌè€%1œ°(€€€€€µ•Ñ…‘…Ñ„èì(€€€€€€€Í•ÍÍ¥½¹-¥¹è€½‘•àµ…ÁÀµÍ•ÉÙ•Èœ°(€€€€€€€‰É¥‘•=Ý¹•èÑÉÕ”°(€€€€€€€‘¥ÍÕÍÍ¥½¹%è‘¥ÍÕÍÍ¥½¸¹¥°(€€€€€ô°(€€€ô¤ì(€€€½¹ÍÐ™…±±‰…­½±±…‰½É…Ñ¥½¸€ô¹•Ü½±±…‰½É…Ñ¥½¹M•ÉÙ¥” (€€€€€™…±±‰…­MÑ½É…”°(€€€€€¹•ÜÕ‘¥ÑM•ÉÙ¥”¡™…±±‰…­MÑ½É…”¤°(€€€€€íô°(€€€€€ì(€€€€€€€½‘•àèì(€€€€€€€€€…•¹ÑQåÁ”è€½‘•àœ°(€€€€€€€€€¥ÍÙ…¥±…‰±”è…Íå¹Œ€ ¤€ôøÑÉÕ”°(€€€€€€€€€¥Í	ÕÍäè…Íå¹Œ€ ¤€ôø™…±Í”°(€€€€€€€€€Í•¹‘¹‘]…¥Ðè…Íå¹Œ€ ¤€ôø€¡ì(€€€€€€€€€€€½¹Ñ•¹Ðè€™…±±‰…¬É•ÍÁ½¹Í”œ°(€€€€€€€€€€€‘ÕÉ…Ñ¥½¸è€Ä°(€€€€€€€€€€€ÁÉ½Ù¥‘•ÉM•ÍÍ¥½¹%è€Ñ¡É•…‘}¹•Ý}±¤œ°(€€€€€€€€€€€ÁÉ½Ù¥‘•ÉM•ÍÍ¥½¹-¥¹è€½‘•àµ±¤œ°(€€€€€€€€€€€‰…­•¹‘MÝ¥Ñ¡•èì™É½´è€…ÁÀµÍ•ÉÙ•Èœ°Ñ¼è€±¤œ°É•…Í½¸è€™¥áÑÕÉ”™…¥±ÕÉ”œô°(€€€€€€€€€ô¤°(€€€€€€€ô°(€€€€€ô°(€€€€¤ì((€€€…Ý…¥Ð™…±±‰…­½±±…‰½É…Ñ¥½¸¹É•Á±åQ½¥ÍÕÍÍ¥½¸¡ì(€€€€€‘¥ÍÕÍÍ¥½¹%è‘¥ÍÕÍÍ¥½¸¹¥°(€€€€€Í•¹‘•Èè€±…Õ‘”œ°(€€€€€É•Á±äè€ÑÉ¥•È™…±±‰…¬œ°(€€€ô¤ì((€€€•áÁ•Ð¡™…±±‰…­MÑ½É…”¹•ÑM•ÍÍ¥½¸ ½‘•àœ°€Ñ¡É•…‘}½±‘}…ÁÁ}Í•ÉÙ•Èœ¤ü¹ÍÑ…ÑÕÌ¤¹Ñ½	” U9-9=]8œ¤ì(€€€•áÁ•Ð¡™…±±‰…­MÑ½É…”¹•ÑM•ÍÍ¥½¸ ½‘•àœ°€Ñ¡É•…‘}¹•Ý}±¤œ¤ü¹ÍÑ…ÑÕÌ¤¹Ñ½	” %1œ¤ì(€€€•áÁ•Ð¡™…±±‰…­MÑ½É…”¹•ÑM•ÍÍ¥½¸ ½‘•àœ°€Ñ¡É•…‘}¹•Ý}±¤œ¤ü¹µ•Ñ…‘…Ñ„¹Í•ÍÍ¥½¹-¥¹¤¹Ñ½	” ½‘•àµ±¤œ¤ì(€€€™…±±‰…­MÑ½É…”¹±½Í” ¤ì(€ô¤ì((€¥Ð¹•… ¡l(€€€lÉ•Ù¥•Üœ°€Ít°(€€€l‘¥ÍÕÍÍ¥½¸œ°€ÄÉt°(€€€l‘••Àµ‘¥ÍÕÍÍ¥½¸œ°€ÈÁt°(€t…Ì½¹ÍÐ¤ Á•ÉÍ¥ÍÑÌ€•Ìµ½‘”Ý¥Ñ ¥ÑÌ‘•™…Õ±ÐÍ…™•Ñä•¥±¥¹œœ°…Íå¹Œ€¡µ½‘”°µ…áQÕÉ¹Ì¤€ôøì(€€€½¹ÍÐµ½‘•MÑ½É…”€ô¹•ÜMÑ½É…” œéµ•µ½Éäèœ¤ì(€€€½¹ÍÐÁÉ½µÁÑÌèÍÑÉ¥¹mt€ômtì(€€€½¹ÍÐÍ•ÉÙ¥”€ô¹•Ü½±±…‰½É…Ñ¥½¹M•ÉÙ¥” (€€€€€µ½‘•MÑ½É…”°(€€€€€¹•ÜÕ‘¥ÑM•ÉÙ¥”¡µ½‘•MÑ½É…”¤°(€€€€€íô°(€€€€€ì(€€€€€€€½‘•àèì(€€€€€€€€€…•¹ÑQåÁ”è€½‘•àœ°(€€€€€€€€€¥ÍÙ…¥±…‰±”è…Íå¹Œ€ ¤€ôøÑÉÕ”°(€€€€€€€€€¥Í	ÕÍäè…Íå¹Œ€ ¤€ôø™…±Í”°(€€€€€€€€€Í•¹‘¹‘]…¥Ðè…Íå¹Œ€¡ìÁÉ½µÁÐô¤€ôøì(€€€€€€€€€€€ÁÉ½µÁÑÌ¹ÁÕÍ ¡ÁÉ½µÁÐ¤ì(€€€€€€€€€€€É•ÑÕÉ¸ì½¹Ñ•¹Ðè€É•Ù¥•Ý•‘q¹m9Q	I%}M%90èIe}Q=}1=Mtœ°‘ÕÉ…Ñ¥½¸è€Äôì(€€€€€€€€€ô°(€€€€€€€ô°(€€€€€ô°(€€€€¤ì((€€€½¹ÍÐÍÑ…ÉÑ•€ô…Ý…¥ÐÍ•ÉÙ¥”¹¥¹¥Ñ¥…Ñ•¥ÍÕÍÍ¥½¸¡ì(€€€€€‘É¥Ù•Èè€±…Õ‘”œ°(€€€€€Á••Èè€½‘•àœ°(€€€€€Ñ½Á¥Œè€‘íµ½‘•ô‘•™…Õ±ÑÍ€°(€€€€€¥¹¥Ñ¥…±5•ÍÍ…”è€%¹ÍÁ•ÐÑ¡¥Ì‘•¥Í¥½¸¸œ°(€€€€€ÑÉ…•%èÑÉ|‘íµ½‘•õ€°(€€€€€µ½‘”°(€€€ô¤ì((€€€•áÁ•Ð¡ÍÑ…ÉÑ•¤¹Ñ½5…Ñ¡=‰©•Ð¡ìµ½‘”°µ…áQÕÉ¹Ìô¤ì(€€€•áÁ•Ð¡µ½‘•MÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡ÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%¤¤¹Ñ½5…Ñ¡=‰©•Ð¡ìµ½‘”°µ…áQÕÉ¹Ìô¤ì(€€€•áÁ•Ð¡ÁÉ½µÁÑÍlÁt¤¹Ñ½½¹Ñ…¥¸¡µ½‘”è€‘íµ½‘•õ€¤ì(€€€•áÁ•Ð¡ÁÉ½µÁÑÍlÁt¤¹Ñ½½¹Ñ…¥¸¡€À¼‘íµ…áQÕÉ¹Íõ€¤ì(€€€•áÁ•Ð¡µ½‘•MÑ½É…”¹•ÑÕ‘¥Ñ1½œ¡ÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%¤¹™¥¹ ¡•Ù•¹Ð¤€ôø•Ù•¹Ð¹…Ñ¥½¸€ôôô€Á••È¹É•ÍÁ½¹Í”œ¤ü¹µ•Ñ…‘…Ñ„¤(€€€€€€¹Ñ½5…Ñ¡=‰©•Ð¡ìµ½‘”°Í¥¹…°è€Ie}Q=}1=Mœô¤ì(€€€µ½‘•MÑ½É…”¹±½Í” ¤ì(€ô¤ì((€¥Ð ±•ÑÌ…¸•áÁ±¥¥ÐÍ•ÉÙ¥”•¥±¥¹œ½Ù•ÉÉ¥‘”µ½‘”‘•™…Õ±ÑÌœ°…Íå¹Œ€ ¤€ôøì(€€€½¹ÍÐ½¹™¥ÕÉ•‘MÑ½É…”€ô¹•ÜMÑ½É…” œéµ•µ½Éäèœ¤ì(€€€½¹ÍÐÍ•ÉÙ¥”€ô¹•Ü½±±…‰½É…Ñ¥½¹M•ÉÙ¥”¡½¹™¥ÕÉ•‘MÑ½É…”°¹•ÜÕ‘¥ÑM•ÉÙ¥”¡½¹™¥ÕÉ•‘MÑ½É…”¤°ìµ…áQÕÉ¹Ìè€Üô¤ì(€€€½¹ÍÐÍÑ…ÉÑ•€ô…Ý…¥ÐÍ•ÉÙ¥”¹¥¹¥Ñ¥…Ñ•¥ÍÕÍÍ¥½¸¡ì(€€€€€‘É¥Ù•Èè€±…Õ‘”œ°(€€€€€Á••Èè€½‘•àœ°(€€€€€Ñ½Á¥Œè€½¹™¥ÕÉ••¥±¥¹œœ°(€€€€€¥¹¥Ñ¥…±5•ÍÍ…”è€I•Ù¥•ÜÝ¥Ñ „Í•ÉÙ¥”•¥±¥¹œ¸œ°(€€€€€ÑÉ…•%è€ÑÉ}½¹™¥ÕÉ•‘}•¥±¥¹œœ°(€€€€€µ½‘”è€É•Ù¥•Üœ°(€€€ô¤ì(€€€•áÁ•Ð¡ÍÑ…ÉÑ•¹µ…áQÕÉ¹Ì¤¹Ñ½	” Ü¤ì(€€€•áÁ•Ð¡½¹™¥ÕÉ•‘MÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡ÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%¤ü¹µ…áQÕÉ¹Ì¤¹Ñ½	” Ü¤ì(€€€½¹™¥ÕÉ•‘MÑ½É…”¹±½Í” ¤ì(€ô¤ì((€¥Ð µ½¹½Ñ½¹¥…±±äÕÁÉ…‘•Ì‘¥ÍÕÍÍ¥½¸µ½‘”Ý¥Ñ¡½ÕÐÉ•Á±…¥¹œÑ¡”‘¥ÍÕÍÍ¥½¸œ°…Íå¹Œ€ ¤€ôøì(€€€½¹ÍÐµ½‘•MÑ½É…”€ô¹•ÜMÑ½É…” œéµ•µ½Éäèœ¤ì(€€€½¹ÍÐÁÉ½µÁÑÌèÍÑÉ¥¹mt€ômtì(€€€½¹ÍÐÍ•ÉÙ¥”€ô¹•Ü½±±…‰½É…Ñ¥½¹M•ÉÙ¥” (€€€€€µ½‘•MÑ½É…”°(€€€€€¹•ÜÕ‘¥ÑM•ÉÙ¥”¡µ½‘•MÑ½É…”¤°(€€€€€íô°(€€€€€ì(€€€€€€€½‘•àèì(€€€€€€€€€…•¹ÑQåÁ”è€½‘•àœ°(€€€€€€€€€¥ÍÙ…¥±…‰±”è…Íå¹Œ€ ¤€ôøÑÉÕ”°(€€€€€€€€€¥Í	ÕÍäè…Íå¹Œ€ ¤€ôø™…±Í”°(€€€€€€€€€Í•¹‘¹‘]…¥Ðè…Íå¹Œ€¡ìÁÉ½µÁÐô¤€ôøì(€€€€€€€€€€€ÁÉ½µÁÑÌ¹ÁÕÍ ¡ÁÉ½µÁÐ¤ì(€€€€€€€€€€€É•ÑÕÉ¸ì½¹Ñ•¹Ðè€½¹Ñ¥¹Õ•q¹m9Q	I%}M%90è=9Q%9Utœ°‘ÕÉ…Ñ¥½¸è€Äôì(€€€€€€€€€ô°(€€€€€€€ô°(€€€€€ô°(€€€€¤ì(€€€½¹ÍÐÍÑ…ÉÑ•€ô…Ý…¥ÐÍ•ÉÙ¥”¹¥¹¥Ñ¥…Ñ•¥ÍÕÍÍ¥½¸¡ì(€€€€€‘É¥Ù•Èè€±…Õ‘”œ°(€€€€€Á••Èè€½‘•àœ°(€€€€€Ñ½Á¥Œè€µ½‘”ÕÁÉ…‘”œ°(€€€€€¥¹¥Ñ¥…±5•ÍÍ…”è€MÑ…ÉÐ„É•Ù¥•Ü¸œ°(€€€€€ÑÉ…•%è€ÑÉ}µ½‘•}ÕÁÉ…‘”œ°(€€€€€µ½‘”è€É•Ù¥•Üœ°(€€€ô¤ì(€€€½¹ÍÐÉ•ÍÕµ•€ô…Ý…¥ÐÍ•ÉÙ¥”¹É•Á±åQ½¥ÍÕÍÍ¥½¸¡ì(€€€€€‘¥ÍÕÍÍ¥½¹%èÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%°(€€€€€Í•¹‘•Èè€±…Õ‘”œ°(€€€€€É•Á±äè€Í…±…Ñ”Ñ¡”…¹…±åÍ¥Ì¸œ°(€€€€€µ½‘”è€‘••Àµ‘¥ÍÕÍÍ¥½¸œ°(€€€ô¤ì((€€€•áÁ•Ð¡É•ÍÕµ•¹ÍÑ…ÑÕÌ¤¹Ñ½	” %MUMM%9œ¤ì(€€€•áÁ•Ð¡µ½‘•MÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡ÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%¤¤¹Ñ½5…Ñ¡=‰©•Ð¡ì(€€€€€¥èÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%°(€€€€€µ½‘”è€‘••Àµ‘¥ÍÕÍÍ¥½¸œ°(€€€ô¤ì(€€€•áÁ•Ð¡ÁÉ½µÁÑÌ¹…Ð ´Ä¤¤¹Ñ½½¹Ñ…¥¸ µ½‘”è‘••Àµ‘¥ÍÕÍÍ¥½¸œ¤ì(€€€…Ý…¥Ð•áÁ•Ð¡Í•ÉÙ¥”¹É•Á±åQ½¥ÍÕÍÍ¥½¸¡ì(€€€€€‘¥ÍÕÍÍ¥½¹%èÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%°(€€€€€Í•¹‘•Èè€±…Õ‘”œ°(€€€€€É•Á±äè€½Ý¹É…‘”Ñ¡”…¹…±åÍ¥Ì¸œ°(€€€€€µ½‘”è€‘¥ÍÕÍÍ¥½¸œ°(€€€ô¤¤¹É•©•ÑÌ¹Ñ½Q¡É½Ü …¹¹½Ð‰”‘½Ý¹É…‘•œ¤ì(€€€µ½‘•MÑ½É…”¹±½Í” ¤ì(€ô¤ì((€¥Ð Á…ÕÍ•ÌÍ…™•±äÝ¡•¸Ñ¡”Á••ÈÉ•ÑÕÉ¹Ì„ÕÍ•Èµ½Ý¹•‘•¥Í¥½¸Í¥¹…°œ°…Íå¹Œ€ ¤€ôøì(€€€½¹ÍÐÍ¥¹…±MÑ½É…”€ô¹•ÜMÑ½É…” œéµ•µ½Éäèœ¤ì(€€€±•Ð…ÑÑ•µÁÑÌ€ô€Àì(€€€½¹ÍÐÍ•ÉÙ¥”€ô¹•Ü½±±…‰½É…Ñ¥½¹M•ÉÙ¥” (€€€€€Í¥¹…±MÑ½É…”°(€€€€€¹•ÜÕ‘¥ÑM•ÉÙ¥”¡Í¥¹…±MÑ½É…”¤°(€€€€€íô°(€€€€€ì(€€€€€€€½‘•àèì(€€€€€€€€€…•¹ÑQåÁ”è€½‘•àœ°(€€€€€€€€€¥ÍÙ…¥±…‰±”è…Íå¹Œ€ ¤€ôøÑÉÕ”°(€€€€€€€€€¥Í	ÕÍäè…Íå¹Œ€ ¤€ôø™…±Í”°(€€€€€€€€€Í•¹‘¹‘]…¥Ðè…Íå¹Œ€ ¤€ôøì(€€€€€€€€€€€…ÑÑ•µÁÑÌ€¬ô€Äì(€€€€€€€€€€€É•ÑÕÉ¸ì(€€€€€€€€€€€€€½¹Ñ•¹Ðè…ÑÑ•µÁÑÌ€ôôô€Ä(€€€€€€€€€€€€€€€€ü€¡½½Í”Ý¡•Ñ¡•È‘½Ý¹Ñ¥µ”¥Ì…•ÁÑ…‰±”¹q¹m9Q	I%}M%90è9M}UMI}%M%=9tœ(€€€€€€€€€€€€€€€€è€UÍ”Ñ¡”½¹±¥¹”µ¥É…Ñ¥½¸¹q¹m9Q	I%}M%90èIe}Q=}1=Mtœ°(€€€€€€€€€€€€€‘ÕÉ…Ñ¥½¸è€Ä°(€€€€€€€€€€€ôì(€€€€€€€€€ô°(€€€€€€€ô°(€€€€€ô°(€€€€¤ì(€€€½¹ÍÐÍÑ…ÉÑ•€ô…Ý…¥ÐÍ•ÉÙ¥”¹¥¹¥Ñ¥…Ñ•¥ÍÕÍÍ¥½¸¡ì(€€€€€‘É¥Ù•Èè€±…Õ‘”œ°(€€€€€Á••Èè€½‘•àœ°(€€€€€Ñ½Á¥Œè€ÕÍ•Èµ½Ý¹•É¥Í¬œ°(€€€€€¥¹¥Ñ¥…±5•ÍÍ…”è€¡½½Í”„µ¥É…Ñ¥½¸ÍÑÉ…Ñ•ä¸œ°(€€€€€ÑÉ…•%è€ÑÉ}ÕÍ•É}Í¥¹…°œ°(€€€€€µ½‘”è€‘••Àµ‘¥ÍÕÍÍ¥½¸œ°(€€€ô¤ì((€€€•áÁ•Ð¡ÍÑ…ÉÑ•¹ÍÑ…ÑÕÌ¤¹Ñ½	” 9M}UMI}%M%=8œ¤ì(€€€•áÁ•Ð¡Í¥¹…±MÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡ÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%¤¤¹Ñ½5…Ñ¡=‰©•Ð¡ì(€€€€€ÍÑ…ÑÕÌè€9M}UMI}%M%=8œ°(€€€€€‘¥ÍÁ…Ñ¡MÑ…Ñ”è€=5A1Qœ°(€€€€€±…ÍÑM¥¹…°è€9M}UMI}%M%=8œ°(€€€€€ÍÑ½ÁI•…Í½¸è€AI}IEUMQ}UMI}%M%=8œ°(€€€ô¤ì(€€€½¹ÍÐÉ•ÍÕµ•€ô…Ý…¥ÐÍ•ÉÙ¥”¹É•Á±åQ½¥ÍÕÍÍ¥½¸¡ì(€€€€€‘¥ÍÕÍÍ¥½¹%èÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%°(€€€€€Í•¹‘•Èè€±…Õ‘”œ°(€€€€€É•Á±äè€½Ý¹Ñ¥µ”¥Ì¹½Ð…•ÁÑ…‰±”ìÕÍ”…¸½¹±¥¹”Á…Ñ ¸œ°(€€€ô¤ì(€€€•áÁ•Ð¡É•ÍÕµ•¹ÍÑ…ÑÕÌ¤¹Ñ½	” %MUMM%9œ¤ì(€€€•áÁ•Ð¡Í¥¹…±MÑ½É…”¹•Ñ¥ÍÕÍÍ¥½¸¡ÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%¤¤¹Ñ½5…Ñ¡=‰©•Ð¡ì(€€€€€ÍÑ…ÑÕÌè€%MUMM%9œ°(€€€€€±…ÍÑM¥¹…°è€Ie}Q=}1=Mœ°(€€€€€ÍÑ½ÁI•…Í½¸è¹Õ±°°(€€€ô¤ì(€€€•áÁ•Ð¡Í¥¹…±MÑ½É…”¹•ÑÕ‘¥Ñ1½œ¡ÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%¤¹Í½µ” ¡•Ù•¹Ð¤€ôø€ (€€€€€•Ù•¹Ð¹…Ñ¥½¸€ôôô€‘¥ÍÕÍÍ¥½¸¹ÕÍ•É}‘•¥Í¥½¹}É•ÍÕµ•œ(€€€€€€˜˜•Ù•¹Ð¹µ•Ñ…‘…Ñ„¹ÁÉ•Ù¥½ÕÍMÑ½ÁI•…Í½¸€ôôô€AI}IEUMQ}UMI}%M%=8œ(€€€€¤¤¤¹Ñ½	”¡ÑÉÕ”¤ì(€€€Í¥¹…±MÑ½É…”¹±½Í” ¤ì(€ô¤ì((€¥Ð Á•ÉÍ¥ÍÑÌÁÉ½Ù¥‘•È…Ñ¥Ù¥Ñä…¹É•ÑÕÉ¹Ì„½µÁ±•Ñ•Á••ÈÉÕ¹Ñ¥µ”Í¹…ÁÍ¡½Ðœ°…Íå¹Œ€ ¤€ôøì(€€€½¹ÍÐÉÕ¹Ñ¥µ•MÑ½É…”€ô¹•ÜMÑ½É…” œéµ•µ½Éäèœ¤ì(€€€½¹ÍÐÍ•ÉÙ¥”€ô¹•Ü½±±…‰½É…Ñ¥½¹M•ÉÙ¥” (€€€€€ÉÕ¹Ñ¥µ•MÑ½É…”°(€€€€€¹•ÜÕ‘¥ÑM•ÉÙ¥”¡ÉÕ¹Ñ¥µ•MÑ½É…”¤°(€€€€€íô°(€€€€€ì(€€€€€€€½‘•àèì(€€€€€€€€€…•¹ÑQåÁ”è€½‘•àœ°(€€€€€€€€€¥ÍÙ…¥±…‰±”è…Íå¹Œ€ ¤€ôøÑÉÕ”°(€€€€€€€€€¥Í	ÕÍäè…Íå¹Œ€ ¤€ôø™…±Í”°(€€€€€€€€€Í•¹‘¹‘]…¥Ðè…Íå¹Œ€¡ì½¹Ñ¥Ù¥Ñäô¤€ôøì(€€€€€€€€€€€½¹Ñ¥Ù¥Ñäü¸¡ì­¥¹è€ÁÉ½•ÍÍ}ÍÑ…ÉÑ•œ°ÁÉ½•ÍÍ±¥Ù”èÑÉÕ”°½¹¹•Ñ¥½¹±¥Ù”èÑÉÕ”ô¤ì(€€€€€€€€€€€½¹Ñ¥Ù¥Ñäü¸¡ì­¥¹è€½ÕÑÁÕÐœ°ÁÉ½•ÍÍ±¥Ù”èÑÉÕ”°½¹¹•Ñ¥½¹±¥Ù”èÑÉÕ”ô¤ì(€€€€€€€€€€€É•ÑÕÉ¸ì½¹Ñ•¹Ðè€ÉÕ¹Ñ¥µ”É•ÍÁ½¹Í”œ°‘ÕÉ…Ñ¥½¸è€Äôì(€€€€€€€€€ô°(€€€€€€€ô°(€€€€€ô°(€€€€¤ì((€€€½¹ÍÐÍÑ…ÉÑ•€ô…Ý…¥ÐÍ•ÉÙ¥”¹¥¹¥Ñ¥…Ñ•¥ÍÕÍÍ¥½¸¡ì(€€€€€‘É¥Ù•Èè€±…Õ‘”œ°(€€€€€Á••Èè€½‘•àœ°(€€€€€Ñ½Á¥Œè€ÉÕ¹Ñ¥µ”œ°(€€€€€¥¹¥Ñ¥…±5•ÍÍ…”è€I•Á½ÉÐÉÕ¹Ñ¥µ”ÍÑ…Ñ”¸œ°(€€€€€ÑÉ…•%è€ÑÉ}ÉÕ¹Ñ¥µ•}½µÁ±•Ñ•œ°(€€€ô¤ì(€€€•áÁ•Ð ¡…Ý…¥ÐÍ•ÉÙ¥”¹•Ñ¥ÍÕÍÍ¥½¸¡ÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%¤¤¹Á••ÉIÕ¹Ñ¥µ”¤¹Ñ½5…Ñ¡=‰©•Ð¡ì(€€€€€‘¥ÍÕÍÍ¥½¹%èÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%°(€€€€€ÁÉ½Ù¥‘•Èè€½‘•àœ°(€€€€€ÍÑ…Ñ”è€=5A1Qœ°(€€€€€ÁÉ½•ÍÍ±¥Ù”è™…±Í”°(€€€ô¤ì(€€€ÉÕ¹Ñ¥µ•MÑ½É…”¹±½Í” ¤ì(€ô¤ì((€¥Ð µ½Ù•ÌÍ¥±•¹ÐÁÉ½Ù¥‘•ÉÌÑ¡É½Õ %1}MUMAQÑ¼MQ11…¹‰±½­ÌÉ•ÑÉäÝ¡¥±”…Ñ¥Ù”œ°…Íå¹Œ€ ¤€ôøì(€€€½¹ÍÐÉÕ¹Ñ¥µ•MÑ½É…”€ô¹•ÜMÑ½É…” œéµ•µ½Éäèœ¤ì(€€€½¹ÍÐ½¹™¥œ€ôì(€€€€€…Íå¹¥ÍÁ…Ñ èÑÉÕ”°(€€€€€ÍÑ…ÉÑÕÁQ¥µ•½ÕÑ5Ìè€Õ|ÀÀÀ°(€€€€€¥‘±•Q¥µ•½ÕÑ5Ìè€Å|ÀÀÀ°(€€€€€ÍÑ…±±É…•5Ìè€Å|ÀÀÀ°(€€€€€ÑÕÉ¹!…É‘1¥µ¥Ñ5Ìè€ÄÁ|ÀÀÀ°(€€€ôì(€€€½¹ÍÐ½¹¹•Ñ½È€ôì(€€€€€…•¹ÑQåÁ”è€½‘•àœ…Ì½¹ÍÐ°(€€€€€¥ÍÙ…¥±…‰±”è…Íå¹Œ€ ¤€ôøÑÉÕ”°(€€€€€¥Í	ÕÍäè…Íå¹Œ€ ¤€ôø™…±Í”°(€€€€€Í•¹‘¹‘]…¥Ðè…Íå¹Œ€¡ì½¹Ñ¥Ù¥Ñä°Í¥¹…°ôèì½¹Ñ¥Ù¥Ñäüè€¡…Ñ¥Ù¥Ñäè…¹ä¤€ôøÙ½¥ìÍ¥¹…°üè‰½ÉÑM¥¹…°ô¤€ôø…Ý…¥Ð¹•ÜAÉ½µ¥Í”ñ¹•Ù•Èø ¡|°É•©•Ð¤€ôøì(€€€€€€€½¹Ñ¥Ù¥Ñäü¸¡ì­¥¹è€ÁÉ½•ÍÍ}ÍÑ…ÉÑ•œ°ÁÉ½•ÍÍ±¥Ù”èÑÉÕ”°½¹¹•Ñ¥½¹±¥Ù”èÑÉÕ”ô¤ì(€€€€€€€Í¥¹…°ü¹…‘‘Ù•¹Ñ1¥ÍÑ•¹•È …‰½ÉÐœ°€ ¤€ôøÉ•©•Ð¡¹•ÜAÉ½Ù¥‘•ÉÉÉ½È Q%5=UPœ°€Ñ•ÍÐÍÑ…±±•œ¤¤°ì½¹”èÑÉÕ”ô¤ì(€€€€€ô¤°(€€€ôì(€€€½¹ÍÐÍ•ÉÙ¥”€ô¹•Ü½±±…‰½É…Ñ¥½¹M•ÉÙ¥” (€€€€€ÉÕ¹Ñ¥µ•MÑ½É…”°(€€€€€¹•ÜÕ‘¥ÑM•ÉÙ¥”¡ÉÕ¹Ñ¥µ•MÑ½É…”¤°(€€€€€½¹™¥œ°(€€€€€ì½‘•àè½¹¹•Ñ½Èô°(€€€€¤ì((€€€½¹ÍÐÍÑ…ÉÑ•€ô…Ý…¥ÐÍ•ÉÙ¥”¹¥¹¥Ñ¥…Ñ•¥ÍÕÍÍ¥½¸¡ì(€€€€€‘É¥Ù•Èè€±…Õ‘”œ°(€€€€€Á••Èè€½‘•àœ°(€€€€€Ñ½Á¥Œè€ÉÕ¹Ñ¥µ”ÍÑ…±°œ°(€€€€€¥¹¥Ñ¥…±5•ÍÍ…”è€]…¥Ð™½ÈÑ¡”Í¥±•¹ÐÁ••È¸œ°(€€€€€ÑÉ…•%è€ÑÉ}ÉÕ¹Ñ¥µ•}ÍÑ…±°œ°(€€€ô¤ì(€€€ÉÕ¹Ñ¥µ•MÑ½É…”¹ÕÁ‘…Ñ•¥ÍÕÍÍ¥½¹MÑ…ÑÕÌ¡ÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%°€Q%5=UPœ¤ì(€€€½¹ÍÐÉ•ÑÉåM•ÉÙ¥”€ô¹•Ü½±±…‰½É…Ñ¥½¹M•ÉÙ¥” (€€€€€ÉÕ¹Ñ¥µ•MÑ½É…”°(€€€€€¹•ÜÕ‘¥ÑM•ÉÙ¥”¡ÉÕ¹Ñ¥µ•MÑ½É…”¤°(€€€€€½¹™¥œ°(€€€€€ì½‘•àè½¹¹•Ñ½Èô°(€€€€¤ì(€€€…Ý…¥Ð•áÁ•Ð¡É•ÑÉåM•ÉÙ¥”¹É•ÑÉå¥ÍÕÍÍ¥½¸¡ì‘¥ÍÕÍÍ¥½¹%èÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%°…•¹Ðè€±…Õ‘”œô¤¤(€€€€€€¹É•©•ÑÌ¹Ñ½Q¡É½Ü AI}MQ%11}IU99%9œ¤ì((€€€…Ý…¥Ð¹•ÜAÉ½µ¥Í” ¡É•Í½±Ù”¤€ôøÍ•ÑQ¥µ•½ÕÐ¡É•Í½±Ù”°€Å|ÈÀÀ¤¤ì(€€€•áÁ•Ð ¡…Ý…¥ÐÍ•ÉÙ¥”¹•Ñ¥ÍÕÍÍ¥½¸¡ÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%¤¤¹Á••ÉIÕ¹Ñ¥µ”ü¹ÍÑ…Ñ”¤(€€€€€€¹Ñ½	” %1}MUMAQœ¤ì(€€€…Ý…¥Ð¹•ÜAÉ½µ¥Í” ¡É•Í½±Ù”¤€ôøÍ•ÑQ¥µ•½ÕÐ¡É•Í½±Ù”°€Å|ÈÀÀ¤¤ì(€€€•áÁ•Ð ¡…Ý…¥ÐÍ•ÉÙ¥”¹•Ñ¥ÍÕÍÍ¥½¸¡ÍÑ…ÉÑ•¹‘¥ÍÕÍÍ¥½¹%¤¤¹Á••ÉIÕ¹Ñ¥µ”ü¹ÍÑ…Ñ”¤(€€€€€€¹Ñ½	” MQ11œ¤ì(€€€…Ý…¥ÐÍ•ÉÙ¥”¹Í¡ÕÑ‘½Ý¸ Å|ÀÀÀ¤ì(€€€…Ý…¥ÐÉ•ÑÉåM•ÉÙ¥”¹Í¡ÕÑ‘½Ý¸ Å|ÀÀÀ¤ì(€€€ÉÕ¹Ñ¥µ•MÑ½É…”¹±½Í” ¤ì(€ô¤ì)ô¤ì(
+      sender: 'claude',
+      reply: 'b'.repeat(600),
+    })).rejects.toThrow('message budget');
+    expect((await budgetCollaboration.getDiscussion(started.discussionId)).discussion.status).toBe('TIMEOUT');
+    await expect(budgetCollaboration.retryDiscussion({
+      discussionId: started.discussionId,
+      agent: 'claude',
+    })).rejects.toThrow('MESSAGE_BUDGET');
+    budgetStorage.close();
+  });
+
+  it('rejects an unsent reply after the provider response limit', async () => {
+    const roundStorage = new Storage(':memory:');
+    const roundCollaboration = new CollaborationService(
+      roundStorage,
+      new AuditService(roundStorage),
+      { maxTurns: 1 },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => ({ content: 'first response', duration: 1 }),
+        },
+      },
+    );
+    const started = await roundCollaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'round limit',
+      initialMessage: 'first',
+      traceId: 'tr_round_limit',
+      mode: 'review',
+    });
+
+    await expect(roundCollaboration.replyToDiscussion({
+      discussionId: started.discussionId,
+      sender: 'claude',
+      reply: 'must not be retained',
+    })).rejects.toThrow('provider response limit');
+    expect(roundStorage.getDiscussion(started.discussionId)).toMatchObject({
+      status: 'NEEDS_USER_DECISION',
+      stopReason: 'MAX_TURNS',
+    });
+    expect(roundStorage.getDiscussion(started.discussionId)?.roundCount).toBe(1);
+    expect(roundStorage.getMessages(started.discussionId).some((message) => message.content === 'must not be retained')).toBe(false);
+    await expect(roundCollaboration.retryDiscussion({
+      discussionId: started.discussionId,
+      agent: 'claude',
+    })).rejects.toThrow('maxTurns budget');
+    roundStorage.close();
+  });
+
+  it('keeps one cancellable provider request per asynchronous discussion', async () => {
+    const asyncStorage = new Storage(':memory:');
+    let release!: () => void;
+    const providerGate = new Promise<void>((resolve) => { release = resolve; });
+    const asyncCollaboration = new CollaborationService(
+      asyncStorage,
+      new AuditService(asyncStorage),
+      { asyncDispatch: true, timeoutMs: 5_000 },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            await providerGate;
+            return { content: 'async response', duration: 1 };
+          },
+        },
+      },
+    );
+    const started = await asyncCollaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'single flight',
+      initialMessage: 'first request',
+      traceId: 'tr_single_flight',
+      mode: 'review',
+    });
+
+    expect(['QUEUED', 'RUNNING']).toContain(asyncStorage.getDiscussion(started.discussionId)?.dispatchState);
+    await expect(asyncCollaboration.replyToDiscussion({
+      discussionId: started.discussionId,
+      sender: 'claude',
+      reply: 'too soon',
+    })).rejects.toMatchObject({ code: 'BUSY' });
+    expect(asyncStorage.getMessages(started.discussionId)).toHaveLength(1);
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(asyncStorage.getMessages(started.discussionId).at(-1)?.content).toBe('async response');
+    expect(asyncStorage.getDiscussion(started.discussionId)?.dispatchState).toBe('COMPLETED');
+    asyncStorage.close();
+  });
+
+  it('cancels an in-flight provider request through its abort signal', async () => {
+    const cancelStorage = new Storage(':memory:');
+    const connector = {
+      agentType: 'codex' as const,
+      isAvailable: async () => true,
+      isBusy: async () => false,
+      sendAndWait: async (context: { signal?: AbortSignal }) => await new Promise<never>((_, innerReject) => {
+        if (context.signal?.aborted) {
+          innerReject(new Error('cancelled by test'));
+          return;
+        }
+        context.signal?.addEventListener('abort', () => innerReject(new Error('cancelled by test')), { once: true });
+      }),
+    };
+    const service = new CollaborationService(
+      cancelStorage,
+      new AuditService(cancelStorage),
+      { timeoutMs: 5_000 },
+      { codex: connector },
+    );
+    const pending = service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'cancel provider',
+      initialMessage: 'wait',
+      traceId: 'tr_cancel_provider',
+      mode: 'review',
+    });
+    const discussion = cancelStorage.listDiscussions()[0];
+    await service.cancelDiscussion({ discussionId: discussion.id, agent: 'claude' });
+    await expect(pending).rejects.toThrow('cancelled by test');
+    expect(cancelStorage.listDiscussions()[0].status).toBe('CANCELLED');
+    cancelStorage.close();
+  });
+
+  it('does not report cancellation success when the provider cannot be stopped', async () => {
+    const cancelStorage = new Storage(':memory:');
+    const service = new CollaborationService(
+      cancelStorage,
+      new AuditService(cancelStorage),
+      { timeoutMs: 1_000 },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => await new Promise<never>(() => {}),
+          cancel: async () => { throw new Error('provider ignored cancellation'); },
+        },
+      },
+    );
+    const pending = service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'unconfirmed cancel',
+      initialMessage: 'wait forever',
+      traceId: 'tr_unconfirmed_cancel',
+      mode: 'review',
+    });
+    const discussion = cancelStorage.listDiscussions()[0];
+    const pendingRejection = expect(pending).rejects.toMatchObject({ code: 'TIMEOUT' });
+
+    await expect(service.cancelDiscussion({
+      discussionId: discussion.id,
+      agent: 'claude',
+    })).rejects.toThrow('could not be confirmed');
+    await pendingRejection;
+    expect(cancelStorage.getDiscussion(discussion.id)?.status).toBe('NEEDS_USER_DECISION');
+    cancelStorage.close();
+  });
+
+  it('does not claim cancellation of a provider owned by another MCP process', async () => {
+    const remoteStorage = new Storage(':memory:');
+    const service = new CollaborationService(remoteStorage, new AuditService(remoteStorage));
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'remote provider',
+      initialMessage: 'running elsewhere',
+      traceId: 'tr_remote_provider',
+      mode: 'review',
+    });
+    remoteStorage.acquireSessionLease({
+      provider: 'codex',
+      projectPath: process.cwd(),
+      ownerId: started.discussionId,
+    });
+
+    await expect(service.replyToDiscussion({
+      discussionId: started.discussionId,
+      sender: 'claude',
+      reply: 'must not race',
+    })).rejects.toThrow('already leased');
+    expect(remoteStorage.getMessages(started.discussionId)).toHaveLength(1);
+    await expect(service.cancelDiscussion({
+      discussionId: started.discussionId,
+      agent: 'claude',
+    })).rejects.toThrow('could not be confirmed');
+    expect(remoteStorage.getDiscussion(started.discussionId)?.status).toBe('NEEDS_USER_DECISION');
+    remoteStorage.releaseSessionLease('codex', process.cwd(), started.discussionId);
+    remoteStorage.close();
+  });
+
+  it('requires an explicit retry after a connector failure', async () => {
+    const retryStorage = new Storage(':memory:');
+    let attempts = 0;
+    const retryCollaboration = new CollaborationService(
+      retryStorage,
+      new AuditService(retryStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async (context) => {
+            attempts += 1;
+            if (attempts === 1) throw new Error('simulated connector failure');
+            return {
+              content: 'retry succeeded',
+              duration: 1,
+            };
+          },
+        },
+      },
+    );
+
+    let discussionId = '';
+    await expect(retryCollaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'retry',
+      initialMessage: 'retry me',
+      traceId: 'tr_retry',
+      mode: 'review',
+    })).rejects.toThrow('simulated connector failure');
+    discussionId = retryStorage.listDiscussions()[0].id;
+    expect(retryStorage.getDiscussion(discussionId)?.status).toBe('FAILED');
+    expect(retryStorage.getDiscussion(discussionId)?.dispatchState).toBe('FAILED');
+    expect(retryStorage.getDiscussion(discussionId)?.retryCount).toBe(1);
+    expect(retryStorage.getDiscussion(discussionId)).toMatchObject({
+      failedDispatchReceiver: 'codex',
+      failedMessageId: retryStorage.getMessages(discussionId)[0].id,
+      failedOperationKind: 'peer_message',
+    });
+
+    const retried = await retryCollaboration.retryDiscussion({ discussionId, agent: 'claude' });
+    expect(retried.status).toBe('DISCUSSING');
+    expect(retried.retryCount).toBe(1);
+    expect(retried.peerResponse?.content).toBe('retry succeeded');
+    expect(attempts).toBe(2);
+    expect(retryStorage.getMessages(discussionId)).toHaveLength(2);
+    retryStorage.close();
+  });
+
+  it('keeps legacy failed discussions retryable when dispatch metadata is absent', async () => {
+    const legacyStorage = new Storage(':memory:');
+    let attempts = 0;
+    const legacyCollaboration = new CollaborationService(
+      legacyStorage,
+      new AuditService(legacyStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            attempts += 1;
+            if (attempts === 1) throw new Error('legacy connector failure');
+            return { content: 'legacy retry succeeded', duration: 1 };
+          },
+        },
+      },
+    );
+
+    await expect(legacyCollaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'legacy retry',
+      initialMessage: 'retry legacy request',
+      traceId: 'tr_legacy_retry',
+      mode: 'review',
+    })).rejects.toThrow('legacy connector failure');
+    const discussion = legacyStorage.listDiscussions()[0];
+    const database = (legacyStorage as unknown as {
+      db: { prepare(sql: string): { run(...params: unknown[]): unknown } };
+    }).db;
+    database.prepare(
+      'UPDATE discussions SET failed_dispatch_receiver = NULL, failed_message_id = NULL, failed_operation_kind = NULL WHERE id = ?',
+    ).run(discussion.id);
+
+    const retried = await legacyCollaboration.retryDiscussion({
+      discussionId: discussion.id,
+      agent: 'claude',
+    });
+    expect(retried.peerResponse?.content).toBe('legacy retry succeeded');
+    expect(attempts).toBe(2);
+    legacyStorage.close();
+  });
+
+  it('retries a retryable non-ambiguous provider timeout', async () => {
+    const timeoutStorage = new Storage(':memory:');
+    let attempts = 0;
+    const service = new CollaborationService(
+      timeoutStorage,
+      new AuditService(timeoutStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            attempts += 1;
+            if (attempts === 1) {
+              throw new ProviderError('TIMEOUT', 'provider timed out', {
+                retryable: true,
+                ambiguous: false,
+              });
+            }
+            return { content: 'timeout retry succeeded', duration: 1 };
+          },
+        },
+      },
+    );
+    const pending = service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'retryable timeout',
+      initialMessage: 'Retry this timeout.',
+      traceId: 'tr_retryable_timeout',
+      mode: 'review',
+    });
+    await expect(pending).rejects.toMatchObject({ code: 'TIMEOUT' });
+    const discussion = timeoutStorage.listDiscussions()[0];
+    expect(discussion).toMatchObject({
+      status: 'TIMEOUT',
+      lastError: { retryable: true, ambiguous: false },
+      failedDispatchReceiver: 'codex',
+    });
+    const retried = await service.retryDiscussion({ discussionId: discussion.id, agent: 'claude' });
+    expect(retried.peerResponse?.content).toBe('timeout retry succeeded');
+    expect(attempts).toBe(2);
+    timeoutStorage.close();
+  });
+
+  it('does not retry a peer-requested user decision or replay it to the wrong provider', async () => {
+    const signalStorage = new Storage(':memory:');
+    let attempts = 0;
+    const service = new CollaborationService(
+      signalStorage,
+      new AuditService(signalStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            attempts += 1;
+            return {
+              content: 'Choose a path.\n[AGENTBRIDGE_SIGNAL: NEEDS_USER_DECISION]',
+              duration: 1,
+            };
+          },
+        },
+      },
+    );
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'retry direction',
+      initialMessage: 'Choose a path.',
+      traceId: 'tr_retry_direction',
+      mode: 'review',
+    });
+
+    await expect(service.retryDiscussion({
+      discussionId: started.discussionId,
+      agent: 'claude',
+    })).rejects.toThrow('explicit reply_peer decision');
+    expect(attempts).toBe(1);
+    expect(signalStorage.getMessages(started.discussionId).at(-1)?.receiver).toBe('claude');
+    signalStorage.close();
+  });
+
+  it('does not retry an ambiguous provider result', async () => {
+    const ambiguousStorage = new Storage(':memory:');
+    const service = new CollaborationService(
+      ambiguousStorage,
+      new AuditService(ambiguousStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            throw new ProviderError('FAILED', 'turn started before transport failure', {
+              ambiguous: true,
+            });
+          },
+        },
+      },
+    );
+    const pending = service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'ambiguous retry',
+      initialMessage: 'Run the operation.',
+      traceId: 'tr_ambiguous_retry',
+      mode: 'review',
+    });
+    await expect(pending).rejects.toThrow('turn started before transport failure');
+    const discussion = ambiguousStorage.listDiscussions()[0];
+    expect(discussion).toMatchObject({
+      status: 'NEEDS_USER_DECISION',
+      lastError: { ambiguous: true },
+      failedDispatchReceiver: 'codex',
+      failedOperationKind: 'peer_message',
+    });
+    await expect(service.retryDiscussion({
+      discussionId: discussion.id,
+      agent: 'claude',
+    })).rejects.toThrow('ambiguous=true');
+    ambiguousStorage.close();
+  });
+
+  it('restores a provider session from SQLite after the collaboration process restarts', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'agentbridge-session-restart-'));
+    const dbPath = join(directory, 'agentbridge.sqlite');
+    try {
+      const firstStorage = new Storage(dbPath);
+      const firstCollaboration = new CollaborationService(
+        firstStorage,
+        new AuditService(firstStorage),
+        { timeoutMs: 5_000 },
+        { codex: new CodexConnector({ command: process.execPath, extraArgs: [codexFixture], timeoutMs: 5_000 }) },
+      );
+      const started = await firstCollaboration.initiateDiscussion({
+        driver: 'claude',
+        peer: 'codex',
+        topic: 'restart recovery',
+        initialMessage: 'first round',
+        projectPath: directory,
+        traceId: 'tr_restart',
+        mode: 'review',
+      });
+      firstStorage.close();
+
+      const secondStorage = new Storage(dbPath);
+      const secondCollaboration = new CollaborationService(
+        secondStorage,
+        new AuditService(secondStorage),
+        { timeoutMs: 5_000 },
+        { codex: new CodexConnector({ command: process.execPath, extraArgs: [codexFixture], timeoutMs: 5_000 }) },
+      );
+      const continued = await secondCollaboration.replyToDiscussion({
+        discussionId: started.discussionId,
+        sender: 'claude',
+        reply: 'second round',
+      });
+      expect(continued.peerResponse?.content).toBe('resumed codex response');
+      expect(secondStorage.getSessionForDiscussion('codex', started.discussionId, directory)?.sessionId)
+        .toBe('thread_fake_codex');
+      secondStorage.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('marks a superseded provider session UNKNOWN after backend fallback', async () => {
+    const fallbackStorage = new Storage(':memory:');
+    const discussion = fallbackStorage.createDiscussion({
+      topic: 'fallback status',
+      driver: 'claude',
+      peer: 'codex',
+      projectPath: process.cwd(),
+      traceId: 'tr_fallback_status',
+    });
+    fallbackStorage.registerSession({
+      provider: 'codex',
+      sessionId: 'thread_old_app_server',
+      projectPath: process.cwd(),
+      status: 'IDLE',
+      metadata: {
+        sessionKind: 'codex-app-server',
+        bridgeOwned: true,
+        discussionId: discussion.id,
+      },
+    });
+    const fallbackCollaboration = new CollaborationService(
+      fallbackStorage,
+      new AuditService(fallbackStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => ({
+            content: 'fallback response',
+            duration: 1,
+            providerSessionId: 'thread_new_cli',
+            providerSessionKind: 'codex-cli',
+            backendSwitched: { from: 'app-server', to: 'cli', reason: 'fixture failure' },
+          }),
+        },
+      },
+    );
+
+    await fallbackCollaboration.replyToDiscussion({
+      discussionId: discussion.id,
+      sender: 'claude',
+      reply: 'trigger fallback',
+    });
+
+    expect(fallbackStorage.getSession('codex', 'thread_old_app_server')?.status).toBe('UNKNOWN');
+    expect(fallbackStorage.getSession('codex', 'thread_new_cli')?.status).toBe('IDLE');
+    expect(fallbackStorage.getSession('codex', 'thread_new_cli')?.metadata.sessionKind).toBe('codex-cli');
+    fallbackStorage.close();
+  });
+
+  it.each([
+    ['review', 3],
+    ['discussion', 12],
+    ['deep-discussion', 20],
+  ] as const)('persists %s mode with its default safety ceiling', async (mode, maxTurns) => {
+    const modeStorage = new Storage(':memory:');
+    const prompts: string[] = [];
+    const service = new CollaborationService(
+      modeStorage,
+      new AuditService(modeStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => {
+            prompts.push(prompt);
+            return { content: 'reviewed\n[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE]', duration: 1 };
+          },
+        },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => ({
+            content: prompt.includes('agreement confirmation request')
+              ? '{"agentbridgeDecision":"accept","decisionHash":"' + /decisionHash":"([^"]+)"/.exec(prompt)?.[1] + '"}'
+              : 'acknowledged\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+            duration: 1,
+          }),
+        },
+      },
+    );
+
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: `${mode} defaults`,
+      initialMessage: 'Inspect this decision.',
+      traceId: `tr_${mode}`,
+      mode,
+    });
+
+    expect(started).toMatchObject({ mode, maxTurns });
+    expect(modeStorage.getDiscussion(started.discussionId)).toMatchObject({ mode, maxTurns });
+    expect(prompts[0]).toContain(`mode: ${mode}`);
+    expect(prompts[0]).toContain(`0/${maxTurns}`);
+    expect(modeStorage.getAuditLog(started.discussionId).find((event) => event.action === 'peer.response')?.metadata)
+      .toMatchObject({ mode });
+    modeStorage.close();
+  });
+
+  it('lets an explicit service ceiling override mode defaults', async () => {
+    const configuredStorage = new Storage(':memory:');
+    const service = new CollaborationService(configuredStorage, new AuditService(configuredStorage), { maxTurns: 7 });
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'configured ceiling',
+      initialMessage: 'Review with a service ceiling.',
+      traceId: 'tr_configured_ceiling',
+      mode: 'review',
+    });
+    expect(started.maxTurns).toBe(7);
+    expect(configuredStorage.getDiscussion(started.discussionId)?.maxTurns).toBe(7);
+    configuredStorage.close();
+  });
+
+  it('does not upgrade to automatic mode without both connectors', async () => {
+    const modeStorage = new Storage(':memory:');
+    const prompts: string[] = [];
+    const service = new CollaborationService(
+      modeStorage,
+      new AuditService(modeStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => {
+            prompts.push(prompt);
+            return { content: 'continue\n[AGENTBRIDGE_SIGNAL: CONTINUE]', duration: 1 };
+          },
+        },
+      },
+    );
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'mode upgrade',
+      initialMessage: 'Start a review.',
+      traceId: 'tr_mode_upgrade',
+      mode: 'review',
+    });
+    await expect(service.replyToDiscussion({
+      discussionId: started.discussionId,
+      sender: 'claude',
+      reply: 'Escalate the analysis.',
+      mode: 'deep-discussion',
+    })).rejects.toMatchObject({ code: 'UNAVAILABLE' });
+    expect(modeStorage.getDiscussion(started.discussionId)).toMatchObject({
+      id: started.discussionId,
+      mode: 'review',
+    });
+    modeStorage.close();
+  });
+
+  it('pauses safely when the peer returns a user-owned decision signal', async () => {
+    const signalStorage = new Storage(':memory:');
+    let attempts = 0;
+    const service = new CollaborationService(
+      signalStorage,
+      new AuditService(signalStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            attempts += 1;
+            return {
+              content: attempts === 1
+                ? 'Choose whether downtime is acceptable.\n[AGENTBRIDGE_SIGNAL: NEEDS_USER_DECISION]'
+                : 'Use the online migration.\n[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE]',
+              duration: 1,
+            };
+          },
+        },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => ({
+            content: prompt.includes('agreement confirmation request')
+              ? '{"agentbridgeDecision":"accept","decisionHash":"' + /decisionHash":"([^"]+)"/.exec(prompt)?.[1] + '"}'
+              : 'acknowledged\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+            duration: 1,
+          }),
+        },
+      },
+    );
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'user-owned risk',
+      initialMessage: 'Choose a migration strategy.',
+      traceId: 'tr_user_signal',
+      mode: 'deep-discussion',
+    });
+
+    expect(started.status).toBe('NEEDS_USER_DECISION');
+    expect(signalStorage.getDiscussion(started.discussionId)).toMatchObject({
+      status: 'NEEDS_USER_DECISION',
+      dispatchState: 'COMPLETED',
+      lastSignal: 'NEEDS_USER_DECISION',
+      stopReason: 'PEER_REQUESTED_USER_DECISION',
+    });
+    const resumed = await service.replyToDiscussion({
+      discussionId: started.discussionId,
+      sender: 'claude',
+      reply: 'Downtime is not acceptable; use an online path.',
+    });
+    expect(resumed.status).toBe('COMPLETED');
+    expect(signalStorage.getDiscussion(started.discussionId)).toMatchObject({
+      status: 'COMPLETED',
+      lastSignal: 'READY_TO_CLOSE',
+      stopReason: null,
+    });
+    expect(signalStorage.getAuditLog(started.discussionId).some((event) => (
+      event.action === 'discussion.user_decision_resumed'
+      && event.metadata.previousStopReason === 'PEER_REQUESTED_USER_DECISION'
+    ))).toBe(true);
+    signalStorage.close();
+  });
+
+  it('persists provider activity and returns a completed peer runtime snapshot', async () => {
+    const runtimeStorage = new Storage(':memory:');
+    const service = new CollaborationService(
+      runtimeStorage,
+      new AuditService(runtimeStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ onActivity }) => {
+            onActivity?.({ kind: 'process_started', processAlive: true, connectionAlive: true });
+            onActivity?.({ kind: 'output', processAlive: true, connectionAlive: true });
+            return { content: 'runtime response', duration: 1 };
+          },
+        },
+      },
+    );
+
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'runtime',
+      initialMessage: 'Report runtime state.',
+      traceId: 'tr_runtime_completed',
+      mode: 'review',
+    });
+    expect((await service.getDiscussion(started.discussionId)).peerRuntime).toMatchObject({
+      discussionId: started.discussionId,
+      provider: 'codex',
+      state: 'COMPLETED',
+      processAlive: false,
+    });
+    runtimeStorage.close();
+  });
+
+  it('moves silent providers through IDLE_SUSPECTED to STALLED and blocks retry while active', async () => {
+    const runtimeStorage = new Storage(':memory:');
+    const config = {
+      asyncDispatch: true,
+      startupTimeoutMs: 5_000,
+      idleTimeoutMs: 1_000,
+      stallGraceMs: 1_000,
+      turnHardLimitMs: 10_000,
+    };
+    const connector = {
+      agentType: 'codex' as const,
+      isAvailable: async () => true,
+      isBusy: async () => false,
+      sendAndWait: async ({ onActivity, signal }: { onActivity?: (activity: any) => void; signal?: AbortSignal }) => await new Promise<never>((_, reject) => {
+        onActivity?.({ kind: 'process_started', processAlive: true, connectionAlive: true });
+        signal?.addEventListener('abort', () => reject(new ProviderError('TIMEOUT', 'test stalled')), { once: true });
+      }),
+    };
+    const service = new CollaborationService(
+      runtimeStorage,
+      new AuditService(runtimeStorage),
+      config,
+      { codex: connector },
+    );
+
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'runtime stall',
+      initialMessage: 'Wait for the silent peer.',
+      traceId: 'tr_runtime_stall',
+      mode: 'review',
+    });
+    runtimeStorage.updateDiscussionStatus(started.discussionId, 'TIMEOUT');
+    const retryService = new CollaborationService(
+      runtimeStorage,
+      new AuditService(runtimeStorage),
+      config,
+      { codex: connector },
+    );
+    await expect(retryService.retryDiscussion({ discussionId: started.discussionId, agent: 'claude' }))
+      .rejects.toThrow('PEER_STILL_RUNNING');
+
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect((await service.getDiscussion(started.discussionId)).peerRuntime?.state)
+      .toBe('IDLE_SUSPECTED');
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect((await service.getDiscussion(started.discussionId)).peerRuntime?.state)
+      .toBe('STALLED');
+    await service.shutdown(1_000);
+    await retryService.shutdown(1_000);
+    runtimeStorage.close();
+  });
+});
