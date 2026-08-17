@@ -2991,7 +2991,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve9.call(this, root, ref);
+      let _sch = resolve10.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a = root.localRefs) === null || _a === void 0 ? void 0 : _a[ref];
         const { schemaId } = this.opts;
@@ -3018,7 +3018,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve9(root, ref) {
+    function resolve10(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3649,7 +3649,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve9(baseURI, relativeURI, options) {
+    function resolve10(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const { parsed: baseParsed, malformedAuthorityOrPort: baseMalformed } = parseWithStatus(baseURI, schemelessOptions);
       const { parsed: relativeParsed, malformedAuthorityOrPort: relativeMalformed } = parseWithStatus(relativeURI, schemelessOptions);
@@ -3660,49 +3660,49 @@ var require_fast_uri = __commonJS({
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
-    function resolveComponent(base, relative3, options, skipNormalization) {
+    function resolveComponent(base, relative4, options, skipNormalization) {
       const target = {};
       if (!skipNormalization) {
         base = parse5(serialize(base, options), options);
-        relative3 = parse5(serialize(relative3, options), options);
+        relative4 = parse5(serialize(relative4, options), options);
       }
       options = options || {};
-      if (!options.tolerant && relative3.scheme) {
-        target.scheme = relative3.scheme;
-        target.userinfo = relative3.userinfo;
-        target.host = relative3.host;
-        target.port = relative3.port;
-        target.path = removeDotSegments(relative3.path || "");
-        target.query = relative3.query;
+      if (!options.tolerant && relative4.scheme) {
+        target.scheme = relative4.scheme;
+        target.userinfo = relative4.userinfo;
+        target.host = relative4.host;
+        target.port = relative4.port;
+        target.path = removeDotSegments(relative4.path || "");
+        target.query = relative4.query;
       } else {
-        if (relative3.userinfo !== void 0 || relative3.host !== void 0 || relative3.port !== void 0) {
-          target.userinfo = relative3.userinfo;
-          target.host = relative3.host;
-          target.port = relative3.port;
-          target.path = removeDotSegments(relative3.path || "");
-          target.query = relative3.query;
+        if (relative4.userinfo !== void 0 || relative4.host !== void 0 || relative4.port !== void 0) {
+          target.userinfo = relative4.userinfo;
+          target.host = relative4.host;
+          target.port = relative4.port;
+          target.path = removeDotSegments(relative4.path || "");
+          target.query = relative4.query;
         } else {
-          if (!relative3.path) {
+          if (!relative4.path) {
             target.path = base.path;
-            if (relative3.query !== void 0) {
-              target.query = relative3.query;
+            if (relative4.query !== void 0) {
+              target.query = relative4.query;
             } else {
               target.query = base.query;
             }
           } else {
-            if (relative3.path[0] === "/") {
-              target.path = removeDotSegments(relative3.path);
+            if (relative4.path[0] === "/") {
+              target.path = removeDotSegments(relative4.path);
             } else {
               if ((base.userinfo !== void 0 || base.host !== void 0 || base.port !== void 0) && !base.path) {
-                target.path = "/" + relative3.path;
+                target.path = "/" + relative4.path;
               } else if (!base.path) {
-                target.path = relative3.path;
+                target.path = relative4.path;
               } else {
-                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative3.path;
+                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative4.path;
               }
               target.path = removeDotSegments(target.path);
             }
-            target.query = relative3.query;
+            target.query = relative4.query;
           }
           target.userinfo = base.userinfo;
           target.host = base.host;
@@ -3710,7 +3710,7 @@ var require_fast_uri = __commonJS({
         }
         target.scheme = base.scheme;
       }
-      target.fragment = relative3.fragment;
+      target.fragment = relative4.fragment;
       return target;
     }
     function equal(uriA, uriB, options) {
@@ -3933,7 +3933,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve9,
+      resolve: resolve10,
       resolveComponent,
       equal,
       serialize,
@@ -7016,12 +7016,12 @@ var require_isexe = __commonJS({
         if (typeof Promise !== "function") {
           throw new TypeError("callback not provided");
         }
-        return new Promise(function(resolve9, reject) {
+        return new Promise(function(resolve10, reject) {
           isexe(path, options || {}, function(er, is) {
             if (er) {
               reject(er);
             } else {
-              resolve9(is);
+              resolve10(is);
             }
           });
         });
@@ -7087,27 +7087,27 @@ var require_which = __commonJS({
         opt = {};
       const { pathEnv, pathExt, pathExtExe } = getPathInfo(cmd, opt);
       const found = [];
-      const step = (i) => new Promise((resolve9, reject) => {
+      const step = (i) => new Promise((resolve10, reject) => {
         if (i === pathEnv.length)
-          return opt.all && found.length ? resolve9(found) : reject(getNotFoundError(cmd));
+          return opt.all && found.length ? resolve10(found) : reject(getNotFoundError(cmd));
         const ppRaw = pathEnv[i];
         const pathPart = /^".*"$/.test(ppRaw) ? ppRaw.slice(1, -1) : ppRaw;
         const pCmd = path.join(pathPart, cmd);
         const p = !pathPart && /^\.[\\\/]/.test(cmd) ? cmd.slice(0, 2) + pCmd : pCmd;
-        resolve9(subStep(p, i, 0));
+        resolve10(subStep(p, i, 0));
       });
-      const subStep = (p, i, ii) => new Promise((resolve9, reject) => {
+      const subStep = (p, i, ii) => new Promise((resolve10, reject) => {
         if (ii === pathExt.length)
-          return resolve9(step(i + 1));
+          return resolve10(step(i + 1));
         const ext = pathExt[ii];
         isexe(p + ext, { pathExt: pathExtExe }, (er, is) => {
           if (!er && is) {
             if (opt.all)
               found.push(p + ext);
             else
-              return resolve9(p + ext);
+              return resolve10(p + ext);
           }
-          return resolve9(subStep(p, i, ii + 1));
+          return resolve10(subStep(p, i, ii + 1));
         });
       });
       return cb ? step(0).then((res) => cb(null, res), cb) : step(0);
@@ -7421,12 +7421,13 @@ var require_cross_spawn = __commonJS({
 
 // packages/cli/dist/index.js
 import { existsSync as existsSync8, readFileSync as readFileSync6, rmSync as rmSync5 } from "node:fs";
-import { join as join9, parse as parse4, resolve as resolve8 } from "node:path";
+import { join as join9, parse as parse4, resolve as resolve9 } from "node:path";
 import { homedir as homedir7 } from "node:os";
 import process9 from "node:process";
 
 // packages/audit/dist/index.js
-var AuditService = class {
+var AuditService = class _AuditService {
+  static METRICS_EVENT_LIMIT = 1e4;
   storage;
   constructor(storage) {
     this.storage = storage;
@@ -7438,15 +7439,21 @@ var AuditService = class {
     return this.storage.getAuditLog(discussionId, limit);
   }
   getMetrics(discussionId) {
-    const events = this.storage.getAuditLog(discussionId, 1e4);
+    const eventLimit = _AuditService.METRICS_EVENT_LIMIT;
+    const events = this.storage.getAuditLog(discussionId, eventLimit);
+    const discussion = discussionId ? this.storage.getDiscussion(discussionId) : null;
     const latencyValues = events.filter((event) => event.action === "peer.response" && typeof event.metadata.duration === "number").map((event) => event.metadata.duration);
     return {
       generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
       totalEvents: events.length,
+      eventLimit,
+      sampled: events.length >= eventLimit,
+      truncated: events.length >= eventLimit,
+      scope: discussionId ? "discussion" : "all",
       peerCallSuccess: events.filter((event) => event.action === "peer.response").length,
       peerCallFailure: events.filter((event) => event.action === "error").length,
       sessionBusy: events.filter((event) => event.action === "session.busy").length,
-      discussionRounds: events.filter((event) => event.action === "message.sent").length,
+      discussionRounds: discussion ? discussion.roundCount : events.filter((event) => event.action === "peer.response").length,
       averagePeerCallLatencyMs: latencyValues.length === 0 ? 0 : Math.round(latencyValues.reduce((sum, value) => sum + value, 0) / latencyValues.length)
     };
   }
@@ -7567,7 +7574,12 @@ var SessionBusyError = class extends Error {
   }
 };
 function isProviderError(value) {
-  return value instanceof ProviderError;
+  if (value instanceof ProviderError)
+    return true;
+  if (typeof value !== "object" && typeof value !== "function" || value === null)
+    return false;
+  const candidate = value;
+  return candidate.name === "ProviderError" && typeof candidate.code === "string" && typeof candidate.ambiguous === "boolean";
 }
 
 // packages/protocol/dist/index.js
@@ -7725,6 +7737,7 @@ CREATE TABLE IF NOT EXISTS discussions (
   id TEXT PRIMARY KEY,
   topic TEXT NOT NULL,
   mode TEXT NOT NULL DEFAULT 'discussion',
+  orchestration TEXT NOT NULL DEFAULT 'single-turn',
   status TEXT NOT NULL DEFAULT 'CREATED',
   dispatch_state TEXT,
   waiting_for TEXT,
@@ -7744,7 +7757,12 @@ CREATE TABLE IF NOT EXISTS discussions (
   trace_id TEXT NOT NULL,
   collaboration_session_id TEXT,
   stop_reason TEXT,
-  last_error TEXT
+  last_error TEXT,
+  failed_dispatch_receiver TEXT,
+  failed_message_id TEXT,
+  failed_operation_kind TEXT,
+  pending_operation_kind TEXT,
+  pending_message_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -7800,6 +7818,59 @@ CREATE TABLE IF NOT EXISTS discussion_leases (
   owner_id TEXT NOT NULL,
   acquired_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
+  FOREIGN KEY (discussion_id) REFERENCES discussions(id)
+);
+
+CREATE TABLE IF NOT EXISTS peer_runtime (
+  discussion_id TEXT PRIMARY KEY,
+  dispatch_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  state TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  last_activity_at INTEGER NOT NULL,
+  last_provider_event_at INTEGER,
+  last_output_at INTEGER,
+  last_tool_started_at INTEGER,
+  current_tool TEXT,
+  process_alive INTEGER,
+  connection_alive INTEGER,
+  session_alive INTEGER,
+  elapsed_ms INTEGER NOT NULL,
+  idle_ms INTEGER NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (discussion_id) REFERENCES discussions(id)
+);
+
+CREATE TABLE IF NOT EXISTS peer_runtime_events (
+  id TEXT PRIMARY KEY,
+  discussion_id TEXT NOT NULL,
+  dispatch_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  provider TEXT NOT NULL,
+  type TEXT NOT NULL,
+  timestamp TEXT NOT NULL,
+  public_summary TEXT,
+  metadata TEXT NOT NULL DEFAULT '{}',
+  UNIQUE (discussion_id, sequence),
+  FOREIGN KEY (discussion_id) REFERENCES discussions(id)
+);
+
+CREATE TABLE IF NOT EXISTS permission_requests (
+  id TEXT PRIMARY KEY,
+  discussion_id TEXT NOT NULL,
+  dispatch_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  method TEXT NOT NULL,
+  action_type TEXT NOT NULL,
+  command TEXT,
+  paths TEXT,
+  reason TEXT,
+  risk TEXT NOT NULL DEFAULT 'unknown',
+  status TEXT NOT NULL DEFAULT 'PENDING',
+  created_at TEXT NOT NULL,
+  resolved_at TEXT,
+  resolved_by TEXT,
+  decision TEXT,
   FOREIGN KEY (discussion_id) REFERENCES discussions(id)
 );
 
@@ -7881,8 +7952,14 @@ var Storage = class {
     this.ensureColumn("discussions", "round_count", "ALTER TABLE discussions ADD COLUMN round_count INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("discussions", "stop_reason", "ALTER TABLE discussions ADD COLUMN stop_reason TEXT");
     this.ensureColumn("discussions", "last_error", "ALTER TABLE discussions ADD COLUMN last_error TEXT");
+    this.ensureColumn("discussions", "failed_dispatch_receiver", "ALTER TABLE discussions ADD COLUMN failed_dispatch_receiver TEXT");
+    this.ensureColumn("discussions", "failed_message_id", "ALTER TABLE discussions ADD COLUMN failed_message_id TEXT");
+    this.ensureColumn("discussions", "failed_operation_kind", "ALTER TABLE discussions ADD COLUMN failed_operation_kind TEXT");
     this.ensureColumn("discussions", "collaboration_session_id", "ALTER TABLE discussions ADD COLUMN collaboration_session_id TEXT");
     this.ensureColumn("discussions", "mode", "ALTER TABLE discussions ADD COLUMN mode TEXT NOT NULL DEFAULT 'discussion'");
+    this.ensureColumn("discussions", "orchestration", "ALTER TABLE discussions ADD COLUMN orchestration TEXT NOT NULL DEFAULT 'single-turn'");
+    this.ensureColumn("discussions", "pending_operation_kind", "ALTER TABLE discussions ADD COLUMN pending_operation_kind TEXT");
+    this.ensureColumn("discussions", "pending_message_id", "ALTER TABLE discussions ADD COLUMN pending_message_id TEXT");
     this.ensureColumn("messages", "provider_session_id", "ALTER TABLE messages ADD COLUMN provider_session_id TEXT");
   }
   ensureColumn(table, columnName, alterSql) {
@@ -7920,13 +7997,17 @@ var Storage = class {
     const maxRetries = data.maxRetries ?? 2;
     const peer = data.peer ?? (data.driver === "claude" ? "codex" : "claude");
     const mode = data.mode ?? DEFAULT_DISCUSSION_MODE;
+    const orchestration = data.orchestration ?? "single-turn";
     assertText(data.topic, "topic");
     assertText(data.traceId, "traceId");
     assertTurns(maxTurns);
     assertRetries(maxRetries);
     assertDiscussionMode(mode);
-    this.db.prepare(`INSERT INTO discussions (id, topic, mode, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id, collaboration_session_id)
-         VALUES (?, ?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?)`).run(id, data.topic, mode, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId, data.collaborationSessionId ?? null);
+    if (!["single-turn", "automatic"].includes(orchestration)) {
+      throw new Error("orchestration must be single-turn or automatic");
+    }
+    this.db.prepare(`INSERT INTO discussions (id, topic, mode, orchestration, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id, collaboration_session_id)
+         VALUES (?, ?, ?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?)`).run(id, data.topic, mode, orchestration, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId, data.collaborationSessionId ?? null);
     return this.getDiscussion(id);
   }
   // --- Project-scoped collaboration sessions ---
@@ -7952,7 +8033,7 @@ var Storage = class {
     try {
       return this.createCollaborationSession({ projectPath: data.projectPath, policy });
     } catch (error2) {
-      if (error2 instanceof Error && error2.message.includes("UNIQUE constraint failed")) {
+      if (isUniqueConstraintError(error2)) {
         const concurrent = this.db.prepare(`SELECT * FROM collaboration_sessions
            WHERE project_path = ? AND status = 'ACTIVE'
            ORDER BY last_seen_at DESC LIMIT 1`).get(data.projectPath);
@@ -8002,6 +8083,100 @@ var Storage = class {
       return null;
     return rowToDiscussion(row);
   }
+  getPeerRuntime(discussionId) {
+    const row = this.db.prepare("SELECT * FROM peer_runtime WHERE discussion_id = ?").get(discussionId);
+    return row ? rowToPeerRuntime(row) : null;
+  }
+  upsertPeerRuntime(state) {
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    this.db.prepare(`INSERT INTO peer_runtime (
+         discussion_id, dispatch_id, provider, state, started_at, last_activity_at,
+         last_provider_event_at, last_output_at, last_tool_started_at, current_tool,
+         process_alive, connection_alive, session_alive, elapsed_ms, idle_ms, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(discussion_id) DO UPDATE SET
+         dispatch_id = excluded.dispatch_id,
+         provider = excluded.provider,
+         state = excluded.state,
+         started_at = excluded.started_at,
+         last_activity_at = excluded.last_activity_at,
+         last_provider_event_at = excluded.last_provider_event_at,
+         last_output_at = excluded.last_output_at,
+         last_tool_started_at = excluded.last_tool_started_at,
+         current_tool = excluded.current_tool,
+         process_alive = excluded.process_alive,
+         connection_alive = excluded.connection_alive,
+         session_alive = excluded.session_alive,
+         elapsed_ms = excluded.elapsed_ms,
+         idle_ms = excluded.idle_ms,
+         updated_at = excluded.updated_at`).run(state.discussionId, state.dispatchId, state.provider, state.state, state.startedAt, state.lastActivityAt, state.lastProviderEventAt ?? null, state.lastOutputAt ?? null, state.lastToolStartedAt ?? null, state.currentTool ?? null, state.processAlive === void 0 ? null : state.processAlive ? 1 : 0, state.connectionAlive === void 0 ? null : state.connectionAlive ? 1 : 0, state.sessionAlive === void 0 ? null : state.sessionAlive ? 1 : 0, state.elapsedMs, state.idleMs, now);
+  }
+  appendPeerRuntimeEvent(event) {
+    const id = `pev_${randomUUID2().replace(/-/g, "").slice(0, 12)}`;
+    const timestamp = event.timestamp ?? (/* @__PURE__ */ new Date()).toISOString();
+    let sequence = 0;
+    this.transaction(() => {
+      const row = this.db.prepare("SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM peer_runtime_events WHERE discussion_id = ?").get(event.discussionId);
+      sequence = Number(row.sequence);
+      this.db.prepare(`INSERT INTO peer_runtime_events
+         (id, discussion_id, dispatch_id, sequence, provider, type, timestamp, public_summary, metadata)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, event.discussionId, event.dispatchId, sequence, event.provider, event.type, timestamp, event.publicSummary ?? null, JSON.stringify(event.metadata ?? {}));
+    });
+    return { ...event, id, sequence, timestamp, metadata: event.metadata ?? {} };
+  }
+  getPeerRuntimeEvents(discussionId, afterSequence = 0, limit = 100) {
+    if (!Number.isInteger(afterSequence) || afterSequence < 0)
+      throw new Error("afterSequence must be a non-negative integer");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1e3)
+      throw new Error("event limit must be between 1 and 1000");
+    const rows = this.db.prepare(`SELECT * FROM peer_runtime_events
+       WHERE discussion_id = ? AND sequence > ?
+       ORDER BY sequence ASC LIMIT ?`).all(discussionId, afterSequence, limit);
+    return rows.map(rowToPeerRuntimeEvent);
+  }
+  createPermissionRequest(request) {
+    const id = `prm_${randomUUID2().replace(/-/g, "").slice(0, 12)}`;
+    const createdAt = (/* @__PURE__ */ new Date()).toISOString();
+    this.db.prepare(`INSERT INTO permission_requests
+       (id, discussion_id, dispatch_id, provider, method, action_type, command, paths, reason, risk, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)`).run(id, request.discussionId, request.dispatchId, request.provider, request.method, request.actionType, request.command ?? null, request.paths ? JSON.stringify(request.paths) : null, request.reason ?? null, request.risk ?? "unknown", createdAt);
+    return this.getPermissionRequest(id);
+  }
+  getPermissionRequest(id) {
+    const row = this.db.prepare("SELECT * FROM permission_requests WHERE id = ?").get(id);
+    return row ? rowToPermissionRequest(row) : null;
+  }
+  listPermissionRequests(discussionId, statuses) {
+    const rows = this.db.prepare(`SELECT * FROM permission_requests
+       WHERE discussion_id = ?${statuses?.length ? ` AND status IN (${statuses.map(() => "?").join(", ")})` : ""}
+       ORDER BY created_at ASC`).all(discussionId, ...statuses ?? []);
+    return rows.map(rowToPermissionRequest);
+  }
+  resolvePermissionRequest(id, decision, resolvedBy = "user") {
+    if (decision !== "approve" && decision !== "deny")
+      throw new Error("Permission decision must be approve or deny");
+    const current = this.getPermissionRequest(id);
+    if (!current)
+      throw new Error(`Permission request ${id} not found`);
+    if (current.status !== "PENDING")
+      return current;
+    const status2 = decision === "approve" ? "APPROVED" : "DENIED";
+    this.db.prepare(`UPDATE permission_requests
+       SET status = ?, decision = ?, resolved_at = ?, resolved_by = ?
+       WHERE id = ? AND status = 'PENDING'`).run(status2, decision, (/* @__PURE__ */ new Date()).toISOString(), resolvedBy, id);
+    return this.getPermissionRequest(id);
+  }
+  expirePermissionRequest(id) {
+    const current = this.getPermissionRequest(id);
+    if (!current)
+      throw new Error(`Permission request ${id} not found`);
+    if (current.status !== "PENDING")
+      return current;
+    this.db.prepare(`UPDATE permission_requests
+       SET status = 'EXPIRED', resolved_at = ?
+       WHERE id = ? AND status = 'PENDING'`).run((/* @__PURE__ */ new Date()).toISOString(), id);
+    return this.getPermissionRequest(id);
+  }
   updateDiscussionStatus(id, status2, extra) {
     const current = this.getDiscussion(id);
     if (!current)
@@ -8021,10 +8196,37 @@ var Storage = class {
     const values = [...Object.values(fields), id];
     this.db.prepare(`UPDATE discussions SET ${setClauses} WHERE id = ?`).run(...values);
   }
+  updateDiscussionMode(id, mode) {
+    if (!this.getDiscussion(id))
+      throw new Error(`Discussion ${id} not found`);
+    assertDiscussionMode(mode);
+    this.db.prepare("UPDATE discussions SET mode = ?, updated_at = ? WHERE id = ?").run(mode, (/* @__PURE__ */ new Date()).toISOString(), id);
+  }
+  updateDiscussionPolicy(id, mode, orchestration) {
+    if (!this.getDiscussion(id))
+      throw new Error(`Discussion ${id} not found`);
+    assertDiscussionMode(mode);
+    if (!["single-turn", "automatic"].includes(orchestration)) {
+      throw new Error("orchestration must be single-turn or automatic");
+    }
+    this.db.prepare("UPDATE discussions SET mode = ?, orchestration = ?, updated_at = ? WHERE id = ?").run(mode, orchestration, (/* @__PURE__ */ new Date()).toISOString(), id);
+  }
   updateDiscussionDispatch(id, state, waitingFor = null) {
     if (!this.getDiscussion(id))
       throw new Error(`Discussion ${id} not found`);
     this.db.prepare("UPDATE discussions SET dispatch_state = ?, waiting_for = ?, updated_at = ? WHERE id = ?").run(state, waitingFor, (/* @__PURE__ */ new Date()).toISOString(), id);
+  }
+  updateDiscussionFailure(id, failure) {
+    if (!this.getDiscussion(id))
+      throw new Error(`Discussion ${id} not found`);
+    this.db.prepare(`UPDATE discussions
+       SET failed_dispatch_receiver = ?, failed_message_id = ?, failed_operation_kind = ?, updated_at = ?
+       WHERE id = ?`).run(failure.receiver, failure.messageId, failure.operationKind, (/* @__PURE__ */ new Date()).toISOString(), id);
+  }
+  updateDiscussionPending(id, operationKind, messageId) {
+    if (!this.getDiscussion(id))
+      throw new Error(`Discussion ${id} not found`);
+    this.db.prepare("UPDATE discussions SET pending_operation_kind = ?, pending_message_id = ?, updated_at = ? WHERE id = ?").run(operationKind, messageId, (/* @__PURE__ */ new Date()).toISOString(), id);
   }
   updateDiscussionSignal(id, signal) {
     if (!this.getDiscussion(id))
@@ -8080,6 +8282,9 @@ var Storage = class {
         remove("decisions");
         remove("messages");
         remove("discussion_leases");
+        remove("permission_requests");
+        remove("peer_runtime_events");
+        remove("peer_runtime");
         const statement = this.db.prepare("DELETE FROM discussions WHERE id = ?");
         for (const id of discussionIds)
           statement.run(id);
@@ -8108,6 +8313,43 @@ var Storage = class {
       }
     });
     return rows.map((row) => this.getDiscussion(String(row.id))).filter((discussion) => discussion !== null);
+  }
+  recoverOrphanedDiscussions(isOwnerAlive) {
+    const rows = this.db.prepare(`SELECT d.*, l.owner_id AS lease_owner_id
+       FROM discussions d
+       LEFT JOIN discussion_leases l ON l.discussion_id = d.id
+       WHERE d.status IN ('CREATED', 'DISCUSSING', 'PEER_BUSY')
+         AND d.dispatch_state IN ('QUEUED', 'RUNNING')`).all();
+    const orphaned = rows.filter((row) => !row.lease_owner_id || !isOwnerAlive(String(row.lease_owner_id)));
+    if (orphaned.length === 0)
+      return [];
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    this.transaction(() => {
+      for (const row of orphaned) {
+        this.db.prepare(`UPDATE discussions
+           SET status = 'NEEDS_USER_DECISION', dispatch_state = 'FAILED', waiting_for = NULL,
+               stop_reason = 'PROVIDER_ERROR',
+               last_error = ?, ended_at = ?, updated_at = ?
+           WHERE id = ? AND status IN ('CREATED', 'DISCUSSING', 'PEER_BUSY')`).run(JSON.stringify({
+          code: "ORPHANED_DISPATCH",
+          message: "The previous AgentBridge owner disappeared while the peer dispatch was active.",
+          backend: row.peer ?? row.driver,
+          retryable: false,
+          ambiguous: true,
+          at: now
+        }), now, now, row.id);
+        this.db.prepare("DELETE FROM session_leases WHERE owner_id = ?").run(row.id);
+        this.db.prepare("DELETE FROM discussion_leases WHERE discussion_id = ?").run(row.id);
+        this.db.prepare(`UPDATE permission_requests
+           SET status = 'EXPIRED', resolved_at = ?
+           WHERE discussion_id = ? AND status = 'PENDING'`).run(now, row.id);
+        this.db.prepare(`UPDATE peer_runtime
+           SET state = 'STALLED', process_alive = NULL, connection_alive = NULL,
+               session_alive = NULL, updated_at = ?
+           WHERE discussion_id = ?`).run(now, row.id);
+      }
+    });
+    return orphaned.map((row) => this.getDiscussion(String(row.id))).filter((discussion) => discussion !== null);
   }
   // --- Messages ---
   createMessage(data) {
@@ -8199,6 +8441,9 @@ var Storage = class {
     const rows = this.db.prepare("SELECT agent FROM agreements WHERE discussion_id = ? ORDER BY agent").all(data.discussionId);
     return { decisionHash: hash, agreedBy: rows.map((row) => row.agent) };
   }
+  clearAgreements(discussionId) {
+    this.db.prepare("DELETE FROM agreements WHERE discussion_id = ?").run(discussionId);
+  }
   acquireSessionLease(data) {
     if (!data.projectPath || !data.ownerId)
       throw new Error("Session lease requires projectPath and ownerId");
@@ -8215,7 +8460,7 @@ var Storage = class {
              VALUES (?, ?, ?, ?, ?)`).run(data.provider, data.projectPath, data.ownerId, acquiredAt.toISOString(), expiresAt.toISOString());
       });
     } catch (error2) {
-      if (error2 instanceof Error && error2.message.includes("UNIQUE constraint failed")) {
+      if (isUniqueConstraintError(error2)) {
         throw new SessionBusyError(`Session for ${data.provider} is already leased for project ${data.projectPath}`);
       }
       throw error2;
@@ -8402,6 +8647,7 @@ function rowToDiscussion(row) {
     id: row.id,
     topic: row.topic,
     mode: row.mode ?? DEFAULT_DISCUSSION_MODE,
+    orchestration: row.orchestration ?? "single-turn",
     status: row.status,
     driver,
     peer: row.peer ?? (driver === "claude" ? "codex" : "claude"),
@@ -8421,7 +8667,73 @@ function rowToDiscussion(row) {
     waitingFor: row.waiting_for ?? null,
     lastSignal: row.last_signal ?? null,
     stopReason: row.stop_reason ?? null,
-    lastError: parseJsonObject(row.last_error)
+    lastError: parseJsonObject(row.last_error),
+    failedDispatchReceiver: row.failed_dispatch_receiver ?? null,
+    failedMessageId: row.failed_message_id ?? null,
+    failedOperationKind: row.failed_operation_kind ?? null,
+    pendingOperationKind: row.pending_operation_kind ?? null,
+    pendingMessageId: row.pending_message_id ?? null
+  };
+}
+function rowToPeerRuntime(row) {
+  return {
+    discussionId: row.discussion_id,
+    dispatchId: row.dispatch_id,
+    provider: row.provider,
+    state: row.state,
+    startedAt: Number(row.started_at),
+    lastActivityAt: Number(row.last_activity_at),
+    ...row.last_provider_event_at == null ? {} : { lastProviderEventAt: Number(row.last_provider_event_at) },
+    ...row.last_output_at == null ? {} : { lastOutputAt: Number(row.last_output_at) },
+    ...row.last_tool_started_at == null ? {} : { lastToolStartedAt: Number(row.last_tool_started_at) },
+    ...row.current_tool == null ? {} : { currentTool: String(row.current_tool) },
+    ...row.process_alive == null ? {} : { processAlive: Boolean(Number(row.process_alive)) },
+    ...row.connection_alive == null ? {} : { connectionAlive: Boolean(Number(row.connection_alive)) },
+    ...row.session_alive == null ? {} : { sessionAlive: Boolean(Number(row.session_alive)) },
+    elapsedMs: Number(row.elapsed_ms),
+    idleMs: Number(row.idle_ms)
+  };
+}
+function rowToPeerRuntimeEvent(row) {
+  return {
+    id: row.id,
+    sequence: Number(row.sequence),
+    discussionId: row.discussion_id,
+    dispatchId: row.dispatch_id,
+    provider: row.provider,
+    type: row.type,
+    timestamp: row.timestamp,
+    ...row.public_summary == null ? {} : { publicSummary: String(row.public_summary) },
+    metadata: parseJsonObject(row.metadata) ?? {}
+  };
+}
+function rowToPermissionRequest(row) {
+  let paths;
+  if (typeof row.paths === "string") {
+    try {
+      const parsed = JSON.parse(row.paths);
+      if (Array.isArray(parsed))
+        paths = parsed.filter((value) => typeof value === "string");
+    } catch {
+      paths = void 0;
+    }
+  }
+  return {
+    id: row.id,
+    discussionId: row.discussion_id,
+    dispatchId: row.dispatch_id,
+    provider: row.provider,
+    method: row.method,
+    actionType: row.action_type,
+    ...row.command == null ? {} : { command: String(row.command) },
+    ...paths ? { paths } : {},
+    ...row.reason == null ? {} : { reason: String(row.reason) },
+    risk: row.risk,
+    status: row.status,
+    createdAt: row.created_at,
+    ...row.resolved_at == null ? {} : { resolvedAt: String(row.resolved_at) },
+    ...row.resolved_by == null ? {} : { resolvedBy: row.resolved_by },
+    ...row.decision == null ? {} : { decision: row.decision }
   };
 }
 function rowToCollaborationSession(row) {
@@ -8445,6 +8757,12 @@ function parseJsonObject(value) {
   } catch {
     return null;
   }
+}
+function isUniqueConstraintError(error2) {
+  const code = error2 && typeof error2 === "object" && "code" in error2 ? error2.code : void 0;
+  if (code === "SQLITE_CONSTRAINT_UNIQUE" || code === "SQLITE_CONSTRAINT_PRIMARYKEY")
+    return true;
+  return error2 instanceof Error && /UNIQUE constraint failed|PRIMARY KEY constraint failed/i.test(error2.message);
 }
 function rowToMessage(row) {
   return {
@@ -8753,7 +9071,7 @@ function defaultGlobalCodexConfig() {
 
 // packages/cli/dist/diagnostics.js
 import { accessSync, constants, existsSync as existsSync6, readFileSync as readFileSync4, statSync as statSync4 } from "node:fs";
-import { delimiter, isAbsolute as isAbsolute2, join as join7, resolve as resolve6 } from "node:path";
+import { delimiter, isAbsolute as isAbsolute3, join as join7, resolve as resolve7 } from "node:path";
 import { homedir as homedir5 } from "node:os";
 import { spawn as spawn5 } from "node:child_process";
 import process5 from "node:process";
@@ -8812,14 +9130,14 @@ ${content}`;
 var ClaudeConnector = class {
   agentType = "claude";
   command;
-  timeoutMs;
+  hardTimeoutMs;
   extraArgs;
   constructor(options = {}) {
     this.command = options.command ?? "claude";
-    this.timeoutMs = options.timeoutMs ?? 12e4;
+    this.hardTimeoutMs = options.hardTimeoutMs ?? options.timeoutMs ?? 30 * 60 * 1e3;
     this.extraArgs = options.extraArgs ?? [];
-    if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1e3 || this.timeoutMs > 6e5) {
-      throw new Error("Claude connector timeoutMs must be an integer between 1000 and 600000");
+    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1e3 || this.hardTimeoutMs > 7 * 24 * 60 * 60 * 1e3) {
+      throw new Error("Claude connector hardTimeoutMs must be an integer between 1000 and 604800000");
     }
   }
   async isAvailable() {
@@ -8835,22 +9153,24 @@ var ClaudeConnector = class {
   }
   async sendAndWait(context) {
     const started = Date.now();
+    context.onActivity?.({ kind: "turn_started", at: started, processAlive: true, connectionAlive: true });
     const canResume = Boolean(context.providerSessionId) && (!context.providerSessionKind || context.providerSessionKind === "claude-cli");
     let sessionId = canResume ? context.providerSessionId : randomUUID3();
     let resumed = canResume;
     let prompt = buildPeerPrompt(context.prompt, resumed ? [] : context.previousMessages ?? []);
-    let result = await runProcess(this.command, [...this.buildArgs(sessionId, resumed), prompt], context.projectPath, this.timeoutMs, context.signal);
+    let result = await runProcess(this.command, [...this.buildArgs(sessionId, resumed), prompt], context.projectPath, this.hardTimeoutMs, context.signal, context.onActivity);
     if (result.exitCode !== 0 && resumed && isSessionLost(result)) {
       sessionId = randomUUID3();
       resumed = false;
       prompt = buildPeerPrompt(context.prompt, context.previousMessages ?? []);
-      result = await runProcess(this.command, [...this.buildArgs(sessionId, false), prompt], context.projectPath, this.timeoutMs, context.signal);
+      result = await runProcess(this.command, [...this.buildArgs(sessionId, false), prompt], context.projectPath, this.hardTimeoutMs, context.signal, context.onActivity);
     }
     if (result.exitCode !== 0) {
       throw new ProviderError("FAILED", `Claude CLI failed (${result.exitCode}): ${result.stderr || result.stdout}`.trim());
     }
     const parsed = parseClaudeOutput(result.stdout);
     const providerSessionId = parsed.sessionId ?? sessionId;
+    context.onActivity?.({ kind: "turn_completed", at: Date.now(), processAlive: false, connectionAlive: false });
     return {
       content: parsed.content,
       duration: Date.now() - started,
@@ -8887,8 +9207,8 @@ function parseClaudeOutput(stdout) {
     return { content: raw };
   }
 }
-function runProcess(command, args, cwd, timeoutMs, signal) {
-  return new Promise((resolve9, reject) => {
+function runProcess(command, args, cwd, timeoutMs, signal, onActivity) {
+  return new Promise((resolve10, reject) => {
     const child = spawn(command, args, {
       cwd,
       windowsHide: true,
@@ -8900,6 +9220,7 @@ function runProcess(command, args, cwd, timeoutMs, signal) {
     let settled = false;
     let timer;
     let forceKillTimer;
+    let heartbeat;
     let termination;
     const finish = (action) => {
       if (settled)
@@ -8909,6 +9230,8 @@ function runProcess(command, args, cwd, timeoutMs, signal) {
         clearTimeout(timer);
       if (forceKillTimer)
         clearTimeout(forceKillTimer);
+      if (heartbeat)
+        clearInterval(heartbeat);
       signal?.removeEventListener("abort", onAbort);
       action();
     };
@@ -8933,21 +9256,31 @@ function runProcess(command, args, cwd, timeoutMs, signal) {
     };
     const onAbort = () => terminate({ code: "CANCELLED", message: "Claude CLI request was cancelled" });
     signal?.addEventListener("abort", onAbort, { once: true });
+    onActivity?.({ kind: "process_started", at: Date.now(), processAlive: true, connectionAlive: true });
+    heartbeat = setInterval(() => {
+      if (!settled && child.exitCode === null) {
+        onActivity?.({ kind: "process_heartbeat", at: Date.now(), processAlive: true, connectionAlive: true });
+      }
+    }, 1e3);
+    heartbeat.unref?.();
     child.stdout?.on("data", (chunk) => {
       stdout += chunk.toString();
+      onActivity?.({ kind: "output", at: Date.now(), processAlive: true, connectionAlive: true });
     });
     child.stderr?.on("data", (chunk) => {
       stderr += chunk.toString();
+      onActivity?.({ kind: "provider_event", at: Date.now(), processAlive: true, connectionAlive: true });
     });
     child.once("error", (error2) => {
       const failure = termination ? new ProviderError(termination.code, termination.message, { cause: error2 }) : new ProviderError("UNAVAILABLE", `Claude CLI could not start: ${error2.message}`, { cause: error2 });
       finish(() => reject(failure));
     });
     child.once("close", (exitCode) => {
+      onActivity?.({ kind: "process_exited", at: Date.now(), processAlive: false, connectionAlive: false, detail: String(exitCode ?? "") });
       if (termination) {
         finish(() => reject(new ProviderError(termination.code, termination.message)));
       } else {
-        finish(() => resolve9({ exitCode, stdout, stderr }));
+        finish(() => resolve10({ exitCode, stdout, stderr }));
       }
     });
     if (signal?.aborted)
@@ -8971,7 +9304,7 @@ import { spawn as spawn2 } from "node:child_process";
 var CodexConnector = class {
   agentType = "codex";
   command;
-  timeoutMs;
+  hardTimeoutMs;
   model;
   sandbox;
   skipGitRepoCheck;
@@ -8979,7 +9312,7 @@ var CodexConnector = class {
   extraArgs;
   constructor(options = {}) {
     this.command = options.command ?? process.env.AGENTBRIDGE_CODEX_COMMAND ?? process.env.CODEX_CLI_PATH ?? "codex";
-    this.timeoutMs = options.timeoutMs ?? 12e4;
+    this.hardTimeoutMs = options.hardTimeoutMs ?? options.timeoutMs ?? 30 * 60 * 1e3;
     this.model = options.model ?? process.env.AGENTBRIDGE_CODEX_MODEL;
     this.sandbox = options.sandbox ?? "read-only";
     this.skipGitRepoCheck = options.skipGitRepoCheck ?? true;
@@ -8987,8 +9320,8 @@ var CodexConnector = class {
     this.extraArgs = options.extraArgs ?? [];
     if (!this.command.trim())
       throw new Error("Codex connector command must not be empty");
-    if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1e3 || this.timeoutMs > 6e5) {
-      throw new Error("Codex connector timeoutMs must be an integer between 1000 and 600000");
+    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1e3 || this.hardTimeoutMs > 7 * 24 * 60 * 60 * 1e3) {
+      throw new Error("Codex connector hardTimeoutMs must be an integer between 1000 and 604800000");
     }
   }
   async isAvailable() {
@@ -9004,14 +9337,15 @@ var CodexConnector = class {
   }
   async sendAndWait(context) {
     const started = Date.now();
+    context.onActivity?.({ kind: "turn_started", at: started, processAlive: true, connectionAlive: true });
     const canResume = Boolean(context.providerSessionId) && (!context.providerSessionKind || context.providerSessionKind === "codex-cli");
     let existingThread = canResume ? context.providerSessionId : void 0;
     let prompt = buildPeerPrompt(context.prompt, existingThread ? [] : context.previousMessages ?? []);
-    let result = await runProcess2(this.command, [...this.buildArgs(existingThread), prompt], context.projectPath, this.timeoutMs, context.signal);
+    let result = await runProcess2(this.command, [...this.buildArgs(existingThread), prompt], context.projectPath, this.hardTimeoutMs, context.signal, context.onActivity);
     if (result.exitCode !== 0 && existingThread && isSessionLost2(result)) {
       existingThread = void 0;
       prompt = buildPeerPrompt(context.prompt, context.previousMessages ?? []);
-      result = await runProcess2(this.command, [...this.buildArgs(), prompt], context.projectPath, this.timeoutMs, context.signal);
+      result = await runProcess2(this.command, [...this.buildArgs(), prompt], context.projectPath, this.hardTimeoutMs, context.signal, context.onActivity);
     }
     if (result.exitCode !== 0) {
       throw new ProviderError("FAILED", `Codex CLI failed (${result.exitCode}): ${result.stderr || result.stdout}`.trim());
@@ -9021,6 +9355,7 @@ var CodexConnector = class {
     if (!threadId) {
       throw new Error("Codex CLI did not return a thread id in its JSONL output");
     }
+    context.onActivity?.({ kind: "turn_completed", at: Date.now(), processAlive: false, connectionAlive: false });
     return {
       content: parsed.content,
       duration: Date.now() - started,
@@ -9085,8 +9420,8 @@ function parseCodexOutput(stdout) {
 function isRecord2(value) {
   return typeof value === "object" && value !== null;
 }
-function runProcess2(command, args, cwd, timeoutMs, signal) {
-  return new Promise((resolve9, reject) => {
+function runProcess2(command, args, cwd, timeoutMs, signal, onActivity) {
+  return new Promise((resolve10, reject) => {
     const child = spawn2(command, args, {
       cwd,
       windowsHide: true,
@@ -9098,6 +9433,7 @@ function runProcess2(command, args, cwd, timeoutMs, signal) {
     let settled = false;
     let timer;
     let forceKillTimer;
+    let heartbeat;
     let termination;
     const finish = (action) => {
       if (settled)
@@ -9107,6 +9443,8 @@ function runProcess2(command, args, cwd, timeoutMs, signal) {
         clearTimeout(timer);
       if (forceKillTimer)
         clearTimeout(forceKillTimer);
+      if (heartbeat)
+        clearInterval(heartbeat);
       signal?.removeEventListener("abort", onAbort);
       action();
     };
@@ -9131,21 +9469,31 @@ function runProcess2(command, args, cwd, timeoutMs, signal) {
     };
     const onAbort = () => terminate({ code: "CANCELLED", message: "Codex CLI request was cancelled" });
     signal?.addEventListener("abort", onAbort, { once: true });
+    onActivity?.({ kind: "process_started", at: Date.now(), processAlive: true, connectionAlive: true });
+    heartbeat = setInterval(() => {
+      if (!settled && child.exitCode === null) {
+        onActivity?.({ kind: "process_heartbeat", at: Date.now(), processAlive: true, connectionAlive: true });
+      }
+    }, 1e3);
+    heartbeat.unref?.();
     child.stdout?.on("data", (chunk) => {
       stdout += chunk.toString();
+      onActivity?.({ kind: "output", at: Date.now(), processAlive: true, connectionAlive: true });
     });
     child.stderr?.on("data", (chunk) => {
       stderr += chunk.toString();
+      onActivity?.({ kind: "provider_event", at: Date.now(), processAlive: true, connectionAlive: true });
     });
     child.once("error", (error2) => {
       const failure = termination ? new ProviderError(termination.code, termination.message, { cause: error2 }) : new ProviderError("UNAVAILABLE", `Codex CLI could not start: ${error2.message}`, { cause: error2 });
       finish(() => reject(failure));
     });
     child.once("close", (exitCode) => {
+      onActivity?.({ kind: "process_exited", at: Date.now(), processAlive: false, connectionAlive: false, detail: String(exitCode ?? "") });
       if (termination) {
         finish(() => reject(new ProviderError(termination.code, termination.message)));
       } else {
-        finish(() => resolve9({ exitCode, stdout, stderr }));
+        finish(() => resolve10({ exitCode, stdout, stderr }));
       }
     });
     if (signal?.aborted)
@@ -9166,11 +9514,62 @@ ${result.stdout}`.toLowerCase();
 
 // packages/connectors/dist/codexAppServer.js
 import { spawn as spawn3 } from "node:child_process";
+
+// packages/connectors/dist/policy.js
+import { isAbsolute, relative, resolve as resolve4 } from "node:path";
+var HeadlessPeerPolicy = class {
+  profile = "HEADLESS_PEER";
+  projectPath;
+  constructor(projectPath) {
+    this.projectPath = resolve4(projectPath);
+  }
+  decide(request) {
+    const method = request.method.toLowerCase();
+    const text = JSON.stringify(request.params ?? {}).toLowerCase();
+    const command = readText(request.params, ["command", "cmd", "shell", "input"]);
+    const path = readText(request.params, ["path", "file", "cwd", "workingDirectory"]);
+    if (this.isDangerous(`${method}
+${text}
+${command ?? ""}`))
+      return "DENY";
+    if (path && !this.isProjectPath(path))
+      return "DENY";
+    if (!/approval|permission|authorize|execute|tool/.test(method))
+      return "DENY";
+    const safe = `${method}
+${command ?? ""}`;
+    if (/read|glob|grep|search|lsp|symbol|test|lint|typecheck|build|compile|fetch|web/.test(safe)) {
+      return "ALLOW";
+    }
+    if (path && this.isProjectPath(path) && /edit|write|create|modify/.test(safe))
+      return "ALLOW";
+    return "NEEDS_USER_DECISION";
+  }
+  isDangerous(value) {
+    return /rm\s+(-[rf]+\s+)?["']?(\/|~|%userprofile%|\$home)|git\s+(reset\s+--hard|clean\s+-fdx)|sudo\b|force[- ]push|\b(reg|sc)\s+(add|delete|config)|shutdown\b|credential|password|api[_ -]?key|production\s+database/.test(value);
+  }
+  isProjectPath(value) {
+    const candidate = resolve4(isAbsolute(value) ? value : resolve4(this.projectPath, value));
+    const remainder = relative(this.projectPath, candidate);
+    return remainder === "" || !remainder.startsWith("..") && !isAbsolute(remainder);
+  }
+};
+function readText(params, keys) {
+  if (!params)
+    return void 0;
+  for (const key of keys) {
+    if (typeof params[key] === "string" && params[key].trim())
+      return params[key];
+  }
+  return void 0;
+}
+
+// packages/connectors/dist/codexAppServer.js
 var CodexAppServerConnector = class {
   agentType = "codex";
   command;
   serverArgs;
-  timeoutMs;
+  hardTimeoutMs;
   startupTimeoutMs;
   model;
   stderrBufferBytes;
@@ -9186,15 +9585,21 @@ var CodexAppServerConnector = class {
   availability;
   stderrTail = "";
   activeTurns = /* @__PURE__ */ new Map();
+  activeActivity;
+  activePermissionRequest;
+  activePolicy;
+  activeDiscussionId;
+  activeDispatchId;
+  processHeartbeat;
   constructor(options = {}) {
     this.command = options.command ?? process.env.AGENTBRIDGE_CODEX_APP_COMMAND ?? "";
     this.serverArgs = options.serverArgs ?? [];
-    this.timeoutMs = options.timeoutMs ?? 12e4;
+    this.hardTimeoutMs = options.hardTimeoutMs ?? options.timeoutMs ?? 30 * 60 * 1e3;
     this.startupTimeoutMs = options.startupTimeoutMs ?? 15e3;
     this.model = options.model;
     this.stderrBufferBytes = options.stderrBufferBytes ?? 256 * 1024;
-    if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1e3 || this.timeoutMs > 6e5) {
-      throw new Error("Codex App Server timeoutMs must be an integer between 1000 and 600000");
+    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1e3 || this.hardTimeoutMs > 7 * 24 * 60 * 60 * 1e3) {
+      throw new Error("Codex App Server hardTimeoutMs must be an integer between 1000 and 604800000");
     }
     if (!Number.isInteger(this.startupTimeoutMs) || this.startupTimeoutMs < 1e3 || this.startupTimeoutMs > 6e5) {
       throw new Error("Codex App Server startupTimeoutMs must be an integer between 1000 and 600000");
@@ -9224,7 +9629,21 @@ var CodexAppServerConnector = class {
       if (!this.command.trim()) {
         throw new Error("Codex App Server command is not configured; set AGENTBRIDGE_CODEX_APP_COMMAND");
       }
-      await this.ensureServer();
+      this.activeActivity = context.onActivity;
+      this.activePermissionRequest = context.onPermissionRequest;
+      this.activePolicy = new HeadlessPeerPolicy(context.projectPath);
+      this.activeDiscussionId = context.discussionId;
+      this.activeDispatchId = context.dispatchId;
+      try {
+        await this.ensureServer();
+      } catch (error2) {
+        this.activeActivity = void 0;
+        this.activePermissionRequest = void 0;
+        this.activePolicy = void 0;
+        this.activeDiscussionId = void 0;
+        this.activeDispatchId = void 0;
+        throw error2;
+      }
       const started = Date.now();
       this.inFlight = true;
       let turnStarted = false;
@@ -9285,6 +9704,11 @@ var CodexAppServerConnector = class {
         throw enriched;
       } finally {
         this.inFlight = false;
+        this.activeActivity = void 0;
+        this.activePermissionRequest = void 0;
+        this.activePolicy = void 0;
+        this.activeDiscussionId = void 0;
+        this.activeDispatchId = void 0;
       }
     });
   }
@@ -9310,8 +9734,8 @@ var CodexAppServerConnector = class {
   async runSerial(operation) {
     const previous = this.serial;
     let release;
-    this.serial = new Promise((resolve9) => {
-      release = resolve9;
+    this.serial = new Promise((resolve10) => {
+      release = resolve10;
     });
     await previous;
     try {
@@ -9333,12 +9757,23 @@ var CodexAppServerConnector = class {
     });
     this.child = child;
     this.stderrTail = "";
+    this.activeActivity?.({ kind: "process_started", at: Date.now(), processAlive: true, connectionAlive: false });
+    this.processHeartbeat = setInterval(() => {
+      if (this.child === child && child.exitCode === null) {
+        this.activeActivity?.({ kind: "process_heartbeat", at: Date.now(), processAlive: true, connectionAlive: this.initialized });
+      }
+    }, 1e3);
+    this.processHeartbeat.unref?.();
     child.stderr.on("data", (chunk) => {
       this.stderrTail = `${this.stderrTail}${chunk.toString()}`.slice(-this.stderrBufferBytes);
     });
     child.stdout.on("data", (chunk) => this.consume(chunk.toString()));
     child.once("error", (error2) => this.failPending(error2 instanceof Error ? error2 : new Error(String(error2))));
     child.once("close", (code, signal) => {
+      if (this.processHeartbeat)
+        clearInterval(this.processHeartbeat);
+      this.processHeartbeat = void 0;
+      this.activeActivity?.({ kind: "process_exited", at: Date.now(), processAlive: false, connectionAlive: false, detail: `${code ?? "null"}:${signal ?? "none"}` });
       if (this.child === child) {
         this.initialized = false;
         this.child = void 0;
@@ -9352,12 +9787,13 @@ var CodexAppServerConnector = class {
     }, this.startupTimeoutMs);
     this.notify("initialized", {});
     this.initialized = true;
+    this.activeActivity?.({ kind: "provider_event", at: Date.now(), processAlive: true, connectionAlive: true, sessionAlive: true, detail: "initialized" });
   }
   async startThread(projectPath) {
     const response = await this.request("thread/start", {
       cwd: projectPath,
-      approvalPolicy: "never",
-      sandbox: "readOnly",
+      approvalPolicy: "on-request",
+      sandbox: "workspace-write",
       serviceName: "agentbridge",
       ...this.model ? { model: this.model } : {}
     }, this.startupTimeoutMs);
@@ -9367,8 +9803,9 @@ var CodexAppServerConnector = class {
     return threadId;
   }
   async collectTurn(threadId, turnId) {
-    const chunks = [];
-    const deadline = Date.now() + this.timeoutMs;
+    const deltaChunks = [];
+    let finalItemText;
+    const deadline = Date.now() + this.hardTimeoutMs;
     while (Date.now() < deadline) {
       const event = await this.nextEvent(deadline - Date.now());
       const params = isRecord3(event.params) ? event.params : {};
@@ -9380,10 +9817,10 @@ var CodexAppServerConnector = class {
         continue;
       const delta = readString(params.delta);
       if (delta && isDeltaMethod(event.method))
-        appendUniqueText(chunks, delta);
+        deltaChunks.push(delta);
       const itemText = readNestedString(params, ["item", "text"]);
       if (itemText && isMessageItem(params.item))
-        appendUniqueText(chunks, itemText);
+        finalItemText = itemText;
       if (isTurnFailure(event.method)) {
         const status2 = readTurnStatus(params);
         throw new ProviderError(status2 === "interrupted" || status2 === "cancelled" ? "CANCELLED" : "FAILED", readString(params.message) ?? "Codex App Server turn failed");
@@ -9402,16 +9839,14 @@ var CodexAppServerConnector = class {
         if (!["completed", "succeeded", "success"].includes(status2)) {
           throw new ProviderError("PROTOCOL", `Codex App Server turn completed with status ${status2}`);
         }
-        const finalText = readNestedString(params, ["turn", "text"]) ?? readString(params.text);
-        if (finalText)
-          appendUniqueText(chunks, finalText);
-        const content = chunks.join("");
+        const finalText = readNestedString(params, ["turn", "text"]) ?? readString(params.text) ?? finalItemText;
+        const content = finalText ?? deltaChunks.join("");
         if (!content)
           throw new ProviderError("PROTOCOL", "Codex App Server completed without an agent message");
         return content;
       }
     }
-    throw new ProviderError("TIMEOUT", `Codex App Server turn timed out after ${this.timeoutMs}ms`);
+    throw new ProviderError("TIMEOUT", `Codex App Server turn timed out after ${this.hardTimeoutMs}ms`);
   }
   request(method, params, timeoutMs) {
     const child = this.child;
@@ -9419,7 +9854,7 @@ var CodexAppServerConnector = class {
       return Promise.reject(new ProviderError("UNAVAILABLE", "Codex App Server is not running"));
     }
     const id = this.nextRequestId++;
-    return new Promise((resolve9, reject) => {
+    return new Promise((resolve10, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new ProviderError("TIMEOUT", `Codex App Server request timed out: ${method}`));
@@ -9427,7 +9862,7 @@ var CodexAppServerConnector = class {
       this.pending.set(id, {
         resolve: (value) => {
           clearTimeout(timer);
-          resolve9(value);
+          resolve10(value);
         },
         reject: (error2) => {
           clearTimeout(timer);
@@ -9463,6 +9898,30 @@ var CodexAppServerConnector = class {
       } catch {
         continue;
       }
+      const method = typeof message.method === "string" ? message.method : void 0;
+      const params = isRecord3(message.params) ? message.params : {};
+      this.activeActivity?.({
+        kind: "provider_event",
+        at: Date.now(),
+        processAlive: true,
+        connectionAlive: this.initialized,
+        sessionAlive: true,
+        detail: method
+      });
+      if (method && isDeltaMethod(method)) {
+        this.activeActivity?.({ kind: "output", at: Date.now(), processAlive: true, connectionAlive: true, sessionAlive: true });
+      }
+      if (method && /turn[/.](start|started)/i.test(method)) {
+        this.activeActivity?.({ kind: "turn_started", at: Date.now(), processAlive: true, connectionAlive: true, sessionAlive: true });
+      } else if (method && isTurnCompleted(method)) {
+        this.activeActivity?.({ kind: "turn_completed", at: Date.now(), processAlive: true, connectionAlive: true, sessionAlive: true });
+      }
+      const tool = readString(params.tool) ?? readString(params.toolName) ?? readNestedString(params, ["item", "name"]) ?? readNestedString(params, ["item", "command"]);
+      if (method && isToolStartedMethod(method)) {
+        this.activeActivity?.({ kind: "tool_started", at: Date.now(), currentTool: tool ?? method, processAlive: true, connectionAlive: true, sessionAlive: true });
+      } else if (method && isToolCompletedMethod(method)) {
+        this.activeActivity?.({ kind: "tool_completed", at: Date.now(), currentTool: tool, processAlive: true, connectionAlive: true, sessionAlive: true });
+      }
       const id = typeof message.id === "number" ? message.id : void 0;
       if (id !== void 0 && this.pending.has(id)) {
         const pending = this.pending.get(id);
@@ -9472,7 +9931,7 @@ var CodexAppServerConnector = class {
         else
           pending.resolve(isRecord3(message.result) ? message.result : {});
       } else if (typeof message.method === "string" && message.id !== void 0) {
-        this.respondToServerRequest(message);
+        void this.respondToServerRequest(message);
       } else if (typeof message.method === "string") {
         const waiter = this.eventWaiters.shift();
         if (waiter)
@@ -9482,23 +9941,48 @@ var CodexAppServerConnector = class {
       }
     }
   }
-  respondToServerRequest(message) {
+  async respondToServerRequest(message) {
     if (!this.child || this.child.exitCode !== null || this.child.killed)
       return;
     const method = String(message.method);
     const id = message.id;
-    const response = /approval/i.test(method) ? { id, result: { decision: "decline" } } : { id, error: { code: -32601, message: `AgentBridge cannot satisfy interactive request ${method}` } };
-    this.child.stdin.write(`${JSON.stringify(response)}
+    const policy = this.activePolicy?.decide({
+      method,
+      params: isRecord3(message.params) ? message.params : void 0
+    }) ?? "DENY";
+    let decision;
+    if (/approval|permission/i.test(method) && policy === "NEEDS_USER_DECISION" && this.activePermissionRequest) {
+      const params = isRecord3(message.params) ? message.params : {};
+      try {
+        decision = await this.activePermissionRequest({
+          discussionId: this.activeDiscussionId ?? "",
+          dispatchId: this.activeDispatchId ?? "",
+          provider: "codex",
+          method,
+          actionType: readString(params.actionType) ?? readString(params.toolName) ?? "provider_action",
+          command: readString(params.command) ?? readString(params.cmd),
+          paths: readStringArray(params.paths) ?? (readString(params.path) ? [readString(params.path)] : void 0),
+          reason: readString(params.reason) ?? readString(params.message),
+          risk: "unknown"
+        });
+      } catch {
+        decision = "deny";
+      }
+    }
+    const response = /approval|permission/i.test(method) ? { id, result: { decision: decision === "approve" || policy === "ALLOW" ? "allow" : "decline", reason: decision ?? policy } } : { id, error: { code: -32601, message: `AgentBridge cannot satisfy interactive request ${method}` } };
+    if (this.child && this.child.exitCode === null && !this.child.killed) {
+      this.child.stdin.write(`${JSON.stringify(response)}
 `);
+    }
   }
   nextEvent(timeoutMs) {
     const queued = this.events.shift();
     if (queued)
       return Promise.resolve(queued);
-    return new Promise((resolve9, reject) => {
+    return new Promise((resolve10, reject) => {
       const waiter = (event) => {
         clearTimeout(timer);
-        resolve9(event);
+        resolve10(event);
       };
       const timer = setTimeout(() => {
         const index = this.eventWaiters.indexOf(waiter);
@@ -9534,13 +10018,15 @@ var CodexAppServerConnector = class {
     this.child = void 0;
     this.initialized = false;
     this.availability = void 0;
+    if (this.processHeartbeat)
+      clearInterval(this.processHeartbeat);
+    this.processHeartbeat = void 0;
     this.buffer = "";
     this.events.splice(0, this.events.length);
     if (child && child.exitCode === null) {
       try {
         child.kill();
       } catch {
-        return;
       }
       const forceKillTimer = setTimeout(() => {
         if (child.exitCode === null) {
@@ -9577,6 +10063,12 @@ function isRecord3(value) {
 function isDeltaMethod(method) {
   return typeof method === "string" && /agent.?message.*delta/i.test(method);
 }
+function isToolStartedMethod(method) {
+  return typeof method === "string" && /(tool|item|command|exec).*(start|begin|started)/i.test(method);
+}
+function isToolCompletedMethod(method) {
+  return typeof method === "string" && /(tool|item|command|exec).*(complete|finish|end|completed|finished)/i.test(method);
+}
 function isMessageItem(value) {
   if (!isRecord3(value))
     return false;
@@ -9589,17 +10081,11 @@ function isTurnCompleted(method) {
 function isTurnFailure(method) {
   return method === "turn/failed" || method === "turn.failed" || method === "error";
 }
-function appendUniqueText(chunks, text) {
-  const current = chunks.join("");
-  if (!current) {
-    chunks.push(text);
-  } else if (text === current || current.endsWith(text)) {
-    return;
-  } else if (text.startsWith(current)) {
-    chunks.splice(0, chunks.length, text);
-  } else {
-    chunks.push(text);
-  }
+function readStringArray(value) {
+  if (!Array.isArray(value))
+    return void 0;
+  const result = value.filter((item) => typeof item === "string" && item.trim().length > 0);
+  return result.length > 0 ? result : void 0;
 }
 function providerErrorFromMessage(message) {
   const text = readString(message.message) ?? `Codex App Server error: ${String(message.code ?? "unknown")}`;
@@ -9728,7 +10214,8 @@ function addPathCandidate(candidates, command, label, pathExists) {
 function deduplicate(candidates, caseInsensitive) {
   const seen = /* @__PURE__ */ new Set();
   return candidates.filter((candidate) => {
-    const key = caseInsensitive ? candidate.command.toLowerCase() : candidate.command;
+    const command = caseInsensitive ? candidate.command.toLowerCase() : candidate.command;
+    const key = JSON.stringify({ command, args: candidate.args ?? [], mode: candidate.mode });
     if (seen.has(key))
       return false;
     seen.add(key);
@@ -9834,6 +10321,7 @@ var CodexAutoConnector = class {
           command: candidate.command,
           serverArgs: [...candidate.args ?? [], ...this.options.appServerArgs ?? []],
           timeoutMs: this.options.timeoutMs,
+          hardTimeoutMs: this.options.hardTimeoutMs,
           startupTimeoutMs: this.options.startupTimeoutMs,
           model: this.options.model
         });
@@ -9849,6 +10337,7 @@ var CodexAutoConnector = class {
         const connector = new CodexConnector({
           command: candidate.command,
           timeoutMs: this.options.timeoutMs,
+          hardTimeoutMs: this.options.hardTimeoutMs,
           model: this.options.model,
           sandbox: this.options.sandbox,
           extraArgs: [...candidate.args ?? [], ...this.options.cliExtraArgs ?? []]
@@ -9892,20 +10381,20 @@ function withBackend(error2, backend) {
 
 // packages/cli/dist/installation.js
 import { existsSync as existsSync4, readdirSync as readdirSync2, realpathSync, rmSync as rmSync2, statSync as statSync2 } from "node:fs";
-import { dirname as dirname6, isAbsolute, join as join5, parse, relative, resolve as resolve4 } from "node:path";
+import { dirname as dirname6, isAbsolute as isAbsolute2, join as join5, parse, relative as relative2, resolve as resolve5 } from "node:path";
 import { spawn as spawn4 } from "node:child_process";
 import process3 from "node:process";
 function detectInstallation(env = process3.env, programEntry = process3.argv[1] ?? "") {
-  const entryCandidate = resolve4(programEntry || ".");
+  const entryCandidate = resolve5(programEntry || ".");
   let entry = entryCandidate;
   try {
     entry = realpathSync(entryCandidate);
   } catch {
   }
   const rootValue = env.AGENTBRIDGE_INSTALL_ROOT;
-  const launcher = env.AGENTBRIDGE_LAUNCHER ? resolve4(env.AGENTBRIDGE_LAUNCHER) : null;
+  const launcher = env.AGENTBRIDGE_LAUNCHER ? resolve5(env.AGENTBRIDGE_LAUNCHER) : null;
   if (rootValue || launcher) {
-    const root = resolve4(rootValue ?? join5(dirname6(launcher), ".."));
+    const root = resolve5(rootValue ?? join5(dirname6(launcher), ".."));
     const issues = [];
     if (!existsSync4(join5(root, "current")))
       issues.push("missing current version pointer");
@@ -9983,16 +10472,16 @@ function cleanupEmptyRegistryRoot(env = process3.env) {
     rmSync2(root, { recursive: false });
 }
 function validateReleaseRemovalTarget(installation) {
-  const root = resolve4(installation.installRoot ?? "");
+  const root = resolve5(installation.installRoot ?? "");
   if (!installation.installRoot || root === parse(root).root) {
     throw new Error("Refusing to remove an unsafe AgentBridge install root");
   }
-  if (!isAbsolute(root) || !existsSync4(join5(root, "current")) || !existsSync4(join5(root, "versions"))) {
+  if (!isAbsolute2(root) || !existsSync4(join5(root, "current")) || !existsSync4(join5(root, "versions"))) {
     throw new Error(`Refusing to remove an unrecognized AgentBridge install root: ${root}`);
   }
   if (installation.launcher) {
-    const launcherRelative = relative(root, resolve4(installation.launcher));
-    if (launcherRelative.startsWith("..") || isAbsolute(launcherRelative)) {
+    const launcherRelative = relative2(root, resolve5(installation.launcher));
+    if (launcherRelative.startsWith("..") || isAbsolute2(launcherRelative)) {
       throw new Error("Refusing to remove an install root that does not contain the active launcher");
     }
   }
@@ -10054,7 +10543,7 @@ function removalEnv(extra = {}) {
 import { createHash as createHash2 } from "node:crypto";
 import { copyFileSync as copyFileSync2, existsSync as existsSync5, mkdirSync as mkdirSync4, readFileSync as readFileSync3, readdirSync as readdirSync3, rmSync as rmSync3, statSync as statSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { dirname as dirname7, join as join6, relative as relative2, resolve as resolve5 } from "node:path";
+import { dirname as dirname7, join as join6, relative as relative3, resolve as resolve6 } from "node:path";
 import { fileURLToPath } from "node:url";
 import process4 from "node:process";
 var CORE_SKILL_NAME = "agentbridge-collaboration";
@@ -10135,7 +10624,7 @@ function findSkillSourceRoot(env) {
     join6(moduleDirectory, "..", "skills"),
     join6(moduleDirectory, "..", "..", "..", "skills")
   ].filter((value) => Boolean(value));
-  for (const candidate of candidates.map((value) => resolve5(value))) {
+  for (const candidate of candidates.map((value) => resolve6(value))) {
     const root = existsSync5(join6(candidate, "SKILL.md")) ? dirname7(candidate) : candidate;
     if (existsSync5(join6(root, CORE_SKILL_NAME, "SKILL.md")))
       return root;
@@ -10150,15 +10639,15 @@ function discoverSkillSources(root) {
   return sources;
 }
 function skillTargets(sources, env, homeDirectory) {
-  const claudeRoot = resolve5(env.CLAUDE_CONFIG_DIR ?? join6(homeDirectory, ".claude"));
-  const agentsRoot = resolve5(env.AGENTBRIDGE_AGENTS_DIR ?? join6(homeDirectory, ".agents"));
+  const claudeRoot = resolve6(env.CLAUDE_CONFIG_DIR ?? join6(homeDirectory, ".claude"));
+  const agentsRoot = resolve6(env.AGENTBRIDGE_AGENTS_DIR ?? join6(homeDirectory, ".agents"));
   return sources.flatMap((source) => [
     { source, target: join6(claudeRoot, "skills", source.name) },
     { source, target: join6(agentsRoot, "skills", source.name) }
   ]);
 }
 function skillHome(env) {
-  return resolve5(env.AGENTBRIDGE_SKILL_HOME ?? env.HOME ?? env.USERPROFILE ?? homedir4());
+  return resolve6(env.AGENTBRIDGE_SKILL_HOME ?? env.HOME ?? env.USERPROFILE ?? homedir4());
 }
 function manifestPath(env) {
   return join6(registryRoot(env), "managed-skills.json");
@@ -10203,7 +10692,7 @@ function hashDirectory(path) {
       if (entry.isDirectory())
         visit(absolute);
       else if (entry.isFile()) {
-        hash.update(relative2(path, absolute).replace(/\\/g, "/"));
+        hash.update(relative3(path, absolute).replace(/\\/g, "/"));
         hash.update(readFileSync3(absolute));
       }
     }
@@ -10214,17 +10703,17 @@ function hashDirectory(path) {
   return hash.digest("hex");
 }
 function samePath2(left, right) {
-  const a = resolve5(left);
-  const b = resolve5(right);
+  const a = resolve6(left);
+  const b = resolve6(right);
   return process4.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
 // packages/cli/dist/diagnostics.js
 async function runDoctor(projectPathValue, options = {}, env = process5.env) {
-  const projectPath = resolve6(projectPathValue);
+  const projectPath = resolve7(projectPathValue);
   const stateDir = join7(projectPath, ".agentbridge");
   const projectFile = join7(stateDir, "project.json");
-  const dbPath = resolve6(env.AGENTBRIDGE_DB_PATH ?? join7(stateDir, "agentbridge.sqlite"));
+  const dbPath = resolve7(env.AGENTBRIDGE_DB_PATH ?? join7(stateDir, "agentbridge.sqlite"));
   const claudeConfig = String(options["claude-config"] ?? join7(homedir5(), ".claude.json"));
   const codexConfig = String(options["codex-config"] ?? defaultGlobalCodexConfig());
   const recommendations = [];
@@ -10322,7 +10811,7 @@ function inspectProject(projectPath, projectFile) {
 function inspectDatabase(initialized, stateDir, dbPath) {
   if (!initialized) {
     try {
-      accessSync(resolve6(stateDir, ".."), constants.R_OK | constants.W_OK);
+      accessSync(resolve7(stateDir, ".."), constants.R_OK | constants.W_OK);
       return { ok: true, path: dbPath, exists: false, tested: false, autoInitialize: true };
     } catch (cause) {
       return { ok: false, path: dbPath, exists: false, tested: false, autoInitialize: true, error: errorMessage(cause) };
@@ -10443,15 +10932,18 @@ async function inspectProviders(options, env) {
 }
 function inspectRegistry(projectPath, env) {
   const path = registryPath(env);
-  const projects = readProjectRegistry(env);
+  let projects = [];
   let valid = true;
   let error2 = null;
   if (existsSync6(path)) {
     try {
       const value = JSON.parse(readFileSync4(path, "utf8"));
-      valid = value.version === 1 && Array.isArray(value.projects);
-      if (!valid)
+      valid = value.version === 1 && Array.isArray(value.projects) && value.projects.every((item) => Boolean(item) && typeof item.projectPath === "string");
+      if (!valid) {
         error2 = "registry format is not supported";
+      } else {
+        projects = value.projects;
+      }
     } catch (cause) {
       valid = false;
       error2 = errorMessage(cause);
@@ -10467,8 +10959,8 @@ function inspectRegistry(projectPath, env) {
   };
 }
 function isCommandAvailable(command, env = process5.env) {
-  if (isAbsolute2(command) || command.includes("/") || command.includes("\\"))
-    return existsSync6(resolve6(command));
+  if (isAbsolute3(command) || command.includes("/") || command.includes("\\"))
+    return existsSync6(resolve7(command));
   const extensions = process5.platform === "win32" ? (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";") : [""];
   return (env.PATH ?? "").split(delimiter).some((directory) => extensions.some((extension) => {
     const candidate = join7(directory, process5.platform === "win32" && !command.toLowerCase().endsWith(extension.toLowerCase()) ? `${command}${extension}` : command);
@@ -10503,8 +10995,8 @@ function areEntryArgumentsAvailable(value) {
   const first = value[0];
   if (typeof first !== "string" || first === "mcp")
     return typeof first === "string";
-  const looksLikePath = isAbsolute2(first) || first.includes("/") || first.includes("\\") || /\.[cm]?js$/i.test(first);
-  return !looksLikePath || existsSync6(resolve6(first));
+  const looksLikePath = isAbsolute3(first) || first.includes("/") || first.includes("\\") || /\.[cm]?js$/i.test(first);
+  return !looksLikePath || existsSync6(resolve7(first));
 }
 function decodeTomlBasicString(value) {
   return value.replace(/\\(\\|"|b|f|n|r|t)/g, (match, escape2) => ({
@@ -10569,8 +11061,8 @@ function errorMessage(cause) {
   return cause instanceof Error ? cause.message : String(cause);
 }
 function samePath3(left, right) {
-  const a = resolve6(left);
-  const b = resolve6(right);
+  const a = resolve7(left);
+  const b = resolve7(right);
   return process5.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
@@ -16429,7 +16921,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve9) => setTimeout(resolve9, pollInterval));
+        await new Promise((resolve10) => setTimeout(resolve10, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -16446,7 +16938,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve9, reject) => {
+    return new Promise((resolve10, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -16524,7 +17016,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve9(parseResult.data);
+            resolve10(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -16785,12 +17277,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve9, reject) => {
+    return new Promise((resolve10, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve9, interval);
+      const timeoutId = setTimeout(resolve10, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -17741,7 +18233,7 @@ var StdioClientTransport = class {
     if (this._process) {
       throw new Error("StdioClientTransport already started! If using Client class, note that connect() calls start() automatically.");
     }
-    return new Promise((resolve9, reject) => {
+    return new Promise((resolve10, reject) => {
       this._process = (0, import_cross_spawn.default)(this._serverParams.command, this._serverParams.args ?? [], {
         // merge default env with server env because mcp server needs some env vars
         env: {
@@ -17758,7 +18250,7 @@ var StdioClientTransport = class {
         this.onerror?.(error2);
       });
       this._process.on("spawn", () => {
-        resolve9();
+        resolve10();
       });
       this._process.on("close", (_code) => {
         this._process = void 0;
@@ -17823,22 +18315,22 @@ var StdioClientTransport = class {
     if (this._process) {
       const processToClose = this._process;
       this._process = void 0;
-      const closePromise = new Promise((resolve9) => {
+      const closePromise = new Promise((resolve10) => {
         processToClose.once("close", () => {
-          resolve9();
+          resolve10();
         });
       });
       try {
         processToClose.stdin?.end();
       } catch {
       }
-      await Promise.race([closePromise, new Promise((resolve9) => setTimeout(resolve9, 2e3).unref())]);
+      await Promise.race([closePromise, new Promise((resolve10) => setTimeout(resolve10, 2e3).unref())]);
       if (processToClose.exitCode === null) {
         try {
           processToClose.kill("SIGTERM");
         } catch {
         }
-        await Promise.race([closePromise, new Promise((resolve9) => setTimeout(resolve9, 2e3).unref())]);
+        await Promise.race([closePromise, new Promise((resolve10) => setTimeout(resolve10, 2e3).unref())]);
       }
       if (processToClose.exitCode === null) {
         try {
@@ -17850,15 +18342,15 @@ var StdioClientTransport = class {
     this._readBuffer.clear();
   }
   send(message) {
-    return new Promise((resolve9) => {
+    return new Promise((resolve10) => {
       if (!this._process?.stdin) {
         throw new Error("Not connected");
       }
       const json = serializeMessage(message);
       if (this._process.stdin.write(json)) {
-        resolve9();
+        resolve10();
       } else {
-        this._process.stdin.once("drain", resolve9);
+        this._process.stdin.once("drain", resolve10);
       }
     });
   }
@@ -17891,7 +18383,7 @@ async function runMcpSmoke(entry, projectPath, timeoutMs = 15e3) {
         timer = setTimeout(() => reject(new Error(`MCP SDK smoke test timed out after ${timeoutMs}ms`)), timeoutMs);
       })
     ]);
-    return tools.length === 8 ? { status: "PASS", detail: "MCP SDK connect \u2192 initialize \u2192 tools/list completed.", tools } : { status: "FAIL", detail: `MCP tools/list returned ${tools.length} tools; expected 8.`, tools };
+    return tools.length === 11 ? { status: "PASS", detail: "MCP SDK connect \u2192 initialize \u2192 tools/list completed.", tools } : { status: "FAIL", detail: `MCP tools/list returned ${tools.length} tools; expected 11.`, tools };
   } catch (cause) {
     return {
       status: "FAIL",
@@ -17909,10 +18401,10 @@ async function runMcpSmoke(entry, projectPath, timeoutMs = 15e3) {
 import { createHash as createHash3 } from "node:crypto";
 import { existsSync as existsSync7, mkdtempSync, readFileSync as readFileSync5, readdirSync as readdirSync4, rmSync as rmSync4, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir6, tmpdir } from "node:os";
-import { basename as basename3, join as join8, resolve as resolve7 } from "node:path";
+import { basename as basename3, join as join8, resolve as resolve8 } from "node:path";
 import { spawnSync } from "node:child_process";
 import process8 from "node:process";
-var CURRENT_VERSION = true ? "0.7.3" : readWorkspaceVersion();
+var CURRENT_VERSION = true ? "0.7.4" : readWorkspaceVersion();
 var DEFAULT_RELEASE_REPOSITORY = "HeadStone1/AgentBridge";
 function normalizeVersion(value) {
   return value.trim().replace(/^v/i, "").split("+", 1)[0];
@@ -17943,7 +18435,7 @@ function releaseAssetName(version2, platform = process8.platform, arch = process
   return `AgentBridge-v${normalizeVersion(version2)}-${platform}-${arch}.${extension}`;
 }
 function installRoot(env = process8.env) {
-  return resolve7(env.AGENTBRIDGE_INSTALL_ROOT ?? join8(homedir6(), ".agentbridge"));
+  return resolve8(env.AGENTBRIDGE_INSTALL_ROOT ?? join8(homedir6(), ".agentbridge"));
 }
 async function checkForUpdate(options = {}) {
   const channel = options.channel ?? "stable";
@@ -18090,7 +18582,7 @@ async function main(argv) {
   const command = argv[0] ?? "help";
   const { options, positional } = parseArgs(argv.slice(1));
   const projectArgument = options["project-path"] ?? positional[0];
-  const projectPath = resolve8(String(projectArgument ?? process9.cwd()));
+  const projectPath = resolve9(String(projectArgument ?? process9.cwd()));
   switch (command) {
     case "help":
       printHelp();
@@ -18191,7 +18683,7 @@ function setupGlobal(projectPath, options) {
     configureClaudeGlobal(claudeConfig, claudeServer),
     configureCodexToml(codexConfig, codexServer)
   ];
-  const migratedCodexConfigs = legacyRegistrations.filter((item) => item.scope !== "global" && resolve8(item.codexConfig) !== resolve8(codexConfig)).map((item) => removeCodexToml(item.codexConfig));
+  const migratedCodexConfigs = legacyRegistrations.filter((item) => item.scope !== "global" && resolve9(item.codexConfig) !== resolve9(codexConfig)).map((item) => removeCodexToml(item.codexConfig));
   let projects = legacyRegistrations;
   for (const registration of legacyRegistrations) {
     projects = registerProject({
@@ -18282,8 +18774,8 @@ async function verify(options) {
   const liveRequested = options.live === true;
   const liveConfigured = Boolean(process9.env.AGENTBRIDGE_CLAUDE_COMMAND) && Boolean(process9.env.AGENTBRIDGE_CODEX_COMMAND || process9.env.AGENTBRIDGE_CODEX_APP_COMMAND);
   const mcpEntry = defaultMcpEntry();
-  const mcpSmoke = await runMcpSmoke(mcpEntry, resolve8(String(options["project-path"] ?? process9.cwd())));
-  const live = liveRequested ? await runLiveProviderSmoke(resolve8(String(options["project-path"] ?? process9.cwd()))) : {
+  const mcpSmoke = await runMcpSmoke(mcpEntry, resolve9(String(options["project-path"] ?? process9.cwd())));
+  const live = liveRequested ? await runLiveProviderSmoke(resolve9(String(options["project-path"] ?? process9.cwd()))) : {
     claudeToCodex: { status: "NOT_TESTED", detail: "Pass --live with explicit provider commands to request live verification." },
     codexToClaude: { status: "NOT_TESTED", detail: "Pass --live with explicit provider commands to request live verification." }
   };
@@ -18416,7 +18908,7 @@ function uninstallAll(confirmed, options) {
   for (const registration of registrations)
     byPath.set(projectPathKey(registration.projectPath), registration);
   for (const discoveredPath of listClaudeAgentBridgeProjects(defaultClaudeConfig)) {
-    const projectPath = resolve8(discoveredPath);
+    const projectPath = resolve9(discoveredPath);
     const key = projectPathKey(projectPath);
     if (!byPath.has(key)) {
       byPath.set(key, {
@@ -18442,12 +18934,12 @@ function uninstallAll(confirmed, options) {
     }
   }
   const globalConfigTargets = /* @__PURE__ */ new Map();
-  globalConfigTargets.set(`${resolve8(defaultClaudeConfig)}\0${resolve8(defaultCodexGlobalConfig)}`, {
+  globalConfigTargets.set(`${resolve9(defaultClaudeConfig)}\0${resolve9(defaultCodexGlobalConfig)}`, {
     claudeConfig: defaultClaudeConfig,
     codexConfig: defaultCodexGlobalConfig
   });
   for (const registration of registrations.filter((item) => item.scope === "global")) {
-    globalConfigTargets.set(`${resolve8(registration.claudeConfig)}\0${resolve8(registration.codexConfig)}`, registration);
+    globalConfigTargets.set(`${resolve9(registration.claudeConfig)}\0${resolve9(registration.codexConfig)}`, registration);
   }
   const globalConfigs = [...globalConfigTargets.values()].flatMap((target) => [
     removeClaudeGlobal(target.claudeConfig),
@@ -18475,8 +18967,8 @@ function uninstallAll(confirmed, options) {
   };
 }
 function removeProject(registration, updateRegistry) {
-  const projectPath = resolve8(registration.projectPath);
-  const stateDir = resolve8(projectPath, ".agentbridge");
+  const projectPath = resolve9(registration.projectPath);
+  const stateDir = resolve9(projectPath, ".agentbridge");
   if (stateDir === parse4(stateDir).root || stateDir === projectPath) {
     throw new Error(`Refusing to remove an unsafe state path: ${stateDir}`);
   }
@@ -18508,7 +19000,7 @@ function parseCodexMode2(value) {
   throw new Error("--codex-mode must be auto, app-server, or cli");
 }
 function projectPathKey(value) {
-  const path = resolve8(value);
+  const path = resolve9(value);
   return process9.platform === "win32" ? path.toLowerCase() : path;
 }
 function openStorage(projectPath) {

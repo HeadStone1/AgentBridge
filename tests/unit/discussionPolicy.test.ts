@@ -3,6 +3,7 @@ import {
   buildDiscussionPrompt,
   defaultMaxTurnsForMode,
   discussionPhase,
+  isAutomaticDiscussionMode,
   parseDiscussionSignal,
   resolveDiscussionMode,
 } from '../../packages/collaboration/src/discussionPolicy';
@@ -13,6 +14,8 @@ describe('discussion depth policy', () => {
     expect(defaultMaxTurnsForMode('review')).toBe(3);
     expect(defaultMaxTurnsForMode('discussion')).toBe(12);
     expect(defaultMaxTurnsForMode('deep-discussion')).toBe(20);
+    expect(isAutomaticDiscussionMode('review')).toBe(false);
+    expect(isAutomaticDiscussionMode('discussion')).toBe(true);
     expect(() => resolveDiscussionMode('unbounded')).toThrow('mode must be one of');
   });
 

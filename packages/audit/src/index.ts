@@ -4,6 +4,10 @@ import type { StoragePort } from '@agentbridge/storage';
 export interface AuditMetrics {
   generatedAt: string;
   totalEvents: number;
+  eventLimit: number;
+  sampled: boolean;
+  truncated: boolean;
+  scope: 'discussion' | 'all';
   peerCallSuccess: number;
   peerCallFailure: number;
   sessionBusy: number;
@@ -12,6 +16,7 @@ export interface AuditMetrics {
 }
 
 export class AuditService {
+  private static readonly METRICS_EVENT_LIMIT = 10_000;
   private storage: StoragePort;
 
   constructor(storage: StoragePort) {
@@ -27,17 +32,25 @@ export class AuditService {
   }
 
   getMetrics(discussionId?: string): AuditMetrics {
-    const events = this.storage.getAuditLog(discussionId, 10_000);
+    const eventLimit = AuditService.METRICS_EVENT_LIMIT;
+    const events = this.storage.getAuditLog(discussionId, eventLimit);
+    const discussion = discussionId ? this.storage.getDiscussion(discussionId) : null;
     const latencyValues = events
       .filter((event) => event.action === 'peer.response' && typeof event.metadata.duration === 'number')
       .map((event) => event.metadata.duration as number);
     return {
       generatedAt: new Date().toISOString(),
       totalEvents: events.length,
+      eventLimit,
+      sampled: events.length >= eventLimit,
+      truncated: events.length >= eventLimit,
+      scope: discussionId ? 'discussion' : 'all',
       peerCallSuccess: events.filter((event) => event.action === 'peer.response').length,
       peerCallFailure: events.filter((event) => event.action === 'error').length,
       sessionBusy: events.filter((event) => event.action === 'session.busy').length,
-      discussionRounds: events.filter((event) => event.action === 'message.sent').length,
+      discussionRounds: discussion
+        ? discussion.roundCount
+        : events.filter((event) => event.action === 'peer.response').length,
       averagePeerCallLatencyMs: latencyValues.length === 0
         ? 0
         : Math.round(latencyValues.reduce((sum, value) => sum + value, 0) / latencyValues.length),

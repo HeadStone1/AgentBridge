@@ -9,10 +9,17 @@ import type {
   DiscussionError,
   DiscussionStopReason,
   DiscussionOperationKind,
+  DiscussionOrchestration,
   DiscussionMode,
   DiscussionSignal,
   Message,
   MessageRole,
+  PermissionDecision,
+  PermissionRequest,
+  PermissionRequestStatus,
+  PeerPermissionRequestInput,
+  PeerRuntimeEvent,
+  PeerRuntimeState,
   SessionStatus,
   SessionPolicy,
   CollaborationSession,
@@ -35,6 +42,7 @@ export interface StoragePort {
     maxTurns?: number;
     maxRetries?: number;
     collaborationSessionId?: string;
+    orchestration?: DiscussionOrchestration;
   }): Discussion;
   createCollaborationSession(data: {
     projectPath: string;
@@ -56,14 +64,26 @@ export interface StoragePort {
     sessionId: string;
   }): void;
   getDiscussion(id: string): Discussion | null;
+  getPeerRuntime(discussionId: string): PeerRuntimeState | null;
+  upsertPeerRuntime(state: PeerRuntimeState): void;
+  appendPeerRuntimeEvent(event: Omit<PeerRuntimeEvent, 'id' | 'sequence' | 'timestamp'> & { timestamp?: string }): PeerRuntimeEvent;
+  getPeerRuntimeEvents(discussionId: string, afterSequence?: number, limit?: number): PeerRuntimeEvent[];
+  createPermissionRequest(request: PeerPermissionRequestInput): PermissionRequest;
+  getPermissionRequest(id: string): PermissionRequest | null;
+  listPermissionRequests(discussionId: string, statuses?: PermissionRequestStatus[]): PermissionRequest[];
+  resolvePermissionRequest(id: string, decision: PermissionDecision, resolvedBy?: PermissionRequest['resolvedBy']): PermissionRequest;
+  expirePermissionRequest(id: string): PermissionRequest;
+  recoverOrphanedDiscussions(isOwnerAlive: (ownerId: string) => boolean): Discussion[];
   updateDiscussionStatus(id: string, status: DiscussionStatus, extra?: Partial<Discussion>): void;
   updateDiscussionMode(id: string, mode: DiscussionMode): void;
+  updateDiscussionPolicy(id: string, mode: DiscussionMode, orchestration: DiscussionOrchestration): void;
   updateDiscussionDispatch(id: string, state: DispatchState | null, waitingFor?: AgentType | null): void;
   updateDiscussionFailure(id: string, failure: {
     receiver: AgentType | null;
     messageId: string | null;
     operationKind: DiscussionOperationKind | null;
   }): void;
+  updateDiscussionPending(id: string, operationKind: DiscussionOperationKind | null, messageId: string | null): void;
   updateDiscussionSignal(id: string, signal: DiscussionSignal | null): void;
   updateDiscussionDiagnostic(id: string, stopReason: DiscussionStopReason | null, lastError?: DiscussionError | null): void;
   incrementDiscussionRound(id: string): Discussion;
@@ -95,6 +115,7 @@ export interface StoragePort {
     summary: string;
     changes?: string[];
   }): { decisionHash: string; agreedBy: AgentType[] };
+  clearAgreements(discussionId: string): void;
   acquireSessionLease(data: {
     provider: AgentType;
     projectPath: string;

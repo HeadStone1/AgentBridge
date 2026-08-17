@@ -30,6 +30,7 @@ describe('CollaborationService', () => {
       topic: 'review',
       initialMessage: 'Please review this plan',
       traceId: 'tr_test',
+      mode: 'review',
     });
 
     const first = await collaboration.closeDiscussion({
@@ -74,6 +75,17 @@ describe('CollaborationService', () => {
             };
           },
         },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => ({
+            content: prompt.includes('agreement confirmation request')
+              ? '{"agentbridgeDecision":"accept","decisionHash":"' + /decisionHash":"([^"]+)"/.exec(prompt)?.[1] + '"}'
+              : 'acknowledged\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+            duration: 1,
+          }),
+        },
       },
     );
     const started = await agreementCollaboration.initiateDiscussion({
@@ -82,6 +94,7 @@ describe('CollaborationService', () => {
       topic: 'automatic agreement',
       initialMessage: 'Review the conclusion',
       traceId: 'tr_auto_agreement',
+      mode: 'review',
     });
 
     const closed = await agreementCollaboration.closeDiscussion({
@@ -97,6 +110,130 @@ describe('CollaborationService', () => {
     agreementStorage.close();
   });
 
+  it('does not silently downgrade automatic discussion when a connector is missing', async () => {
+    await expect(collaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'missing connector',
+      initialMessage: 'Both agents must review this.',
+      traceId: 'tr_missing_connector',
+      mode: 'discussion',
+    })).rejects.toMatchObject({
+      code: 'UNAVAILABLE',
+    });
+    expect(storage.listDiscussions()).toHaveLength(0);
+  });
+
+  it('pauses immediately when the peer declares an unresolved disagreement', async () => {
+    const disagreementStorage = new Storage(':memory:');
+    const service = new CollaborationService(
+      disagreementStorage,
+      new AuditService(disagreementStorage),
+      { maxTurns: 1 },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => ({
+            content: 'Choose the safer migration.\n[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE]',
+            duration: 1,
+          }),
+        },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => ({
+            content: JSON.stringify({
+              agentbridgeDecision: 'reject',
+              decisionHash: /decisionHash":"([^"]+)"/.exec(prompt)?.[1],
+              resolution: 'user_decision',
+              reason: 'The risk tolerance is a product choice.',
+            }),
+            duration: 1,
+          }),
+        },
+      },
+    );
+
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'unresolved disagreement',
+      initialMessage: 'Choose a migration strategy.',
+      traceId: 'tr_unresolved_disagreement',
+      mode: 'discussion',
+    });
+
+    expect(started.status).toBe('NEEDS_USER_DECISION');
+    expect(disagreementStorage.getDiscussion(started.discussionId)).toMatchObject({
+      status: 'NEEDS_USER_DECISION',
+      stopReason: 'UNRESOLVED_DISAGREEMENT',
+      lastSignal: 'NEEDS_USER_DECISION',
+      roundCount: 1,
+    });
+    disagreementStorage.close();
+  });
+
+  it('continues after a resolvable rejection and confirms the revised conclusion', async () => {
+    const continuationStorage = new Storage(':memory:');
+    let codexTurns = 0;
+    let claudeTurns = 0;
+    const service = new CollaborationService(
+      continuationStorage,
+      new AuditService(continuationStorage),
+      { maxTurns: 2 },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => ({
+            content: `Candidate ${++codexTurns}.\n[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE]`,
+            duration: 1,
+          }),
+        },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => {
+            claudeTurns += 1;
+            const hash = /decisionHash":"([^"]+)"/.exec(prompt)?.[1];
+            return {
+              content: claudeTurns === 1
+                ? JSON.stringify({
+                    agentbridgeDecision: 'reject',
+                    decisionHash: hash,
+                    resolution: 'continue',
+                    reason: 'Add the rollback condition.',
+                  })
+                : JSON.stringify({ agentbridgeDecision: 'accept', decisionHash: hash }),
+              duration: 1,
+            };
+          },
+        },
+      },
+    );
+
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'resolvable rejection',
+      initialMessage: 'Propose a safe rollout.',
+      traceId: 'tr_resolvable_rejection',
+      mode: 'discussion',
+    });
+
+    expect(started.status).toBe('COMPLETED');
+    expect(codexTurns).toBe(2);
+    expect(claudeTurns).toBe(2);
+    expect(continuationStorage.getDiscussion(started.discussionId)?.roundCount).toBe(2);
+    expect(continuationStorage.getDiscussion(started.discussionId)?.conclusion).toContain('Candidate 2');
+    continuationStorage.close();
+  });
+
   it('rejects a changed conclusion after the first acceptance', async () => {
     const started = await collaboration.initiateDiscussion({
       driver: 'claude',
@@ -104,6 +241,7 @@ describe('CollaborationService', () => {
       topic: 'review',
       initialMessage: 'Please review this plan',
       traceId: 'tr_test_2',
+      mode: 'review',
     });
 
     await collaboration.closeDiscussion({
@@ -126,6 +264,7 @@ describe('CollaborationService', () => {
       topic: 'review',
       initialMessage: 'Please review this plan',
       traceId: 'tr_test_3',
+      mode: 'review',
     });
 
     await expect(collaboration.replyToDiscussion({
@@ -153,6 +292,7 @@ describe('CollaborationService', () => {
       topic: 'three rounds',
       initialMessage: 'round one',
       traceId: 'tr_chain',
+      mode: 'review',
     });
     await connectedCollaboration.replyToDiscussion({
       discussionId: started.discussionId,
@@ -179,6 +319,246 @@ describe('CollaborationService', () => {
     connectedStorage.close();
   });
 
+  it('automatically completes as soon as one provider proposes and the other confirms', async () => {
+    const autoStorage = new Storage(':memory:');
+    let codexTurns = 0;
+    let claudeTurns = 0;
+    const autoCollaboration = new CollaborationService(
+      autoStorage,
+      new AuditService(autoStorage),
+      { timeoutMs: 5_000, maxTurns: 1 },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            codexTurns += 1;
+            return { content: 'Codex canonical conclusion.\n[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE]', duration: 1 };
+          },
+        },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => {
+            claudeTurns += 1;
+            return {
+              content: prompt.includes('agreement confirmation request')
+                ? '{"agentbridgeDecision":"accept","decisionHash":"' + /decisionHash":"([^"]+)"/.exec(prompt)?.[1] + '"}'
+                : 'Claude challenge and revision.\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+              duration: 1,
+            };
+          },
+        },
+      },
+    );
+
+    const started = await autoCollaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'automatic discussion',
+      initialMessage: 'Compare the two approaches and reach a conclusion.',
+      traceId: 'tr_automatic_discussion',
+      mode: 'discussion',
+    });
+
+    expect(started.orchestration).toBe('automatic');
+    expect(started.status).toBe('COMPLETED');
+    expect(claudeTurns).toBe(1);
+    expect(codexTurns).toBe(1);
+    const result = await autoCollaboration.getDiscussion(started.discussionId);
+    expect(result.discussion.roundCount).toBe(1);
+    expect(result.decision?.agreedBy).toEqual(['claude', 'codex']);
+    expect(result.messages.some((message) => message.sender === 'claude' && message.role === 'response')).toBe(true);
+    expect(result.messages.some((message) => message.sender === 'codex' && message.role === 'response')).toBe(true);
+    autoStorage.close();
+  });
+
+  it('keeps asynchronous automatic discussions in WAIT until the final decision', async () => {
+    const asyncStorage = new Storage(':memory:');
+    let codexTurns = 0;
+    const asyncCollaboration = new CollaborationService(
+      asyncStorage,
+      new AuditService(asyncStorage),
+      { timeoutMs: 5_000, asyncDispatch: true },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            codexTurns += 1;
+            return {
+              content: codexTurns === 2
+                ? 'Candidate answer.\n[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE]'
+                : 'Position.\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+              duration: 1,
+            };
+          },
+        },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => ({
+            content: prompt.includes('agreement confirmation request')
+              ? '{"agentbridgeDecision":"accept","decisionHash":"' + /decisionHash":"([^"]+)"/.exec(prompt)?.[1] + '"}'
+              : 'Challenge.\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+            duration: 1,
+          }),
+        },
+      },
+    );
+
+    const started = await asyncCollaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'async automatic discussion',
+      initialMessage: 'Reach a bounded conclusion asynchronously.',
+      traceId: 'tr_async_automatic',
+      mode: 'discussion',
+    });
+    expect(started.nextAction).toBe('WAIT');
+
+    let snapshot = await asyncCollaboration.waitForDiscussion(started.discussionId, 5_000, started.messageId);
+    while (snapshot.nextAction === 'WAIT') {
+      snapshot = await asyncCollaboration.waitForDiscussion(
+        started.discussionId,
+        5_000,
+        snapshot.messages.at(-1)?.id ?? started.messageId,
+      );
+    }
+    expect(snapshot.discussion.status).toBe('COMPLETED');
+    expect(snapshot.nextAction).toBe('NONE');
+    expect(snapshot.discussion.roundCount).toBe(3);
+    asyncStorage.close();
+  });
+
+  it('does not impose a deeper minimum before accepting a conclusion', async () => {
+    const deepStorage = new Storage(':memory:');
+    let codexTurns = 0;
+    const deepCollaboration = new CollaborationService(
+      deepStorage,
+      new AuditService(deepStorage),
+      { timeoutMs: 5_000 },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            codexTurns += 1;
+            return {
+              content: codexTurns === 3
+                ? 'Deep canonical answer.\n[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE]'
+                : 'Deep evidence.\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+              duration: 1,
+            };
+          },
+        },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => ({
+            content: prompt.includes('agreement confirmation request')
+              ? '{"agentbridgeDecision":"accept","decisionHash":"' + /decisionHash":"([^"]+)"/.exec(prompt)?.[1] + '"}'
+              : 'Deep rebuttal.\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+            duration: 1,
+          }),
+        },
+      },
+    );
+
+    const started = await deepCollaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'deep automatic discussion',
+      initialMessage: 'Test a deeper decision loop.',
+      traceId: 'tr_deep_automatic',
+      mode: 'deep-discussion',
+    });
+    const result = await deepCollaboration.getDiscussion(started.discussionId);
+    expect(result.discussion.status).toBe('COMPLETED');
+    expect(result.discussion.roundCount).toBe(5);
+    expect(result.messages.filter((message) => message.role === 'response').length).toBe(6);
+    deepStorage.close();
+  });
+
+  it('retries a failed automatic turn on the same discussion', async () => {
+    const retryStorage = new Storage(':memory:');
+    let codexCalls = 0;
+    const retryCollaboration = new CollaborationService(
+      retryStorage,
+      new AuditService(retryStorage),
+      { timeoutMs: 5_000, asyncDispatch: true },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => {
+            codexCalls += 1;
+            if (codexCalls === 1) throw new ProviderError('UNAVAILABLE', 'temporary provider outage');
+            return {
+              content: codexCalls === 3
+                ? 'Retry conclusion.\n[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE]'
+                : 'Retry position.\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+              duration: 1,
+            };
+          },
+        },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => ({
+            content: prompt.includes('agreement confirmation request')
+              ? '{"agentbridgeDecision":"accept","decisionHash":"' + /decisionHash":"([^"]+)"/.exec(prompt)?.[1] + '"}'
+              : 'Retry challenge.\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+            duration: 1,
+          }),
+        },
+      },
+    );
+
+    const started = await retryCollaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'automatic retry',
+      initialMessage: 'Recover this automatic discussion after a transient outage.',
+      traceId: 'tr_automatic_retry',
+      mode: 'discussion',
+    });
+    let failed = await retryCollaboration.waitForDiscussion(started.discussionId, 5_000, started.messageId);
+    while (failed.discussion.status === 'DISCUSSING') {
+      failed = await retryCollaboration.waitForDiscussion(
+        started.discussionId,
+        5_000,
+        failed.messages.at(-1)?.id ?? started.messageId,
+      );
+    }
+    expect(failed.discussion.status).toBe('PEER_BUSY');
+
+    await retryCollaboration.retryDiscussion({ discussionId: started.discussionId, agent: 'claude' });
+    let completed = await retryCollaboration.waitForDiscussion(
+      started.discussionId,
+      5_000,
+      failed.messages.at(-1)?.id ?? started.messageId,
+    );
+    while (completed.discussion.status === 'DISCUSSING') {
+      completed = await retryCollaboration.waitForDiscussion(
+        started.discussionId,
+        5_000,
+        completed.messages.at(-1)?.id ?? started.messageId,
+      );
+    }
+    expect(completed.discussion.status).toBe('COMPLETED');
+    expect(completed.decision?.summary).toBe('Retry conclusion.');
+    retryStorage.close();
+  });
+
   it('reuses provider sessions across discussions by default and creates fresh sessions on request', async () => {
     const calls: Array<{ provider: string; sessionId?: string; discussionId: string }> = [];
     const connectedStorage = new Storage(':memory:');
@@ -200,12 +580,15 @@ describe('CollaborationService', () => {
     );
     const first = await connectedCollaboration.initiateDiscussion({
       driver: 'claude', peer: 'codex', topic: 'first', initialMessage: 'one', projectPath: '/project', traceId: 'tr_reuse_1',
+      mode: 'review',
     });
     const second = await connectedCollaboration.initiateDiscussion({
       driver: 'claude', peer: 'codex', topic: 'second', initialMessage: 'two', projectPath: '/project', traceId: 'tr_reuse_2',
+      mode: 'review',
     });
     const fresh = await connectedCollaboration.initiateDiscussion({
       driver: 'claude', peer: 'codex', topic: 'fresh', initialMessage: 'three', projectPath: '/project', traceId: 'tr_reuse_3', sessionPolicy: 'fresh',
+      mode: 'review',
     });
 
     expect(connectedStorage.getDiscussion(first.discussionId)?.collaborationSessionId)
@@ -243,6 +626,7 @@ describe('CollaborationService', () => {
     const first = await service.initiateDiscussion({
       driver: 'claude', peer: 'codex', topic: 'fresh first', initialMessage: 'one',
       projectPath: '/fresh-project', traceId: 'tr_fresh_first', sessionPolicy: 'fresh',
+      mode: 'review',
     });
     await service.replyToDiscussion({
       discussionId: first.discussionId,
@@ -252,6 +636,7 @@ describe('CollaborationService', () => {
     const second = await service.initiateDiscussion({
       driver: 'claude', peer: 'codex', topic: 'fresh second', initialMessage: 'two',
       projectPath: '/fresh-project', traceId: 'tr_fresh_second', sessionPolicy: 'fresh',
+      mode: 'review',
     });
 
     expect(calls).toEqual([
@@ -295,10 +680,12 @@ describe('CollaborationService', () => {
     const first = await service.initiateDiscussion({
       driver: 'claude', peer: 'codex', topic: 'shared first', initialMessage: 'one',
       projectPath: '/shared-project', traceId: 'tr_shared_first',
+      mode: 'review',
     });
     const second = await service.initiateDiscussion({
       driver: 'claude', peer: 'codex', topic: 'shared second', initialMessage: 'two',
       projectPath: '/shared-project', traceId: 'tr_shared_second',
+      mode: 'review',
     });
 
     await service.cancelDiscussion({ discussionId: second.discussionId, agent: 'claude' });
@@ -340,6 +727,7 @@ describe('CollaborationService', () => {
       topic: 'unavailable',
       initialMessage: 'probe',
       traceId: 'tr_unavailable',
+      mode: 'review',
     })).rejects.toThrow('not available');
     expect(peerStorage.listDiscussions()[0].status).toBe('PEER_BUSY');
     expect(() => peerStorage.acquireSessionLease({
@@ -359,6 +747,7 @@ describe('CollaborationService', () => {
       topic: 'cancel',
       initialMessage: 'stop this discussion',
       traceId: 'tr_cancel',
+      mode: 'review',
     });
 
     const cancelled = await cancelCollaboration.cancelDiscussion({
@@ -383,6 +772,7 @@ describe('CollaborationService', () => {
       topic: 'budget',
       initialMessage: 'a'.repeat(600),
       traceId: 'tr_budget',
+      mode: 'review',
     });
 
     await expect(budgetCollaboration.replyToDiscussion({
@@ -419,6 +809,7 @@ describe('CollaborationService', () => {
       topic: 'round limit',
       initialMessage: 'first',
       traceId: 'tr_round_limit',
+      mode: 'review',
     });
 
     await expect(roundCollaboration.replyToDiscussion({
@@ -465,6 +856,7 @@ describe('CollaborationService', () => {
       topic: 'single flight',
       initialMessage: 'first request',
       traceId: 'tr_single_flight',
+      mode: 'review',
     });
 
     expect(['QUEUED', 'RUNNING']).toContain(asyncStorage.getDiscussion(started.discussionId)?.dispatchState);
@@ -507,6 +899,7 @@ describe('CollaborationService', () => {
       topic: 'cancel provider',
       initialMessage: 'wait',
       traceId: 'tr_cancel_provider',
+      mode: 'review',
     });
     const discussion = cancelStorage.listDiscussions()[0];
     await service.cancelDiscussion({ discussionId: discussion.id, agent: 'claude' });
@@ -537,6 +930,7 @@ describe('CollaborationService', () => {
       topic: 'unconfirmed cancel',
       initialMessage: 'wait forever',
       traceId: 'tr_unconfirmed_cancel',
+      mode: 'review',
     });
     const discussion = cancelStorage.listDiscussions()[0];
     const pendingRejection = expect(pending).rejects.toMatchObject({ code: 'TIMEOUT' });
@@ -559,6 +953,7 @@ describe('CollaborationService', () => {
       topic: 'remote provider',
       initialMessage: 'running elsewhere',
       traceId: 'tr_remote_provider',
+      mode: 'review',
     });
     remoteStorage.acquireSessionLease({
       provider: 'codex',
@@ -612,6 +1007,7 @@ describe('CollaborationService', () => {
       topic: 'retry',
       initialMessage: 'retry me',
       traceId: 'tr_retry',
+      mode: 'review',
     })).rejects.toThrow('simulated connector failure');
     discussionId = retryStorage.listDiscussions()[0].id;
     expect(retryStorage.getDiscussion(discussionId)?.status).toBe('FAILED');
@@ -659,6 +1055,7 @@ describe('CollaborationService', () => {
       topic: 'legacy retry',
       initialMessage: 'retry legacy request',
       traceId: 'tr_legacy_retry',
+      mode: 'review',
     })).rejects.toThrow('legacy connector failure');
     const discussion = legacyStorage.listDiscussions()[0];
     const database = (legacyStorage as unknown as {
@@ -708,6 +1105,7 @@ describe('CollaborationService', () => {
       topic: 'retryable timeout',
       initialMessage: 'Retry this timeout.',
       traceId: 'tr_retryable_timeout',
+      mode: 'review',
     });
     await expect(pending).rejects.toMatchObject({ code: 'TIMEOUT' });
     const discussion = timeoutStorage.listDiscussions()[0];
@@ -750,6 +1148,7 @@ describe('CollaborationService', () => {
       topic: 'retry direction',
       initialMessage: 'Choose a path.',
       traceId: 'tr_retry_direction',
+      mode: 'review',
     });
 
     await expect(service.retryDiscussion({
@@ -786,6 +1185,7 @@ describe('CollaborationService', () => {
       topic: 'ambiguous retry',
       initialMessage: 'Run the operation.',
       traceId: 'tr_ambiguous_retry',
+      mode: 'review',
     });
     await expect(pending).rejects.toThrow('turn started before transport failure');
     const discussion = ambiguousStorage.listDiscussions()[0];
@@ -820,6 +1220,7 @@ describe('CollaborationService', () => {
         initialMessage: 'first round',
         projectPath: directory,
         traceId: 'tr_restart',
+        mode: 'review',
       });
       firstStorage.close();
 
@@ -917,6 +1318,17 @@ describe('CollaborationService', () => {
             return { content: 'reviewed\n[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE]', duration: 1 };
           },
         },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => ({
+            content: prompt.includes('agreement confirmation request')
+              ? '{"agentbridgeDecision":"accept","decisionHash":"' + /decisionHash":"([^"]+)"/.exec(prompt)?.[1] + '"}'
+              : 'acknowledged\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+            duration: 1,
+          }),
+        },
       },
     );
 
@@ -934,7 +1346,7 @@ describe('CollaborationService', () => {
     expect(prompts[0]).toContain(`mode: ${mode}`);
     expect(prompts[0]).toContain(`0/${maxTurns}`);
     expect(modeStorage.getAuditLog(started.discussionId).find((event) => event.action === 'peer.response')?.metadata)
-      .toMatchObject({ mode, signal: 'READY_TO_CLOSE' });
+      .toMatchObject({ mode });
     modeStorage.close();
   });
 
@@ -954,7 +1366,7 @@ describe('CollaborationService', () => {
     configuredStorage.close();
   });
 
-  it('monotonically upgrades discussion mode without replacing the discussion', async () => {
+  it('does not upgrade to automatic mode without both connectors', async () => {
     const modeStorage = new Storage(':memory:');
     const prompts: string[] = [];
     const service = new CollaborationService(
@@ -981,25 +1393,16 @@ describe('CollaborationService', () => {
       traceId: 'tr_mode_upgrade',
       mode: 'review',
     });
-    const resumed = await service.replyToDiscussion({
+    await expect(service.replyToDiscussion({
       discussionId: started.discussionId,
       sender: 'claude',
       reply: 'Escalate the analysis.',
       mode: 'deep-discussion',
-    });
-
-    expect(resumed.status).toBe('DISCUSSING');
+    })).rejects.toMatchObject({ code: 'UNAVAILABLE' });
     expect(modeStorage.getDiscussion(started.discussionId)).toMatchObject({
       id: started.discussionId,
-      mode: 'deep-discussion',
+      mode: 'review',
     });
-    expect(prompts.at(-1)).toContain('mode: deep-discussion');
-    await expect(service.replyToDiscussion({
-      discussionId: started.discussionId,
-      sender: 'claude',
-      reply: 'Downgrade the analysis.',
-      mode: 'discussion',
-    })).rejects.toThrow('cannot be downgraded');
     modeStorage.close();
   });
 
@@ -1025,6 +1428,17 @@ describe('CollaborationService', () => {
             };
           },
         },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => ({
+            content: prompt.includes('agreement confirmation request')
+              ? '{"agentbridgeDecision":"accept","decisionHash":"' + /decisionHash":"([^"]+)"/.exec(prompt)?.[1] + '"}'
+              : 'acknowledged\n[AGENTBRIDGE_SIGNAL: CONTINUE]',
+            duration: 1,
+          }),
+        },
       },
     );
     const started = await service.initiateDiscussion({
@@ -1048,9 +1462,9 @@ describe('CollaborationService', () => {
       sender: 'claude',
       reply: 'Downtime is not acceptable; use an online path.',
     });
-    expect(resumed.status).toBe('DISCUSSING');
+    expect(resumed.status).toBe('COMPLETED');
     expect(signalStorage.getDiscussion(started.discussionId)).toMatchObject({
-      status: 'DISCUSSING',
+      status: 'COMPLETED',
       lastSignal: 'READY_TO_CLOSE',
       stopReason: null,
     });
@@ -1059,5 +1473,96 @@ describe('CollaborationService', () => {
       && event.metadata.previousStopReason === 'PEER_REQUESTED_USER_DECISION'
     ))).toBe(true);
     signalStorage.close();
+  });
+
+  it('persists provider activity and returns a completed peer runtime snapshot', async () => {
+    const runtimeStorage = new Storage(':memory:');
+    const service = new CollaborationService(
+      runtimeStorage,
+      new AuditService(runtimeStorage),
+      {},
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ onActivity }) => {
+            onActivity?.({ kind: 'process_started', processAlive: true, connectionAlive: true });
+            onActivity?.({ kind: 'output', processAlive: true, connectionAlive: true });
+            return { content: 'runtime response', duration: 1 };
+          },
+        },
+      },
+    );
+
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'runtime',
+      initialMessage: 'Report runtime state.',
+      traceId: 'tr_runtime_completed',
+      mode: 'review',
+    });
+    expect((await service.getDiscussion(started.discussionId)).peerRuntime).toMatchObject({
+      discussionId: started.discussionId,
+      provider: 'codex',
+      state: 'COMPLETED',
+      processAlive: false,
+    });
+    runtimeStorage.close();
+  });
+
+  it('moves silent providers through IDLE_SUSPECTED to STALLED and blocks retry while active', async () => {
+    const runtimeStorage = new Storage(':memory:');
+    const config = {
+      asyncDispatch: true,
+      startupTimeoutMs: 5_000,
+      idleTimeoutMs: 1_000,
+      stallGraceMs: 1_000,
+      turnHardLimitMs: 10_000,
+    };
+    const connector = {
+      agentType: 'codex' as const,
+      isAvailable: async () => true,
+      isBusy: async () => false,
+      sendAndWait: async ({ onActivity, signal }: { onActivity?: (activity: any) => void; signal?: AbortSignal }) => await new Promise<never>((_, reject) => {
+        onActivity?.({ kind: 'process_started', processAlive: true, connectionAlive: true });
+        signal?.addEventListener('abort', () => reject(new ProviderError('TIMEOUT', 'test stalled')), { once: true });
+      }),
+    };
+    const service = new CollaborationService(
+      runtimeStorage,
+      new AuditService(runtimeStorage),
+      config,
+      { codex: connector },
+    );
+
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'runtime stall',
+      initialMessage: 'Wait for the silent peer.',
+      traceId: 'tr_runtime_stall',
+      mode: 'review',
+    });
+    runtimeStorage.updateDiscussionStatus(started.discussionId, 'TIMEOUT');
+    const retryService = new CollaborationService(
+      runtimeStorage,
+      new AuditService(runtimeStorage),
+      config,
+      { codex: connector },
+    );
+    await expect(retryService.retryDiscussion({ discussionId: started.discussionId, agent: 'claude' }))
+      .rejects.toThrow('PEER_STILL_RUNNING');
+
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect((await service.getDiscussion(started.discussionId)).peerRuntime?.state)
+      .toBe('IDLE_SUSPECTED');
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect((await service.getDiscussion(started.discussionId)).peerRuntime?.state)
+      .toBe('STALLED');
+    await service.shutdown(1_000);
+    await retryService.shutdown(1_000);
+    runtimeStorage.close();
   });
 });

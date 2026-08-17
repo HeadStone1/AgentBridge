@@ -6,7 +6,7 @@ import process from 'node:process';
 import { ClaudeConnector, CodexAutoConnector, CodexConnector, discoverCodexCommands, type CodexBackendMode } from '@agentbridge/connectors';
 import { Storage } from '@agentbridge/storage';
 import { defaultGlobalCodexConfig } from './paths.js';
-import { detectInstallation, readProjectRegistry, registryPath } from './installation.js';
+import { detectInstallation, registryPath } from './installation.js';
 import { inspectManagedSkills } from './skills.js';
 
 export interface DoctorOptions {
@@ -246,14 +246,20 @@ async function inspectProviders(options: DoctorOptions, env: NodeJS.ProcessEnv):
 
 function inspectRegistry(projectPath: string, env: NodeJS.ProcessEnv): Record<string, unknown> {
   const path = registryPath(env);
-  const projects = readProjectRegistry(env);
+  let projects: Array<{ projectPath: string }> = [];
   let valid = true;
   let error: string | null = null;
   if (existsSync(path)) {
     try {
       const value = JSON.parse(readFileSync(path, 'utf8')) as { version?: unknown; projects?: unknown };
-      valid = value.version === 1 && Array.isArray(value.projects);
-      if (!valid) error = 'registry format is not supported';
+      valid = value.version === 1
+        && Array.isArray(value.projects)
+        && value.projects.every((item) => Boolean(item) && typeof (item as { projectPath?: unknown }).projectPath === 'string');
+      if (!valid) {
+        error = 'registry format is not supported';
+      } else {
+        projects = value.projects as Array<{ projectPath: string }>;
+      }
     } catch (cause) {
       valid = false;
       error = errorMessage(cause);

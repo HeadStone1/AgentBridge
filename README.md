@@ -625,13 +625,15 @@ node packages/cli/dist/index.js status .
 - Codex 侧只能选择 `claude`。
 - `projectPath` 可省略，默认使用 MCP 进程当前工作目录。
 - 返回的 `discussionId` 用于后续所有操作。
-- `mode` 可选：`review`、`discussion`、`deep-discussion`，默认成功回复上限分别为 3、12、20。
+- `mode` 可选：`review`、`discussion`、`deep-discussion`。`review` 是一次独立评审；`discussion` 和 `deep-discussion` 会在两个 Provider 间自动交替，达成共识后立即进行结论 hash 双签；安全上限分别为 3、12、20，不是必须完成的次数。
+- 自动模式要求 Claude 和 Codex 两个 connector 都已配置；缺少任意一个时会明确返回 `UNAVAILABLE`，不会静默降级为单轮回答。
+- 自动模式返回 `nextAction=WAIT` 时，必须继续使用同一个 `discussionId` 调用 `wait_discussion` 或 `watch_discussion`，不能把中间回复直接当成最终答案。
 - `maxTurns` 可选，范围 1–50；它覆盖模式默认值，只是安全上限，不是必须聊满的目标。
 - `get_discussion` 会返回持久化的 `mode`、`maxTurns` 和最新 `lastSignal`；对端明确返回 `NEEDS_USER_DECISION` 时讨论会暂停交给用户决策。
 
 ### `reply_peer`
 
-继续已有讨论，并把回复发送给另一参与者。
+继续手动/review 讨论，并把回复发送给另一参与者；自动讨论运行期间不能插入回复，暂停后可用它提交用户决定并恢复讨论。
 
 ```json
 {
@@ -693,7 +695,8 @@ node packages/cli/dist/index.js status .
 
 - AgentBridge 会把规范结论和 decision hash 发送给对端，要求对端返回结构化的接受或拒绝结果。
 - 对端接受同一 hash 时自动记录第二份 agreement，进入 `COMPLETED` 并生成决定记录。
-- 对端不可用、回复格式无效或拒绝时保持 `DISCUSSING`，返回 `waitingFor` 和可用的 `peerResponse`，调用方可以继续讨论后再次提交。
+- 对端接受同一 hash 时自动完成；拒绝确认时会根据 `resolution` 区分继续讨论或进入 `NEEDS_USER_DECISION`。无法统一的目标、风险或偏好会保留双方观点并交给用户决策。
+- 对端临时不可用、回复格式无效或需要重试时保持可恢复状态，调用方可以在同一讨论上继续或重试。
 - 自动确认不可用时仍兼容手工双签：另一个代理可使用相同 `discussionId` 和完全相同的 `conclusion` 调用一次 `close_discussion`。
 
 讨论消息始终完整保存在 SQLite 中。发送给新 provider 会话的恢复上下文采用“首条提案 + 尽可能多的最近消息”，默认历史字符预算为 48,000，并对单条历史消息截断；成功续接 provider 原生会话时不会重复注入历史。
@@ -733,7 +736,7 @@ node packages/cli/dist/index.js status .
 | `FAILED` | provider 或处理失败 | `retry_discussion` |
 | `PEER_BUSY` | 对端繁忙或不可用 | 检查 provider，再重试 |
 | `TIMEOUT` | 超时或达到资源限制 | 检查原因，再重试或取消 |
-| `NEEDS_USER_DECISION` | 自动恢复或重试预算已用尽 | 用户决定重试或取消 |
+| `NEEDS_USER_DECISION` | 存在无法自动统一的分歧，或自动恢复/重试预算已用尽 | 用户解决分歧、决定重试或取消 |
 | `CANCELLED` | 已取消 | 只读查看历史 |
 
 ## 管理命令
@@ -806,7 +809,7 @@ node packages/cli/dist/index.js register-session \
 | `AGENTBRIDGE_CODEX_MODEL` | Codex CLI 模型覆盖 | 使用 Codex 默认模型 |
 | `AGENTBRIDGE_CODEX_APP_COMMAND` | 仅用于 App Server 的可执行程序覆盖路径 | 未设置时自动发现 Desktop |
 | `AGENTBRIDGE_RECOVERY_MAX_AGE_MS` | 旧讨论恢复阈值 | 默认 30 分钟 |
-| `AGENTBRIDGE_MAX_TURNS` | 覆盖所有模式的成功 Provider 回复上限 | 未设置时按模式取 3/12/20；设置范围 1–50 |
+| `AGENTBRIDGE_MAX_TURNS` | 覆盖所有模式的实质性 Provider 回复安全上限 | 未设置时按模式取 3/12/20；协议确认不消耗上限，设置范围 1–50 |
 | `AGENTBRIDGE_DISCUSSION_RETENTION_DAYS` | 启动时清理终态讨论 | 未设置或 `0` 表示永久保留；可选 1–3650 |
 | `AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE` | close/cancel 后尝试归档 Provider 原生会话 | 默认关闭；设为 `1` 启用，Provider 不支持时安全跳过 |
 

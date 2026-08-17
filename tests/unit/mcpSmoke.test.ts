@@ -16,7 +16,7 @@ describe('release MCP SDK smoke stability', () => {
       cwd: repositoryRoot,
       encoding: 'utf8',
       windowsHide: true,
-    }).trim()).toBe('0.7.3');
+    }).trim()).toBe('0.7.4');
   });
 
   it('completes 30 consecutive SDK handshakes without timeout', async () => {
@@ -24,7 +24,7 @@ describe('release MCP SDK smoke stability', () => {
     for (let attempt = 0; attempt < 30; attempt += 1) {
       const result = await runMcpSmoke(releaseEntry, repositoryRoot, 15_000);
       expect(result, `attempt ${attempt + 1}`).toMatchObject({ status: 'PASS' });
-      expect(result.tools).toHaveLength(8);
+    expect(result.tools).toHaveLength(11);
     }
   }, 120_000);
 });

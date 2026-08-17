@@ -36,11 +36,12 @@ function opposite(agent: AgentType): AgentType {
 }
 
 function buildTools(agentType: AgentType): Tool[] {
+  if (process.env.AGENTBRIDGE_PEER_INVOCATION === '1') return [];
   const peer = opposite(agentType);
   return [
     {
       name: 'ask_peer',
-      description: 'Start a discussion with the other coding agent. The request may be queued asynchronously; inspect get_discussion for the peer response or final decision.',
+      description: 'Start a peer interaction. review performs one independent review; discussion and deep-discussion automatically alternate both providers until agreement or an unresolved user decision. Both providers must be configured; automatic modes never silently downgrade to single-turn. Follow nextAction=WAIT with wait_discussion/watch_discussion and do not return an intermediate response as final.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -50,9 +51,9 @@ function buildTools(agentType: AgentType): Tool[] {
           mode: {
             type: 'string',
             enum: [...DISCUSSION_MODES],
-            description: 'Depth contract (defaults: review=3, discussion=12, deep-discussion=20 successful responses)',
+            description: 'Depth contract: review is single-turn; discussion and deep-discussion are automatic alternating runs that converge on agreement or pause for user decision, with safety ceilings of 12 and 20 successful provider responses',
           },
-          maxTurns: { type: 'integer', minimum: 1, maximum: 50, description: 'Safety ceiling for successful provider responses; overrides the mode default' },
+          maxTurns: { type: 'integer', minimum: 1, maximum: 50, description: 'Safety ceiling for substantive provider responses; agreement confirmations do not consume it' },
           sessionPolicy: { type: 'string', enum: ['auto', 'reuse', 'fresh'], description: 'Provider session policy (default: auto)' },
         },
         required: ['peer', 'message'],
@@ -60,7 +61,7 @@ function buildTools(agentType: AgentType): Tool[] {
     },
     {
       name: 'reply_peer',
-      description: 'Continue an existing discussion. The reply may be queued asynchronously; inspect get_discussion for the peer response.',
+      description: 'Continue a manual/review discussion, or provide the requested user decision after an automatic discussion pauses. Automatic runs reject concurrent replies while nextAction=WAIT.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -86,13 +87,26 @@ function buildTools(agentType: AgentType): Tool[] {
     },
     {
       name: 'wait_discussion',
-      description: 'Wait for an asynchronous discussion to receive a new message or leave its queued/running state without changing discussion status.',
+      description: 'Wait for a queued/running discussion message. Automatic discussions may wake on intermediate messages; continue waiting while nextAction=WAIT.',
       inputSchema: {
         type: 'object',
         properties: {
           discussionId: { type: 'string', description: 'Discussion ID' },
           timeoutMs: { type: 'integer', minimum: 1000, maximum: 120000, description: 'Long-poll timeout in milliseconds (default: 30000)' },
           afterMessageId: { type: 'string', description: 'Wake when a newer message exists' },
+        },
+        required: ['discussionId'],
+      },
+    },
+    {
+      name: 'watch_discussion',
+      description: 'Watch public peer runtime events with a cursor. Returns tool activity, output deltas, lifecycle changes, and permission requests without exposing private reasoning.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          discussionId: { type: 'string', description: 'Discussion ID' },
+          timeoutMs: { type: 'integer', minimum: 1000, maximum: 120000, description: 'Long-poll timeout in milliseconds (default: 30000)' },
+          afterSequence: { type: 'integer', minimum: 0, description: 'Return events after this per-discussion sequence' },
         },
         required: ['discussionId'],
       },
@@ -141,6 +155,30 @@ function buildTools(agentType: AgentType): Tool[] {
         required: ['discussionId'],
       },
     },
+    {
+      name: 'list_permission_requests',
+      description: 'List pending or resolved provider permission requests for a discussion.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          discussionId: { type: 'string', description: 'Discussion ID' },
+          includeResolved: { type: 'boolean', description: 'Include already resolved requests' },
+        },
+        required: ['discussionId'],
+      },
+    },
+    {
+      name: 'resolve_permission',
+      description: 'Approve or deny one provider action. Approve only when the action and scope are understood.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          permissionId: { type: 'string', description: 'Permission request ID' },
+          decision: { type: 'string', enum: ['approve', 'deny'] },
+        },
+        required: ['permissionId', 'decision'],
+      },
+    },
   ];
 }
 
@@ -179,10 +217,17 @@ function createServer(resolveRuntime: MCPRuntimeResolver, options: MCPServerOpti
       timeoutMs: z.number().int().min(1_000).max(120_000).optional(),
       afterMessageId: id.optional(),
     }),
+    watch: z.object({
+      discussionId: id,
+      timeoutMs: z.number().int().min(1_000).max(120_000).optional(),
+      afterSequence: z.number().int().min(0).optional(),
+    }),
     list: z.object({ projectPath: z.string().trim().min(1).max(4096).optional() }),
     close: z.object({ discussionId: id, conclusion: text }),
     cancel: z.object({ discussionId: id }),
     retry: z.object({ discussionId: id }),
+    listPermissions: z.object({ discussionId: id, includeResolved: z.boolean().optional() }),
+    resolvePermission: z.object({ permissionId: id, decision: z.enum(['approve', 'deny']) }),
   };
 
   const server = new Server(
@@ -246,6 +291,15 @@ function createServer(resolveRuntime: MCPRuntimeResolver, options: MCPServerOpti
             input.afterMessageId,
           ));
         }
+        case 'watch_discussion': {
+          const input = parse(schemas.watch, args);
+          const runtime = await resolveRuntime(undefined, server);
+          return ok(await runtime.collaboration.watchDiscussion(
+            input.discussionId,
+            input.timeoutMs,
+            input.afterSequence,
+          ));
+        }
         case 'list_discussions': {
           const input = parse(schemas.list, args);
           const runtime = await resolveRuntime(input.projectPath, server);
@@ -273,6 +327,20 @@ function createServer(resolveRuntime: MCPRuntimeResolver, options: MCPServerOpti
           const runtime = await resolveRuntime(undefined, server);
           return ok(await runtime.collaboration.retryDiscussion({
             discussionId: input.discussionId,
+            agent: agentType,
+          }));
+        }
+        case 'list_permission_requests': {
+          const input = parse(schemas.listPermissions, args);
+          const runtime = await resolveRuntime(undefined, server);
+          return ok(runtime.collaboration.listPermissionRequests(input.discussionId, input.includeResolved));
+        }
+        case 'resolve_permission': {
+          const input = parse(schemas.resolvePermission, args);
+          const runtime = await resolveRuntime(undefined, server);
+          return ok(await runtime.collaboration.resolvePermission({
+            permissionId: input.permissionId,
+            decision: input.decision,
             agent: agentType,
           }));
         }

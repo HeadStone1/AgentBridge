@@ -45,8 +45,15 @@ async function createRuntime(projectPath: string): Promise<MCPRuntime> {
   const audit = new AuditService(storage);
   storage.recoverExpiredSessionLeases();
   storage.pruneSessions(readBoundedInteger('AGENTBRIDGE_SESSION_PRUNE_MAX_AGE_MS', 30 * 24 * 60 * 60 * 1_000, 1_000, 365 * 24 * 60 * 60 * 1_000));
-  const timeoutMs = readBoundedInteger('AGENTBRIDGE_TIMEOUT_MS', 120_000, 1_000, 600_000);
+  const idleTimeoutMs = readBoundedInteger(
+    'AGENTBRIDGE_IDLE_TIMEOUT_MS',
+    readBoundedInteger('AGENTBRIDGE_TIMEOUT_MS', 120_000, 1_000, 600_000),
+    1_000,
+    600_000,
+  );
   const startupTimeoutMs = readBoundedInteger('AGENTBRIDGE_STARTUP_TIMEOUT_MS', 15_000, 1_000, 600_000);
+  const stallGraceMs = readBoundedInteger('AGENTBRIDGE_STALL_GRACE_MS', 180_000, 1_000, 600_000);
+  const turnHardLimitMs = readBoundedInteger('AGENTBRIDGE_TURN_HARD_LIMIT_MS', 30 * 60 * 1_000, 1_000, 7 * 24 * 60 * 60 * 1_000);
   const maxDurationMs = readBoundedInteger('AGENTBRIDGE_MAX_DURATION_MS', 30 * 60 * 1_000, 1_000, 7 * 24 * 60 * 60 * 1_000);
   const maxTurns = readOptionalBoundedInteger('AGENTBRIDGE_MAX_TURNS', 1, 50);
   const retentionDays = readBoundedInteger('AGENTBRIDGE_DISCUSSION_RETENTION_DAYS', 0, 0, 3650);
@@ -78,16 +85,19 @@ async function createRuntime(projectPath: string): Promise<MCPRuntime> {
     audit,
     {
       maxTurns,
-      timeoutMs,
+      idleTimeoutMs,
+      startupTimeoutMs,
+      stallGraceMs,
+      turnHardLimitMs,
       maxDurationMs,
       asyncDispatch: readBoolean('AGENTBRIDGE_ASYNC_DISPATCH', true),
       archiveSessionsOnClose: readBoolean('AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE', false),
     },
     {
-      claude: new ClaudeConnector({ command: process.env.AGENTBRIDGE_CLAUDE_COMMAND, timeoutMs }),
+      claude: new ClaudeConnector({ command: process.env.AGENTBRIDGE_CLAUDE_COMMAND, hardTimeoutMs: turnHardLimitMs }),
       codex: new CodexAutoConnector({
         model: process.env.AGENTBRIDGE_CODEX_MODEL,
-        timeoutMs,
+        hardTimeoutMs: turnHardLimitMs,
         startupTimeoutMs,
       }),
     },

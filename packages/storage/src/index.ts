@@ -19,7 +19,14 @@ import type {
   CollaborationSession,
   SessionPolicy,
   DiscussionMode,
+  DiscussionOrchestration,
   DiscussionSignal,
+  PermissionDecision,
+  PermissionRequest,
+  PermissionRequestStatus,
+  PeerPermissionRequestInput,
+  PeerRuntimeEvent,
+  PeerRuntimeState,
 } from '@agentbridge/protocol';
 import {
   canTransition,
@@ -69,6 +76,7 @@ CREATE TABLE IF NOT EXISTS discussions (
   id TEXT PRIMARY KEY,
   topic TEXT NOT NULL,
   mode TEXT NOT NULL DEFAULT 'discussion',
+  orchestration TEXT NOT NULL DEFAULT 'single-turn',
   status TEXT NOT NULL DEFAULT 'CREATED',
   dispatch_state TEXT,
   waiting_for TEXT,
@@ -91,7 +99,9 @@ CREATE TABLE IF NOT EXISTS discussions (
   last_error TEXT,
   failed_dispatch_receiver TEXT,
   failed_message_id TEXT,
-  failed_operation_kind TEXT
+  failed_operation_kind TEXT,
+  pending_operation_kind TEXT,
+  pending_message_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -147,6 +157,59 @@ CREATE TABLE IF NOT EXISTS discussion_leases (
   owner_id TEXT NOT NULL,
   acquired_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
+  FOREIGN KEY (discussion_id) REFERENCES discussions(id)
+);
+
+CREATE TABLE IF NOT EXISTS peer_runtime (
+  discussion_id TEXT PRIMARY KEY,
+  dispatch_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  state TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  last_activity_at INTEGER NOT NULL,
+  last_provider_event_at INTEGER,
+  last_output_at INTEGER,
+  last_tool_started_at INTEGER,
+  current_tool TEXT,
+  process_alive INTEGER,
+  connection_alive INTEGER,
+  session_alive INTEGER,
+  elapsed_ms INTEGER NOT NULL,
+  idle_ms INTEGER NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (discussion_id) REFERENCES discussions(id)
+);
+
+CREATE TABLE IF NOT EXISTS peer_runtime_events (
+  id TEXT PRIMARY KEY,
+  discussion_id TEXT NOT NULL,
+  dispatch_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  provider TEXT NOT NULL,
+  type TEXT NOT NULL,
+  timestamp TEXT NOT NULL,
+  public_summary TEXT,
+  metadata TEXT NOT NULL DEFAULT '{}',
+  UNIQUE (discussion_id, sequence),
+  FOREIGN KEY (discussion_id) REFERENCES discussions(id)
+);
+
+CREATE TABLE IF NOT EXISTS permission_requests (
+  id TEXT PRIMARY KEY,
+  discussion_id TEXT NOT NULL,
+  dispatch_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  method TEXT NOT NULL,
+  action_type TEXT NOT NULL,
+  command TEXT,
+  paths TEXT,
+  reason TEXT,
+  risk TEXT NOT NULL DEFAULT 'unknown',
+  status TEXT NOT NULL DEFAULT 'PENDING',
+  created_at TEXT NOT NULL,
+  resolved_at TEXT,
+  resolved_by TEXT,
+  decision TEXT,
   FOREIGN KEY (discussion_id) REFERENCES discussions(id)
 );
 
@@ -239,6 +302,11 @@ export class Storage {
     this.ensureColumn('discussions', 'failed_operation_kind', 'ALTER TABLE discussions ADD COLUMN failed_operation_kind TEXT');
     this.ensureColumn('discussions', 'collaboration_session_id', 'ALTER TABLE discussions ADD COLUMN collaboration_session_id TEXT');
     this.ensureColumn('discussions', 'mode', "ALTER TABLE discussions ADD COLUMN mode TEXT NOT NULL DEFAULT 'discussion'");
+    // Existing discussions were created with the manual one-turn contract.
+    // New automatic discussions opt in explicitly at creation time.
+    this.ensureColumn('discussions', 'orchestration', "ALTER TABLE discussions ADD COLUMN orchestration TEXT NOT NULL DEFAULT 'single-turn'");
+    this.ensureColumn('discussions', 'pending_operation_kind', 'ALTER TABLE discussions ADD COLUMN pending_operation_kind TEXT');
+    this.ensureColumn('discussions', 'pending_message_id', 'ALTER TABLE discussions ADD COLUMN pending_message_id TEXT');
     this.ensureColumn('messages', 'provider_session_id', 'ALTER TABLE messages ADD COLUMN provider_session_id TEXT');
   }
 
@@ -282,6 +350,7 @@ export class Storage {
     maxTurns?: number;
     maxRetries?: number;
     collaborationSessionId?: string;
+    orchestration?: DiscussionOrchestration;
   }): Discussion {
     const id = `dsc_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
     const now = new Date().toISOString();
@@ -289,19 +358,23 @@ export class Storage {
     const maxRetries = data.maxRetries ?? 2;
     const peer = data.peer ?? (data.driver === 'claude' ? 'codex' : 'claude');
     const mode = data.mode ?? DEFAULT_DISCUSSION_MODE;
+    const orchestration = data.orchestration ?? 'single-turn';
 
     assertText(data.topic, 'topic');
     assertText(data.traceId, 'traceId');
     assertTurns(maxTurns);
     assertRetries(maxRetries);
     assertDiscussionMode(mode);
+    if (!['single-turn', 'automatic'].includes(orchestration)) {
+      throw new Error('orchestration must be single-turn or automatic');
+    }
 
     this.db
       .prepare(
-        `INSERT INTO discussions (id, topic, mode, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id, collaboration_session_id)
-         VALUES (?, ?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO discussions (id, topic, mode, orchestration, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id, collaboration_session_id)
+         VALUES (?, ?, ?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, data.topic, mode, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId, data.collaborationSessionId ?? null);
+      .run(id, data.topic, mode, orchestration, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId, data.collaborationSessionId ?? null);
 
     return this.getDiscussion(id)!;
   }
@@ -333,7 +406,7 @@ export class Storage {
     try {
       return this.createCollaborationSession({ projectPath: data.projectPath, policy });
     } catch (error) {
-      if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
+      if (isUniqueConstraintError(error)) {
         const concurrent = this.db.prepare(
           `SELECT * FROM collaboration_sessions
            WHERE project_path = ? AND status = 'ACTIVE'
@@ -403,6 +476,157 @@ export class Storage {
     return rowToDiscussion(row);
   }
 
+  getPeerRuntime(discussionId: string): PeerRuntimeState | null {
+    const row = this.db.prepare('SELECT * FROM peer_runtime WHERE discussion_id = ?').get(discussionId) as Record<string, unknown> | undefined;
+    return row ? rowToPeerRuntime(row) : null;
+  }
+
+  upsertPeerRuntime(state: PeerRuntimeState): void {
+    const now = new Date().toISOString();
+    this.db.prepare(
+      `INSERT INTO peer_runtime (
+         discussion_id, dispatch_id, provider, state, started_at, last_activity_at,
+         last_provider_event_at, last_output_at, last_tool_started_at, current_tool,
+         process_alive, connection_alive, session_alive, elapsed_ms, idle_ms, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(discussion_id) DO UPDATE SET
+         dispatch_id = excluded.dispatch_id,
+         provider = excluded.provider,
+         state = excluded.state,
+         started_at = excluded.started_at,
+         last_activity_at = excluded.last_activity_at,
+         last_provider_event_at = excluded.last_provider_event_at,
+         last_output_at = excluded.last_output_at,
+         last_tool_started_at = excluded.last_tool_started_at,
+         current_tool = excluded.current_tool,
+         process_alive = excluded.process_alive,
+         connection_alive = excluded.connection_alive,
+         session_alive = excluded.session_alive,
+         elapsed_ms = excluded.elapsed_ms,
+         idle_ms = excluded.idle_ms,
+         updated_at = excluded.updated_at`,
+    ).run(
+      state.discussionId,
+      state.dispatchId,
+      state.provider,
+      state.state,
+      state.startedAt,
+      state.lastActivityAt,
+      state.lastProviderEventAt ?? null,
+      state.lastOutputAt ?? null,
+      state.lastToolStartedAt ?? null,
+      state.currentTool ?? null,
+      state.processAlive === undefined ? null : state.processAlive ? 1 : 0,
+      state.connectionAlive === undefined ? null : state.connectionAlive ? 1 : 0,
+      state.sessionAlive === undefined ? null : state.sessionAlive ? 1 : 0,
+      state.elapsedMs,
+      state.idleMs,
+      now,
+    );
+  }
+
+  appendPeerRuntimeEvent(event: Omit<PeerRuntimeEvent, 'id' | 'sequence' | 'timestamp'> & { timestamp?: string }): PeerRuntimeEvent {
+    const id = `pev_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+    const timestamp = event.timestamp ?? new Date().toISOString();
+    let sequence = 0;
+    this.transaction(() => {
+      const row = this.db.prepare(
+        'SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM peer_runtime_events WHERE discussion_id = ?',
+      ).get(event.discussionId) as { sequence: number };
+      sequence = Number(row.sequence);
+      this.db.prepare(
+        `INSERT INTO peer_runtime_events
+         (id, discussion_id, dispatch_id, sequence, provider, type, timestamp, public_summary, metadata)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        id,
+        event.discussionId,
+        event.dispatchId,
+        sequence,
+        event.provider,
+        event.type,
+        timestamp,
+        event.publicSummary ?? null,
+        JSON.stringify(event.metadata ?? {}),
+      );
+    });
+    return { ...event, id, sequence, timestamp, metadata: event.metadata ?? {} };
+  }
+
+  getPeerRuntimeEvents(discussionId: string, afterSequence = 0, limit = 100): PeerRuntimeEvent[] {
+    if (!Number.isInteger(afterSequence) || afterSequence < 0) throw new Error('afterSequence must be a non-negative integer');
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1_000) throw new Error('event limit must be between 1 and 1000');
+    const rows = this.db.prepare(
+      `SELECT * FROM peer_runtime_events
+       WHERE discussion_id = ? AND sequence > ?
+       ORDER BY sequence ASC LIMIT ?`,
+    ).all(discussionId, afterSequence, limit) as Record<string, unknown>[];
+    return rows.map(rowToPeerRuntimeEvent);
+  }
+
+  createPermissionRequest(request: PeerPermissionRequestInput): PermissionRequest {
+    const id = `prm_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+    const createdAt = new Date().toISOString();
+    this.db.prepare(
+      `INSERT INTO permission_requests
+       (id, discussion_id, dispatch_id, provider, method, action_type, command, paths, reason, risk, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)`,
+    ).run(
+      id,
+      request.discussionId,
+      request.dispatchId,
+      request.provider,
+      request.method,
+      request.actionType,
+      request.command ?? null,
+      request.paths ? JSON.stringify(request.paths) : null,
+      request.reason ?? null,
+      request.risk ?? 'unknown',
+      createdAt,
+    );
+    return this.getPermissionRequest(id)!;
+  }
+
+  getPermissionRequest(id: string): PermissionRequest | null {
+    const row = this.db.prepare('SELECT * FROM permission_requests WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return row ? rowToPermissionRequest(row) : null;
+  }
+
+  listPermissionRequests(discussionId: string, statuses?: PermissionRequestStatus[]): PermissionRequest[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM permission_requests
+       WHERE discussion_id = ?${statuses?.length ? ` AND status IN (${statuses.map(() => '?').join(', ')})` : ''}
+       ORDER BY created_at ASC`,
+    ).all(discussionId, ...(statuses ?? [])) as Record<string, unknown>[];
+    return rows.map(rowToPermissionRequest);
+  }
+
+  resolvePermissionRequest(id: string, decision: PermissionDecision, resolvedBy: PermissionRequest['resolvedBy'] = 'user'): PermissionRequest {
+    if (decision !== 'approve' && decision !== 'deny') throw new Error('Permission decision must be approve or deny');
+    const current = this.getPermissionRequest(id);
+    if (!current) throw new Error(`Permission request ${id} not found`);
+    if (current.status !== 'PENDING') return current;
+    const status: PermissionRequestStatus = decision === 'approve' ? 'APPROVED' : 'DENIED';
+    this.db.prepare(
+      `UPDATE permission_requests
+       SET status = ?, decision = ?, resolved_at = ?, resolved_by = ?
+       WHERE id = ? AND status = 'PENDING'`,
+    ).run(status, decision, new Date().toISOString(), resolvedBy, id);
+    return this.getPermissionRequest(id)!;
+  }
+
+  expirePermissionRequest(id: string): PermissionRequest {
+    const current = this.getPermissionRequest(id);
+    if (!current) throw new Error(`Permission request ${id} not found`);
+    if (current.status !== 'PENDING') return current;
+    this.db.prepare(
+      `UPDATE permission_requests
+       SET status = 'EXPIRED', resolved_at = ?
+       WHERE id = ? AND status = 'PENDING'`,
+    ).run(new Date().toISOString(), id);
+    return this.getPermissionRequest(id)!;
+  }
+
   updateDiscussionStatus(id: string, status: DiscussionStatus, extra?: Partial<Discussion>): void {
     const current = this.getDiscussion(id);
     if (!current) throw new Error(`Discussion ${id} not found`);
@@ -430,6 +654,17 @@ export class Storage {
       .run(mode, new Date().toISOString(), id);
   }
 
+  updateDiscussionPolicy(id: string, mode: DiscussionMode, orchestration: DiscussionOrchestration): void {
+    if (!this.getDiscussion(id)) throw new Error(`Discussion ${id} not found`);
+    assertDiscussionMode(mode);
+    if (!['single-turn', 'automatic'].includes(orchestration)) {
+      throw new Error('orchestration must be single-turn or automatic');
+    }
+    this.db.prepare(
+      'UPDATE discussions SET mode = ?, orchestration = ?, updated_at = ? WHERE id = ?',
+    ).run(mode, orchestration, new Date().toISOString(), id);
+  }
+
   updateDiscussionDispatch(id: string, state: DispatchState | null, waitingFor: AgentType | null = null): void {
     if (!this.getDiscussion(id)) throw new Error(`Discussion ${id} not found`);
     this.db
@@ -448,6 +683,13 @@ export class Storage {
        SET failed_dispatch_receiver = ?, failed_message_id = ?, failed_operation_kind = ?, updated_at = ?
        WHERE id = ?`,
     ).run(failure.receiver, failure.messageId, failure.operationKind, new Date().toISOString(), id);
+  }
+
+  updateDiscussionPending(id: string, operationKind: DiscussionOperationKind | null, messageId: string | null): void {
+    if (!this.getDiscussion(id)) throw new Error(`Discussion ${id} not found`);
+    this.db.prepare(
+      'UPDATE discussions SET pending_operation_kind = ?, pending_message_id = ?, updated_at = ? WHERE id = ?',
+    ).run(operationKind, messageId, new Date().toISOString(), id);
   }
 
   updateDiscussionSignal(id: string, signal: DiscussionSignal | null): void {
@@ -525,6 +767,9 @@ export class Storage {
         remove('decisions');
         remove('messages');
         remove('discussion_leases');
+        remove('permission_requests');
+        remove('peer_runtime_events');
+        remove('peer_runtime');
         const statement = this.db.prepare('DELETE FROM discussions WHERE id = ?');
         for (const id of discussionIds) statement.run(id);
       });
@@ -562,6 +807,53 @@ export class Storage {
     });
 
     return rows
+      .map((row) => this.getDiscussion(String(row.id)))
+      .filter((discussion): discussion is Discussion => discussion !== null);
+  }
+
+  recoverOrphanedDiscussions(isOwnerAlive: (ownerId: string) => boolean): Discussion[] {
+    const rows = this.db.prepare(
+      `SELECT d.*, l.owner_id AS lease_owner_id
+       FROM discussions d
+       LEFT JOIN discussion_leases l ON l.discussion_id = d.id
+       WHERE d.status IN ('CREATED', 'DISCUSSING', 'PEER_BUSY')
+         AND d.dispatch_state IN ('QUEUED', 'RUNNING')`,
+    ).all() as Array<Record<string, unknown> & { lease_owner_id?: string | null }>;
+    const orphaned = rows.filter((row) => !row.lease_owner_id || !isOwnerAlive(String(row.lease_owner_id)));
+    if (orphaned.length === 0) return [];
+    const now = new Date().toISOString();
+    this.transaction(() => {
+      for (const row of orphaned) {
+        this.db.prepare(
+          `UPDATE discussions
+           SET status = 'NEEDS_USER_DECISION', dispatch_state = 'FAILED', waiting_for = NULL,
+               stop_reason = 'PROVIDER_ERROR',
+               last_error = ?, ended_at = ?, updated_at = ?
+           WHERE id = ? AND status IN ('CREATED', 'DISCUSSING', 'PEER_BUSY')`,
+        ).run(JSON.stringify({
+          code: 'ORPHANED_DISPATCH',
+          message: 'The previous AgentBridge owner disappeared while the peer dispatch was active.',
+          backend: row.peer ?? row.driver,
+          retryable: false,
+          ambiguous: true,
+          at: now,
+        }), now, now, row.id);
+        this.db.prepare('DELETE FROM session_leases WHERE owner_id = ?').run(row.id);
+        this.db.prepare('DELETE FROM discussion_leases WHERE discussion_id = ?').run(row.id);
+        this.db.prepare(
+          `UPDATE permission_requests
+           SET status = 'EXPIRED', resolved_at = ?
+           WHERE discussion_id = ? AND status = 'PENDING'`,
+        ).run(now, row.id);
+        this.db.prepare(
+          `UPDATE peer_runtime
+           SET state = 'STALLED', process_alive = NULL, connection_alive = NULL,
+               session_alive = NULL, updated_at = ?
+           WHERE discussion_id = ?`,
+        ).run(now, row.id);
+      }
+    });
+    return orphaned
       .map((row) => this.getDiscussion(String(row.id)))
       .filter((discussion): discussion is Discussion => discussion !== null);
   }
@@ -732,6 +1024,10 @@ export class Storage {
     return { decisionHash: hash, agreedBy: rows.map((row) => row.agent) };
   }
 
+  clearAgreements(discussionId: string): void {
+    this.db.prepare('DELETE FROM agreements WHERE discussion_id = ?').run(discussionId);
+  }
+
   acquireSessionLease(data: {
     provider: AgentType;
     projectPath: string;
@@ -757,7 +1053,7 @@ export class Storage {
           .run(data.provider, data.projectPath, data.ownerId, acquiredAt.toISOString(), expiresAt.toISOString());
       });
     } catch (error) {
-      if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
+      if (isUniqueConstraintError(error)) {
         throw new SessionBusyError(`Session for ${data.provider} is already leased for project ${data.projectPath}`);
       }
       throw error;
@@ -1040,6 +1336,7 @@ function rowToDiscussion(row: Record<string, unknown>): Discussion {
     id: row.id as string,
     topic: row.topic as string,
     mode: (row.mode as DiscussionMode | null) ?? DEFAULT_DISCUSSION_MODE,
+    orchestration: (row.orchestration as DiscussionOrchestration | null) ?? 'single-turn',
     status: row.status as DiscussionStatus,
     driver,
     peer: (row.peer as AgentType | null) ?? (driver === 'claude' ? 'codex' : 'claude'),
@@ -1063,6 +1360,71 @@ function rowToDiscussion(row: Record<string, unknown>): Discussion {
     failedDispatchReceiver: (row.failed_dispatch_receiver as AgentType | null) ?? null,
     failedMessageId: (row.failed_message_id as string | null) ?? null,
     failedOperationKind: (row.failed_operation_kind as DiscussionOperationKind | null) ?? null,
+    pendingOperationKind: (row.pending_operation_kind as DiscussionOperationKind | null) ?? null,
+    pendingMessageId: (row.pending_message_id as string | null) ?? null,
+  };
+}
+
+function rowToPeerRuntime(row: Record<string, unknown>): PeerRuntimeState {
+  return {
+    discussionId: row.discussion_id as string,
+    dispatchId: row.dispatch_id as string,
+    provider: row.provider as AgentType,
+    state: row.state as PeerRuntimeState['state'],
+    startedAt: Number(row.started_at),
+    lastActivityAt: Number(row.last_activity_at),
+    ...(row.last_provider_event_at == null ? {} : { lastProviderEventAt: Number(row.last_provider_event_at) }),
+    ...(row.last_output_at == null ? {} : { lastOutputAt: Number(row.last_output_at) }),
+    ...(row.last_tool_started_at == null ? {} : { lastToolStartedAt: Number(row.last_tool_started_at) }),
+    ...(row.current_tool == null ? {} : { currentTool: String(row.current_tool) }),
+    ...(row.process_alive == null ? {} : { processAlive: Boolean(Number(row.process_alive)) }),
+    ...(row.connection_alive == null ? {} : { connectionAlive: Boolean(Number(row.connection_alive)) }),
+    ...(row.session_alive == null ? {} : { sessionAlive: Boolean(Number(row.session_alive)) }),
+    elapsedMs: Number(row.elapsed_ms),
+    idleMs: Number(row.idle_ms),
+  };
+}
+
+function rowToPeerRuntimeEvent(row: Record<string, unknown>): PeerRuntimeEvent {
+  return {
+    id: row.id as string,
+    sequence: Number(row.sequence),
+    discussionId: row.discussion_id as string,
+    dispatchId: row.dispatch_id as string,
+    provider: row.provider as AgentType,
+    type: row.type as PeerRuntimeEvent['type'],
+    timestamp: row.timestamp as string,
+    ...(row.public_summary == null ? {} : { publicSummary: String(row.public_summary) }),
+    metadata: parseJsonObject(row.metadata) ?? {},
+  };
+}
+
+function rowToPermissionRequest(row: Record<string, unknown>): PermissionRequest {
+  let paths: string[] | undefined;
+  if (typeof row.paths === 'string') {
+    try {
+      const parsed = JSON.parse(row.paths) as unknown;
+      if (Array.isArray(parsed)) paths = parsed.filter((value): value is string => typeof value === 'string');
+    } catch {
+      paths = undefined;
+    }
+  }
+  return {
+    id: row.id as string,
+    discussionId: row.discussion_id as string,
+    dispatchId: row.dispatch_id as string,
+    provider: row.provider as AgentType,
+    method: row.method as string,
+    actionType: row.action_type as string,
+    ...(row.command == null ? {} : { command: String(row.command) }),
+    ...(paths ? { paths } : {}),
+    ...(row.reason == null ? {} : { reason: String(row.reason) }),
+    risk: row.risk as PermissionRequest['risk'],
+    status: row.status as PermissionRequest['status'],
+    createdAt: row.created_at as string,
+    ...(row.resolved_at == null ? {} : { resolvedAt: String(row.resolved_at) }),
+    ...(row.resolved_by == null ? {} : { resolvedBy: row.resolved_by as PermissionRequest['resolvedBy'] }),
+    ...(row.decision == null ? {} : { decision: row.decision as PermissionDecision }),
   };
 }
 
@@ -1089,6 +1451,14 @@ function parseJsonObject(value: unknown): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function isUniqueConstraintError(error: unknown): boolean {
+  const code = error && typeof error === 'object' && 'code' in error
+    ? (error as { code?: unknown }).code
+    : undefined;
+  if (code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT_PRIMARYKEY') return true;
+  return error instanceof Error && /UNIQUE constraint failed|PRIMARY KEY constraint failed/i.test(error.message);
 }
 
 function rowToMessage(row: Record<string, unknown>): Message {

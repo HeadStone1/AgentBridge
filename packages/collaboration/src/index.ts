@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { StoragePort } from '@agentbridge/storage';
 import { AuditService } from '@agentbridge/audit';
-import type { AgentConnector, ProviderSessionKind } from '@agentbridge/connectors';
+import type { AgentConnector, PeerResponse, ProviderSessionKind } from '@agentbridge/connectors';
 import type {
   AgentType,
+  AgreementResolution,
   Discussion,
   DiscussionMode,
   SessionPolicy,
@@ -16,6 +17,15 @@ import type {
   RetryDiscussionOutput,
   WaitDiscussionOutput,
   DiscussionOperationKind,
+  PermissionDecision,
+  PermissionRequest,
+  PeerPermissionRequestInput,
+  PeerActivity,
+  PeerRuntimeEvent,
+  PeerRuntimeState,
+  PeerRuntimePhase,
+  WatchDiscussionOutput,
+  DiscussionNextAction,
 } from '@agentbridge/protocol';
 import {
   canRetry,
@@ -28,8 +38,10 @@ import {
 } from '@agentbridge/protocol';
 import {
   buildDiscussionPrompt,
+  buildAutomaticTurnPrompt,
   defaultMaxTurnsForMode,
   discussionPhase,
+  isAutomaticDiscussionMode,
   parseDiscussionSignal,
   resolveDiscussionMode,
 } from './discussionPolicy.js';
@@ -37,15 +49,24 @@ import {
 export {
   assertDiscussionMode,
   buildDiscussionPrompt,
+  buildAutomaticTurnPrompt,
   defaultMaxTurnsForMode,
   discussionPhase,
+  isAutomaticDiscussionMode,
   parseDiscussionSignal,
   resolveDiscussionMode,
 } from './discussionPolicy.js';
 
 export interface CollaborationConfig {
   maxTurns?: number;
+  /** Legacy alias for idleTimeoutMs and the session-lease TTL. */
   timeoutMs?: number;
+  startupTimeoutMs?: number;
+  idleTimeoutMs?: number;
+  stallGraceMs?: number;
+  turnHardLimitMs?: number;
+  permissionTimeoutMs?: number;
+  terminationGraceMs?: number;
   maxDurationMs?: number;
   maxTotalMessageChars?: number;
   asyncDispatch?: boolean;
@@ -67,6 +88,12 @@ export class CollaborationService {
   private readonly maxTurns: number;
   private readonly maxTurnsWasConfigured: boolean;
   private readonly timeoutMs: number;
+  private readonly startupTimeoutMs: number;
+  private readonly idleTimeoutMs: number;
+  private readonly stallGraceMs: number;
+  private readonly turnHardLimitMs: number;
+  private readonly permissionTimeoutMs: number;
+  private readonly terminationGraceMs: number;
   private readonly maxDurationMs: number;
   private readonly maxTotalMessageChars: number;
   private readonly asyncDispatch: boolean;
@@ -75,6 +102,7 @@ export class CollaborationService {
   private readonly connectors: ConnectorRegistry;
   private readonly ownerId = `collaboration:${process.pid}:${randomUUID()}`;
   private readonly inFlight = new Map<string, InFlightOperation>();
+  private readonly automaticRuns = new Set<string>();
   private readonly cancellationRequests = new Set<string>();
   private shuttingDown = false;
 
@@ -88,7 +116,15 @@ export class CollaborationService {
     this.audit = audit;
     this.maxTurnsWasConfigured = config.maxTurns !== undefined;
     this.maxTurns = config.maxTurns ?? 12;
+    this.idleTimeoutMs = config.idleTimeoutMs ?? config.timeoutMs ?? 120_000;
+    // Keep lease renewal independent from the provider's output-idle budget.
+    // A short idle threshold must not make a healthy session lease expire.
     this.timeoutMs = config.timeoutMs ?? 120_000;
+    this.startupTimeoutMs = config.startupTimeoutMs ?? 30_000;
+    this.stallGraceMs = config.stallGraceMs ?? 180_000;
+    this.turnHardLimitMs = config.turnHardLimitMs ?? config.timeoutMs ?? 30 * 60 * 1_000;
+    this.permissionTimeoutMs = config.permissionTimeoutMs ?? 120_000;
+    this.terminationGraceMs = config.terminationGraceMs ?? 5_000;
     this.maxDurationMs = config.maxDurationMs ?? 30 * 60 * 1_000;
     this.maxTotalMessageChars = config.maxTotalMessageChars ?? 500_000;
     this.asyncDispatch = config.asyncDispatch ?? false;
@@ -101,6 +137,24 @@ export class CollaborationService {
     if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1_000 || this.timeoutMs > 600_000) {
       throw new Error('timeoutMs must be an integer between 1000 and 600000');
     }
+    if (!Number.isInteger(this.idleTimeoutMs) || this.idleTimeoutMs < 1_000 || this.idleTimeoutMs > 600_000) {
+      throw new Error('idleTimeoutMs must be an integer between 1000 and 600000');
+    }
+    if (!Number.isInteger(this.startupTimeoutMs) || this.startupTimeoutMs < 1_000 || this.startupTimeoutMs > 600_000) {
+      throw new Error('startupTimeoutMs must be an integer between 1000 and 600000');
+    }
+    if (!Number.isInteger(this.stallGraceMs) || this.stallGraceMs < 1_000 || this.stallGraceMs > 600_000) {
+      throw new Error('stallGraceMs must be an integer between 1000 and 600000');
+    }
+    if (!Number.isInteger(this.turnHardLimitMs) || this.turnHardLimitMs < 1_000 || this.turnHardLimitMs > 7 * 24 * 60 * 60 * 1_000) {
+      throw new Error('turnHardLimitMs must be an integer between 1000 and 604800000');
+    }
+    if (!Number.isInteger(this.permissionTimeoutMs) || this.permissionTimeoutMs < 1_000 || this.permissionTimeoutMs > 600_000) {
+      throw new Error('permissionTimeoutMs must be an integer between 1000 and 600000');
+    }
+    if (!Number.isInteger(this.terminationGraceMs) || this.terminationGraceMs < 1_000 || this.terminationGraceMs > 60_000) {
+      throw new Error('terminationGraceMs must be an integer between 1000 and 60000');
+    }
     if (!Number.isInteger(this.maxDurationMs) || this.maxDurationMs < 1_000 || this.maxDurationMs > 7 * 24 * 60 * 60 * 1_000) {
       throw new Error('maxDurationMs must be an integer between 1000 and 604800000');
     }
@@ -108,6 +162,7 @@ export class CollaborationService {
       throw new Error('maxTotalMessageChars must be an integer between 1000 and 10000000');
     }
     this.connectors = connectors;
+    this.storage.recoverOrphanedDiscussions(isOwnerProcessAlive);
   }
 
   async initiateDiscussion(params: {
@@ -129,6 +184,9 @@ export class CollaborationService {
       throw new Error('maxTurns must be an integer between 1 and 50');
     }
     assertParticipants(params.driver, params.peer);
+    const automatic = isAutomaticDiscussionMode(mode);
+    if (automatic) this.ensureAutomaticConnectors(params.driver, params.peer);
+    const orchestration = automatic ? 'automatic' : 'single-turn';
     assertText(params.initialMessage, 'message');
     if (params.initialMessage.length > this.maxTotalMessageChars) {
       throw new Error('Discussion message budget exceeded');
@@ -147,6 +205,7 @@ export class CollaborationService {
       mode,
       maxTurns,
       collaborationSessionId: collaborationSession.id,
+      orchestration,
     });
 
     this.audit.log({
@@ -160,6 +219,7 @@ export class CollaborationService {
         projectPath,
         mode,
         maxTurns,
+        orchestration,
         sessionPolicy,
         collaborationSessionId: collaborationSession.id,
       },
@@ -185,6 +245,49 @@ export class CollaborationService {
     this.storage.updateDiscussionStatus(discussion.id, 'DISCUSSING');
     this.queueDispatch(discussion.id, params.peer);
 
+    if (automatic) {
+      if (this.asyncDispatch) {
+        this.startBackgroundAutomaticDiscussion(
+          discussion.id,
+          params.initialMessage,
+          message.id,
+          params.peer,
+        );
+        return {
+          discussionId: discussion.id,
+          collaborationSessionId: collaborationSession.id,
+          peer: params.peer,
+          mode,
+          maxTurns,
+          orchestration,
+          messageId: message.id,
+          status: 'DISCUSSING',
+          nextAction: 'WAIT',
+          dispatchState: 'QUEUED',
+        };
+      }
+      const latestResponse = await this.runAutomaticDiscussion(
+        discussion.id,
+        params.initialMessage,
+        message.id,
+        params.peer,
+      );
+      const current = this.storage.getDiscussion(discussion.id);
+      return {
+        discussionId: discussion.id,
+        collaborationSessionId: collaborationSession.id,
+        peer: params.peer,
+        mode,
+        maxTurns,
+        orchestration,
+        messageId: message.id,
+        status: current?.status ?? 'DISCUSSING',
+        nextAction: this.nextActionFor(current),
+        dispatchState: current?.dispatchState ?? (latestResponse ? 'COMPLETED' : 'FAILED'),
+        ...(latestResponse ? { peerResponse: latestResponse } : {}),
+      };
+    }
+
     if (this.asyncDispatch) {
       this.startBackgroundDispatch(
         discussion.id,
@@ -199,8 +302,10 @@ export class CollaborationService {
         peer: params.peer,
         mode,
         maxTurns,
+        orchestration,
         messageId: message.id,
         status: 'DISCUSSING',
+        nextAction: 'WAIT',
         dispatchState: 'QUEUED',
       };
     }
@@ -218,8 +323,10 @@ export class CollaborationService {
       peer: params.peer,
       mode,
       maxTurns,
+      orchestration,
       messageId: message.id,
       status: current?.status ?? 'DISCUSSING',
+      nextAction: this.nextActionFor(current),
       dispatchState: peerResponse ? 'COMPLETED' : 'FAILED',
       ...(peerResponse ? { peerResponse } : {}),
     };
@@ -241,6 +348,9 @@ export class CollaborationService {
     if (![discussion.driver, discussion.peer].includes(params.sender)) {
       throw new Error(`Agent ${params.sender} is not a participant in discussion ${params.discussionId}`);
     }
+    if (discussion.orchestration === 'automatic' && this.automaticRuns.has(params.discussionId)) {
+      throw new ProviderError('BUSY', `Discussion ${params.discussionId} is being automatically orchestrated`);
+    }
     const requestedMode = params.mode === undefined ? undefined : resolveDiscussionMode(params.mode);
     if (requestedMode && discussionModeRank(requestedMode) < discussionModeRank(discussion.mode)) {
       throw new Error(`Discussion mode cannot be downgraded from ${discussion.mode} to ${requestedMode}`);
@@ -261,7 +371,13 @@ export class CollaborationService {
       throw new Error(`Discussion ${params.discussionId} reached its provider response limit (${discussion.maxTurns})`);
     }
 
-    const receiver = params.sender === discussion.driver ? discussion.peer : discussion.driver;
+    const receiver = resumesUserDecision && discussion.waitingFor
+      ? discussion.waitingFor
+      : params.sender === discussion.driver ? discussion.peer : discussion.driver;
+    const requestedAutomatic = requestedMode
+      ? isAutomaticDiscussionMode(requestedMode)
+      : discussion.orchestration === 'automatic';
+    if (requestedAutomatic) this.ensureAutomaticConnectors(discussion.driver, discussion.peer);
     this.ensureProviderNotLeased(receiver, discussion.projectPath);
     this.storage.acquireDiscussionLease({
       discussionId: params.discussionId,
@@ -272,7 +388,11 @@ export class CollaborationService {
     let discussionLeaseOwned = true;
     try {
       if (requestedMode && requestedMode !== discussion.mode) {
-        this.storage.updateDiscussionMode(params.discussionId, requestedMode);
+        this.storage.updateDiscussionPolicy(
+          params.discussionId,
+          requestedMode,
+          requestedAutomatic ? 'automatic' : 'single-turn',
+        );
         this.audit.log({
           traceId: discussion.traceId,
           discussionId: discussion.id,
@@ -309,8 +429,38 @@ export class CollaborationService {
       }
 
       this.storage.updateDiscussionStatus(params.discussionId, 'DISCUSSING');
+      if (resumesUserDecision) this.storage.updateDiscussionDiagnostic(params.discussionId, null);
       this.queueDispatch(params.discussionId, receiver);
       const previousMessages = this.storage.getMessages(params.discussionId).slice(0, -1);
+      if (requestedAutomatic) {
+        const originalRequest = previousMessages[0]?.content ?? params.reply;
+        if (this.asyncDispatch) {
+          this.startBackgroundAutomaticDiscussion(
+            params.discussionId,
+            originalRequest,
+            message.id,
+            receiver,
+          );
+          discussionLeaseOwned = false;
+          return { messageId: message.id, status: 'DISCUSSING', nextAction: 'WAIT', dispatchState: 'QUEUED' };
+        }
+        this.storage.releaseDiscussionLease(params.discussionId, this.ownerId);
+        discussionLeaseOwned = false;
+        const peerResponse = await this.runAutomaticDiscussion(
+          params.discussionId,
+          originalRequest,
+          message.id,
+          receiver,
+        );
+        const current = this.storage.getDiscussion(params.discussionId);
+        return {
+          messageId: message.id,
+          status: current?.status ?? 'DISCUSSING',
+          nextAction: this.nextActionFor(current),
+          dispatchState: current?.dispatchState ?? (peerResponse ? 'COMPLETED' : 'FAILED'),
+          ...(peerResponse ? { peerResponse } : {}),
+        };
+      }
       if (this.asyncDispatch) {
         this.startBackgroundDispatch(
           params.discussionId,
@@ -324,7 +474,7 @@ export class CollaborationService {
           },
         );
         discussionLeaseOwned = false;
-        return { messageId: message.id, status: 'DISCUSSING', dispatchState: 'QUEUED' };
+        return { messageId: message.id, status: 'DISCUSSING', nextAction: 'WAIT', dispatchState: 'QUEUED' };
       }
       const peerResponse = await this.dispatchToAgent(
         params.discussionId,
@@ -337,6 +487,7 @@ export class CollaborationService {
       return {
         messageId: message.id,
         status: current?.status ?? 'DISCUSSING',
+        nextAction: this.nextActionFor(current),
         dispatchState: peerResponse ? 'COMPLETED' : 'FAILED',
         ...(peerResponse ? { peerResponse } : {}),
       };
@@ -353,6 +504,9 @@ export class CollaborationService {
       discussion,
       messages: this.storage.getMessages(discussionId),
       decision: this.storage.getDecisionByDiscussion(discussionId),
+      peerRuntime: this.readPeerRuntime(discussionId),
+      pendingPermissions: this.storage.listPermissionRequests(discussionId, ['PENDING']),
+      nextAction: this.nextActionFor(discussion),
       providerSessions: this.storage.listSessionsForDiscussion(discussionId).map((session) => ({
         provider: session.provider,
         sessionId: session.sessionId,
@@ -361,6 +515,92 @@ export class CollaborationService {
         lastSeenAt: session.lastSeenAt,
       })),
     };
+  }
+
+  async watchDiscussion(
+    discussionId: string,
+    timeoutMs = 30_000,
+    afterSequence = 0,
+  ): Promise<WatchDiscussionOutput> {
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 120_000) {
+      throw new Error('timeoutMs must be an integer between 1000 and 120000');
+    }
+    if (!Number.isInteger(afterSequence) || afterSequence < 0) {
+      throw new Error('afterSequence must be a non-negative integer');
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      const events = this.storage.getPeerRuntimeEvents(discussionId, afterSequence, 1_000);
+      if (events.length > 0) {
+        const snapshot = await this.getDiscussion(discussionId);
+        return {
+          ...snapshot,
+          events,
+          waitTimedOut: false,
+          lastSequence: events.at(-1)?.sequence ?? afterSequence,
+        };
+      }
+      const snapshot = await this.getDiscussion(discussionId);
+      if (isTerminal(snapshot.discussion.status) || isPaused(snapshot.discussion.status)) {
+        return { ...snapshot, events: [], waitTimedOut: false, lastSequence: afterSequence || null };
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        return { ...snapshot, events: [], waitTimedOut: true, lastSequence: afterSequence || null };
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(200, remaining)));
+    }
+  }
+
+  listPermissionRequests(discussionId: string, includeResolved = false): PermissionRequest[] {
+    return includeResolved
+      ? this.storage.listPermissionRequests(discussionId)
+      : this.storage.listPermissionRequests(discussionId, ['PENDING']);
+  }
+
+  resolvePermission(params: {
+    permissionId: string;
+    decision: PermissionDecision;
+    agent?: AgentType;
+  }): PermissionRequest {
+    const request = this.storage.getPermissionRequest(params.permissionId);
+    if (!request) throw new Error(`Permission request ${params.permissionId} not found`);
+    const discussion = this.storage.getDiscussion(request.discussionId);
+    if (!discussion) throw new Error(`Discussion ${request.discussionId} not found`);
+    if (params.agent && ![discussion.driver, discussion.peer].includes(params.agent)) {
+      throw new Error(`Agent ${params.agent} is not a participant in discussion ${discussion.id}`);
+    }
+    const resolved = this.storage.resolvePermissionRequest(
+      request.id,
+      params.decision,
+      params.agent ? 'driver-policy' : 'user',
+    );
+    this.audit.log({
+      traceId: discussion.traceId,
+      discussionId: discussion.id,
+      action: 'permission.resolved',
+      agent: params.agent ?? 'system',
+      metadata: { permissionId: request.id, decision: params.decision, status: resolved.status },
+    });
+    return resolved;
+  }
+
+  private readPeerRuntime(discussionId: string): PeerRuntimeState | null {
+    const runtime = this.storage.getPeerRuntime(discussionId);
+    if (!runtime) return null;
+    const now = Date.now();
+    const elapsedMs = Math.max(0, now - runtime.startedAt);
+    const idleMs = Math.max(0, now - runtime.lastActivityAt);
+    let state = runtime.state;
+    if (!['COMPLETED', 'FAILED', 'STALLED'].includes(state)) {
+      if (state === 'STARTING' && elapsedMs >= this.startupTimeoutMs) state = 'STALLED';
+      else if (state !== 'WAITING_PERMISSION' && idleMs >= this.idleTimeoutMs) {
+        state = idleMs >= this.idleTimeoutMs + this.stallGraceMs && !runtime.currentTool
+          ? 'STALLED'
+          : 'IDLE_SUSPECTED';
+      }
+    }
+    return { ...runtime, state, elapsedMs, idleMs };
   }
 
   async waitForDiscussion(
@@ -382,7 +622,9 @@ export class CollaborationService {
         : false;
       const settled = isTerminal(snapshot.discussion.status)
         || isPaused(snapshot.discussion.status)
-        || (snapshot.discussion.dispatchState !== 'QUEUED' && snapshot.discussion.dispatchState !== 'RUNNING');
+        || (!isAutomaticDiscussion(snapshot.discussion)
+          && snapshot.discussion.dispatchState !== 'QUEUED'
+          && snapshot.discussion.dispatchState !== 'RUNNING');
       if (hasNewMessage || settled) return { ...snapshot, waitTimedOut: false, lastMessageId };
       const remaining = deadline - Date.now();
       if (remaining <= 0) return { ...snapshot, waitTimedOut: true, lastMessageId };
@@ -517,18 +759,27 @@ export class CollaborationService {
 
     const peerDecision = parseAgreementResponse(peerResponse.content, agreement.decisionHash);
     if (!peerDecision.accepted) {
-      this.storage.updateDiscussionDispatch(params.discussionId, 'COMPLETED', params.agent);
+      const unresolved = peerDecision.resolution === 'user_decision';
+      this.storage.updateDiscussionDispatch(params.discussionId, 'COMPLETED', unresolved ? null : params.agent);
+      if (unresolved) {
+        this.storage.updateDiscussionSignal(params.discussionId, 'NEEDS_USER_DECISION');
+        this.storage.updateDiscussionStatus(params.discussionId, 'NEEDS_USER_DECISION');
+        this.storage.updateDiscussionDiagnostic(params.discussionId, 'UNRESOLVED_DISAGREEMENT');
+      }
       this.audit.log({
         traceId: discussion.traceId,
         discussionId: params.discussionId,
         action: 'agreement.rejected',
         agent: otherAgent,
-        metadata: { reason: peerDecision.reason ?? 'invalid_or_rejected_response' },
+        metadata: {
+          reason: peerDecision.reason ?? 'invalid_or_rejected_response',
+          resolution: peerDecision.resolution,
+        },
       });
       return {
         discussionId: params.discussionId,
-        status: 'DISCUSSING',
-        waitingFor: [params.agent],
+        status: unresolved ? 'NEEDS_USER_DECISION' : 'DISCUSSING',
+        ...(unresolved ? {} : { waitingFor: [params.agent] }),
         peerAccepted: false,
         dispatchState: 'COMPLETED',
         peerResponse,
@@ -677,6 +928,13 @@ export class CollaborationService {
       throw new Error(`Discussion ${params.discussionId} cannot be retried from ${discussion.status}`);
     }
     this.ensureNoDispatchInFlight(params.discussionId);
+    const runtime = this.readPeerRuntime(params.discussionId);
+    if (runtime && (
+      ['STARTING', 'RUNNING', 'WAITING_TOOL', 'WAITING_PERMISSION', 'GENERATING', 'IDLE_SUSPECTED'].includes(runtime.state)
+      || (runtime.state === 'STALLED' && runtime.processAlive !== false)
+    )) {
+      throw new Error(`Discussion ${params.discussionId} cannot retry while peer runtime is ${runtime.state} (PEER_STILL_RUNNING)`);
+    }
     if (discussion.retryCount >= discussion.maxRetries) {
       throw new Error(`Discussion ${params.discussionId} exhausted its maxRetries budget`);
     }
@@ -710,7 +968,10 @@ export class CollaborationService {
       failedMessageId || failedReceiver || discussion.failedOperationKind,
     );
     if (hasFailureMetadata) {
-      if (!failedMessageId || !failedReceiver || discussion.failedOperationKind !== 'peer_message') {
+      const retryableOperation = discussion.failedOperationKind === 'peer_message'
+        || discussion.failedOperationKind === 'automatic_turn'
+        || discussion.failedOperationKind === 'agreement_confirmation';
+      if (!failedMessageId || !failedReceiver || !retryableOperation) {
         throw new Error(`Discussion ${params.discussionId} has no retryable failed peer dispatch`);
       }
       if (!failedMessage || failedMessage.receiver !== failedReceiver) {
@@ -730,6 +991,39 @@ export class CollaborationService {
     }
     if (!failedMessage || !failedMessageId || !failedReceiver) {
       throw new Error(`Discussion ${params.discussionId} has inconsistent failed dispatch metadata`);
+    }
+
+    if (discussion.orchestration === 'automatic') {
+      if (discussion.status === 'FAILED') this.storage.updateDiscussionStatus(params.discussionId, 'CREATED');
+      this.storage.updateDiscussionStatus(params.discussionId, 'DISCUSSING');
+      this.queueDispatch(params.discussionId, failedReceiver);
+      const originalRequest = messages[0]?.content ?? failedMessage.content;
+      if (this.asyncDispatch) {
+        this.storage.updateDiscussionPending(params.discussionId, discussion.failedOperationKind, failedMessageId);
+        if (discussion.failedOperationKind === 'agreement_confirmation') {
+          this.startBackgroundAutomaticAgreementRetry(params.discussionId, originalRequest, failedMessage, failedReceiver);
+        } else {
+          this.startBackgroundAutomaticDiscussion(params.discussionId, originalRequest, failedMessageId, failedReceiver);
+        }
+        return {
+          discussionId: params.discussionId,
+          status: 'DISCUSSING',
+          retryCount: discussion.retryCount,
+          dispatchState: 'QUEUED',
+        };
+      }
+      if (discussion.failedOperationKind === 'agreement_confirmation') {
+        await this.runAutomaticAgreementRetry(params.discussionId, originalRequest, failedMessage, failedReceiver);
+      } else {
+        await this.runAutomaticDiscussion(params.discussionId, originalRequest, failedMessageId, failedReceiver);
+      }
+      const resumed = this.storage.getDiscussion(params.discussionId);
+      return {
+        discussionId: params.discussionId,
+        status: resumed?.status === 'NEEDS_USER_DECISION' ? 'NEEDS_USER_DECISION' : 'DISCUSSING',
+        retryCount: discussion.retryCount,
+        dispatchState: resumed?.dispatchState ?? 'FAILED',
+      };
     }
     this.ensureProviderNotLeased(failedReceiver, discussion.projectPath);
     this.storage.acquireDiscussionLease({
@@ -798,6 +1092,312 @@ export class CollaborationService {
     }
   }
 
+  private startBackgroundAutomaticDiscussion(
+    discussionId: string,
+    originalRequest: string,
+    initialMessageId: string,
+    receiver: AgentType,
+  ): void {
+    void this.runAutomaticDiscussion(discussionId, originalRequest, initialMessageId, receiver).catch(() => {
+      // The provider failure and resumable step are persisted by the dispatch.
+    });
+  }
+
+  private startBackgroundAutomaticAgreementRetry(
+    discussionId: string,
+    originalRequest: string,
+    conclusionMessage: Message,
+    receiver: AgentType,
+  ): void {
+    void this.runAutomaticAgreementRetry(discussionId, originalRequest, conclusionMessage, receiver).catch(() => {
+      // The provider failure and resumable step are persisted by the dispatch.
+    });
+  }
+
+  private async runAutomaticAgreementRetry(
+    discussionId: string,
+    originalRequest: string,
+    conclusionMessage: Message,
+    receiver: AgentType,
+  ): Promise<void> {
+    if (this.automaticRuns.has(discussionId)) {
+      throw new ProviderError('BUSY', `Discussion ${discussionId} already has an automatic run`);
+    }
+    this.automaticRuns.add(discussionId);
+    let handedOff = false;
+    try {
+      const discussion = this.storage.getDiscussion(discussionId);
+      if (!discussion) throw new Error(`Discussion ${discussionId} not found`);
+      const conclusion = conclusionMessage.content;
+      this.storage.clearAgreements(discussionId);
+      const agreement = this.storage.recordAgreement({
+        discussionId,
+        agent: conclusionMessage.sender,
+        summary: conclusion,
+      });
+      const messages = this.storage.getMessages(discussionId);
+      this.storage.updateDiscussionPending(discussionId, 'agreement_confirmation', conclusionMessage.id);
+      this.storage.updateDiscussionDispatch(discussionId, 'RUNNING', receiver);
+      const peerResponse = await this.dispatchToAgent(
+        discussionId,
+        receiver,
+        buildAgreementPrompt(conclusion, agreement.decisionHash),
+        messages,
+        {
+          applyDiscussionPolicy: false,
+          countRound: false,
+          failedMessageId: conclusionMessage.id,
+          operationKind: 'agreement_confirmation',
+        },
+      );
+      if (!peerResponse) return;
+      const decision = parseAgreementResponse(peerResponse.content, agreement.decisionHash);
+      if (decision.accepted) {
+        const peerAgreement = this.storage.recordAgreement({
+          discussionId,
+          agent: receiver,
+          summary: conclusion,
+        });
+        this.storage.updateDiscussionSignal(discussionId, 'READY_TO_CLOSE');
+        this.completeDiscussion(discussion, conclusion, peerAgreement.agreedBy);
+        return;
+      }
+      this.storage.clearAgreements(discussionId);
+      this.storage.updateDiscussionSignal(
+        discussionId,
+        decision.resolution === 'user_decision' ? 'NEEDS_USER_DECISION' : 'CONTINUE',
+      );
+      if (decision.resolution === 'user_decision') {
+        this.storage.updateDiscussionStatus(discussionId, 'NEEDS_USER_DECISION');
+        this.storage.updateDiscussionDiagnostic(discussionId, 'UNRESOLVED_DISAGREEMENT');
+      }
+      this.audit.log({
+        traceId: discussion.traceId,
+        discussionId,
+        action: 'agreement.rejected',
+        agent: receiver,
+        metadata: {
+          reason: decision.reason ?? 'invalid_or_rejected_response',
+          resolution: decision.resolution,
+          automatic: true,
+          retry: true,
+        },
+      });
+      if (decision.resolution === 'user_decision') return;
+      handedOff = true;
+      await this.runAutomaticDiscussion(discussionId, originalRequest, peerResponse.id, conclusionMessage.sender);
+    } finally {
+      if (!handedOff) this.automaticRuns.delete(discussionId);
+    }
+  }
+
+  private async runAutomaticDiscussion(
+    discussionId: string,
+    originalRequest: string,
+    initialMessageId: string,
+    initialReceiver: AgentType,
+  ): Promise<Message | undefined> {
+    if (this.automaticRuns.has(discussionId)) {
+      throw new ProviderError('BUSY', `Discussion ${discussionId} already has an automatic run`);
+    }
+    this.automaticRuns.add(discussionId);
+    let latestMessageId = initialMessageId;
+    let receiver = initialReceiver;
+    let latestMessage = this.storage.getMessages(discussionId).find((message) => message.id === latestMessageId);
+    try {
+      while (latestMessage) {
+        const discussion = this.storage.getDiscussion(discussionId);
+        if (!discussion || isTerminal(discussion.status) || isPaused(discussion.status)) return latestMessage;
+        if (discussion.roundCount >= discussion.maxTurns) {
+          this.stopAutomaticAtMaxTurns(discussion);
+          return latestMessage;
+        }
+
+        const previousMessages = this.storage.getMessages(discussionId)
+          .filter((message) => message.id !== latestMessageId);
+        const prompt = buildAutomaticTurnPrompt({
+          mode: discussion.mode,
+          completedResponses: discussion.roundCount,
+          maxTurns: discussion.maxTurns,
+          originalRequest,
+          latestMessage: latestMessage.content,
+          latestSender: latestMessage.sender,
+        });
+        this.storage.updateDiscussionPending(discussionId, 'automatic_turn', latestMessageId);
+        this.storage.updateDiscussionDispatch(discussionId, 'RUNNING', receiver);
+        const response = await this.dispatchToAgent(
+          discussionId,
+          receiver,
+          prompt,
+          previousMessages,
+          {
+            applyDiscussionPolicy: false,
+            failedMessageId: latestMessageId,
+            operationKind: 'automatic_turn',
+          },
+        );
+        if (!response) {
+          const failed = this.storage.getDiscussion(discussionId);
+          if (failed?.status === 'DISCUSSING') this.storage.updateDiscussionStatus(discussionId, 'FAILED');
+          return latestMessage;
+        }
+
+        latestMessage = response;
+        latestMessageId = response.id;
+        this.storage.updateDiscussionPending(discussionId, null, null);
+        const rawSignal = parseDiscussionSignal(response.content);
+        const afterResponse = this.storage.getDiscussion(discussionId);
+        if (!afterResponse) return response;
+
+        if (rawSignal === 'NEEDS_USER_DECISION') {
+          this.storage.updateDiscussionSignal(discussionId, rawSignal);
+          this.storage.updateDiscussionStatus(discussionId, 'NEEDS_USER_DECISION');
+          this.storage.updateDiscussionDiagnostic(discussionId, 'PEER_REQUESTED_USER_DECISION');
+          this.storage.updateDiscussionDispatch(discussionId, 'COMPLETED', receiver);
+          return response;
+        }
+
+        const mayConverge = rawSignal === 'READY_TO_CLOSE';
+        if (mayConverge) {
+          const confirmation = await this.confirmAutomaticConclusion(afterResponse, response);
+          if (confirmation.accepted) return confirmation.response ?? response;
+          if (confirmation.resolution === 'user_decision') {
+            return confirmation.response ?? response;
+          }
+          if (confirmation.response) {
+            latestMessage = confirmation.response;
+            latestMessageId = confirmation.response.id;
+          }
+          receiver = response.sender;
+          continue;
+        }
+
+        this.storage.updateDiscussionSignal(discussionId, rawSignal);
+        if (afterResponse.roundCount >= afterResponse.maxTurns) {
+          this.stopAutomaticAtMaxTurns(afterResponse);
+          return response;
+        }
+        receiver = oppositeAgent(receiver);
+        this.storage.updateDiscussionDispatch(discussionId, 'RUNNING', receiver);
+      }
+      return latestMessage;
+    } finally {
+      this.storage.updateDiscussionPending(discussionId, null, null);
+      this.automaticRuns.delete(discussionId);
+    }
+  }
+
+  private async confirmAutomaticConclusion(
+    discussion: Discussion,
+    candidate: Message,
+  ): Promise<{ accepted: boolean; response?: Message; resolution?: AgreementResolution }> {
+    const conclusion = stripDiscussionSignal(candidate.content);
+    if (!conclusion) return { accepted: false };
+    const otherAgent = oppositeAgent(candidate.sender);
+    this.storage.clearAgreements(discussion.id);
+    const agreement = this.storage.recordAgreement({
+      discussionId: discussion.id,
+      agent: candidate.sender,
+      summary: conclusion,
+    });
+    const conclusionMessage = this.storage.createMessage({
+      discussionId: discussion.id,
+      sender: candidate.sender,
+      receiver: otherAgent,
+      role: 'conclusion',
+      content: conclusion,
+      parentMessageId: candidate.id,
+      projectPath: discussion.projectPath,
+    });
+    const messages = this.storage.getMessages(discussion.id);
+    const agreementPrompt = buildAgreementPrompt(conclusion, agreement.decisionHash);
+    this.storage.updateDiscussionPending(discussion.id, 'agreement_confirmation', conclusionMessage.id);
+    this.storage.updateDiscussionDispatch(discussion.id, 'RUNNING', otherAgent);
+    const peerResponse = await this.dispatchToAgent(
+      discussion.id,
+      otherAgent,
+      agreementPrompt,
+      messages,
+      {
+        applyDiscussionPolicy: false,
+        countRound: false,
+        failedMessageId: conclusionMessage.id,
+        operationKind: 'agreement_confirmation',
+      },
+    );
+    if (!peerResponse) return { accepted: false };
+    const decision = parseAgreementResponse(peerResponse.content, agreement.decisionHash);
+    if (!decision.accepted) {
+      this.storage.clearAgreements(discussion.id);
+      this.storage.updateDiscussionSignal(discussion.id, decision.resolution === 'user_decision' ? 'NEEDS_USER_DECISION' : 'CONTINUE');
+      if (decision.resolution === 'user_decision') {
+        this.storage.updateDiscussionStatus(discussion.id, 'NEEDS_USER_DECISION');
+        this.storage.updateDiscussionDiagnostic(discussion.id, 'UNRESOLVED_DISAGREEMENT');
+      }
+      this.audit.log({
+        traceId: discussion.traceId,
+        discussionId: discussion.id,
+        action: 'agreement.rejected',
+        agent: otherAgent,
+        metadata: {
+          reason: decision.reason ?? 'invalid_or_rejected_response',
+          resolution: decision.resolution,
+          automatic: true,
+        },
+      });
+      return { accepted: false, response: peerResponse, resolution: decision.resolution };
+    }
+    const peerAgreement = this.storage.recordAgreement({
+      discussionId: discussion.id,
+      agent: otherAgent,
+      summary: conclusion,
+    });
+    this.audit.log({
+      traceId: discussion.traceId,
+      discussionId: discussion.id,
+      action: `agreement.${otherAgent}`,
+      agent: otherAgent,
+      metadata: { decisionHash: peerAgreement.decisionHash, source: 'automatic_confirmation' },
+    });
+    this.storage.updateDiscussionSignal(discussion.id, 'READY_TO_CLOSE');
+    this.completeDiscussion(discussion, conclusion, peerAgreement.agreedBy);
+    return { accepted: true, response: peerResponse };
+  }
+
+  private stopAutomaticAtMaxTurns(discussion: Discussion): void {
+    if (discussion.status === 'DISCUSSING') {
+      this.storage.updateDiscussionStatus(discussion.id, 'NEEDS_USER_DECISION');
+    }
+    this.storage.updateDiscussionDiagnostic(discussion.id, 'MAX_TURNS');
+    this.storage.updateDiscussionDispatch(discussion.id, 'FAILED', null);
+    this.audit.log({
+      traceId: discussion.traceId,
+      discussionId: discussion.id,
+      action: 'discussion.max_turns',
+      agent: 'system',
+      metadata: { roundCount: discussion.roundCount, maxTurns: discussion.maxTurns },
+    });
+  }
+
+  private nextActionFor(discussion: Discussion | null): DiscussionNextAction {
+    if (!discussion || isTerminal(discussion.status)) return 'NONE';
+    if (discussion.status === 'NEEDS_USER_DECISION') return 'PROVIDE_USER_DECISION';
+    if (isPaused(discussion.status)) return 'RETRY';
+    if (discussion.dispatchState === 'QUEUED' || discussion.dispatchState === 'RUNNING') return 'WAIT';
+    if (isAutomaticDiscussion(discussion)) return 'WAIT';
+    return discussion.status === 'DISCUSSING' ? 'REPLY' : 'NONE';
+  }
+
+  private ensureAutomaticConnectors(driver: AgentType, peer: AgentType): void {
+    const missing = [driver, peer].filter((agent) => !this.connectors[agent]);
+    if (missing.length === 0) return;
+    throw new ProviderError(
+      'UNAVAILABLE',
+      `Automatic discussion requires configured connectors for: ${missing.join(', ')}`,
+      { backend: missing[0] },
+    );
+  }
+
   private async dispatchToAgent(
     discussionId: string,
     receiver: AgentType,
@@ -824,6 +1424,7 @@ export class CollaborationService {
       throw new ProviderError('BUSY', `Discussion ${discussionId} already has a provider request in flight`);
     }
     const controller = new AbortController();
+    const dispatchId = `dsp_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
     let resolveDone!: () => void;
     const operation: InFlightOperation = {
       controller,
@@ -833,7 +1434,12 @@ export class CollaborationService {
     let leaseAcquired = false;
     let discussionLeaseAcquired = options.discussionLeaseOwned === true;
     let leaseHeartbeat: ReturnType<typeof setInterval> | undefined;
+    let runtimeMonitor: ReturnType<typeof setInterval> | undefined;
     let trackedSession: { sessionId: string; metadata: Record<string, unknown> } | undefined;
+    let providerPromise: Promise<PeerResponse> | undefined;
+    let terminationConfirmed = true;
+    let sessionLeaseFailureLogged = false;
+    let discussionLeaseFailureLogged = false;
     this.inFlight.set(discussionId, operation);
     try {
       if (!discussionLeaseAcquired) {
@@ -846,7 +1452,26 @@ export class CollaborationService {
         discussionLeaseAcquired = true;
       }
       this.storage.updateDiscussionDispatch(discussionId, 'RUNNING', receiver);
+      const startedAt = Date.now();
+      this.storage.upsertPeerRuntime({
+        discussionId,
+        dispatchId,
+        provider: receiver,
+        state: 'STARTING',
+        startedAt,
+        lastActivityAt: startedAt,
+        processAlive: undefined,
+        connectionAlive: undefined,
+        sessionAlive: undefined,
+        elapsedMs: 0,
+        idleMs: 0,
+      });
+      runtimeMonitor = setInterval(() => {
+        this.monitorPeerRuntime(discussionId, dispatchId, controller);
+      }, Math.max(250, Math.min(1_000, Math.floor(this.idleTimeoutMs / 4))));
+      runtimeMonitor.unref?.();
       if (!connector) {
+        this.updatePeerRuntime(discussionId, dispatchId, { state: 'FAILED', processAlive: false, connectionAlive: false });
         this.storage.updateDiscussionDispatch(discussionId, 'FAILED', null);
         this.storage.updateDiscussionDiagnostic(discussionId, 'PROVIDER_ERROR', {
           code: 'UNAVAILABLE',
@@ -879,12 +1504,39 @@ export class CollaborationService {
       leaseHeartbeat = setInterval(() => {
         try {
           if (!this.storage.renewSessionLease(receiver, discussion.projectPath, discussionId, this.timeoutMs)) {
+            if (!sessionLeaseFailureLogged) {
+              sessionLeaseFailureLogged = true;
+              this.audit.log({
+                traceId: discussion.traceId,
+                discussionId,
+                action: 'lease.session_renew_failed',
+                agent: receiver,
+                metadata: { provider: receiver, ownerId: discussionId, projectPath: discussion.projectPath },
+              });
+            }
             controller.abort();
           }
           if (!this.storage.renewDiscussionLease(discussionId, this.ownerId, this.timeoutMs)) {
+            if (!discussionLeaseFailureLogged) {
+              discussionLeaseFailureLogged = true;
+              this.audit.log({
+                traceId: discussion.traceId,
+                discussionId,
+                action: 'lease.discussion_renew_failed',
+                agent: 'system',
+                metadata: { ownerId: this.ownerId, projectPath: discussion.projectPath },
+              });
+            }
             controller.abort();
           }
-        } catch {
+        } catch (cause) {
+          this.audit.log({
+            traceId: discussion.traceId,
+            discussionId,
+            action: 'lease.storage_error',
+            agent: 'system',
+            metadata: { provider: receiver, ownerId: this.ownerId, error: redactDiagnostic(cause instanceof Error ? cause.message : String(cause)) },
+          });
           controller.abort();
         }
       }, Math.max(1_000, Math.floor(this.timeoutMs / 3)));
@@ -917,23 +1569,37 @@ export class CollaborationService {
             maxTurns: discussion.maxTurns,
             prompt,
           });
-      const response = await withTimeout(
-        connector.sendAndWait({
+      providerPromise = connector.sendAndWait({
           projectPath: discussion.projectPath,
           prompt: effectivePrompt,
           discussionId,
+          dispatchId,
           previousMessages,
           providerSessionId: persistedSession?.sessionId,
           providerSessionKind,
           signal: controller.signal,
-        }),
-        this.timeoutMs,
-        () => controller.abort(),
+          onActivity: (activity) => this.recordPeerActivity(discussionId, dispatchId, activity),
+          onPermissionRequest: (request) => this.requestPeerPermission(request, controller.signal),
+        });
+      const response = await withTimeout(
+        providerPromise,
+        this.turnHardLimitMs,
+        () => {
+          this.updatePeerRuntime(discussionId, dispatchId, { state: 'STALLED' });
+          controller.abort();
+        },
       );
 
       if (controller.signal.aborted) {
         throw new ProviderError('CANCELLED', `Peer ${receiver} request was cancelled`);
       }
+
+      this.updatePeerRuntime(discussionId, dispatchId, {
+        state: 'COMPLETED',
+        lastActivityAt: Date.now(),
+        processAlive: false,
+        connectionAlive: false,
+      });
 
       this.ensureWithinBudget(discussion, response.content);
 
@@ -1038,6 +1704,20 @@ export class CollaborationService {
       });
       return message;
     } catch (cause) {
+      if (providerPromise) {
+        terminationConfirmed = await waitForCompletion(providerPromise, this.terminationGraceMs);
+        if (!terminationConfirmed) {
+          this.updatePeerRuntime(discussionId, dispatchId, {
+            state: 'STALLED',
+            processAlive: true,
+            connectionAlive: true,
+          });
+        }
+      }
+      const runtime = this.storage.getPeerRuntime(discussionId);
+      if (runtime && runtime.dispatchId === dispatchId && runtime.state !== 'STALLED' && terminationConfirmed) {
+        this.updatePeerRuntime(discussionId, dispatchId, { state: 'FAILED' });
+      }
       try {
         const beforeFailure = this.storage.getDiscussion(discussionId);
         this.storage.updateDiscussionDispatch(discussionId, 'FAILED', null);
@@ -1097,12 +1777,215 @@ export class CollaborationService {
       }
       throw cause;
     } finally {
+      if (runtimeMonitor) clearInterval(runtimeMonitor);
       if (leaseHeartbeat) clearInterval(leaseHeartbeat);
-      if (leaseAcquired) this.storage.releaseSessionLease(receiver, discussion.projectPath, discussionId);
-      if (discussionLeaseAcquired) this.storage.releaseDiscussionLease(discussionId, this.ownerId);
+      if (terminationConfirmed && leaseAcquired) this.storage.releaseSessionLease(receiver, discussion.projectPath, discussionId);
+      if (terminationConfirmed && discussionLeaseAcquired) this.storage.releaseDiscussionLease(discussionId, this.ownerId);
       operation.resolveDone();
       if (this.inFlight.get(discussionId) === operation) this.inFlight.delete(discussionId);
     }
+  }
+
+  private updatePeerRuntime(
+    discussionId: string,
+    dispatchId: string,
+    patch: Partial<PeerRuntimeState>,
+  ): void {
+    const current = this.storage.getPeerRuntime(discussionId);
+    if (!current || current.dispatchId !== dispatchId) return;
+    const merged = { ...current, ...patch };
+    const now = Date.now();
+    this.storage.upsertPeerRuntime({
+      ...merged,
+      elapsedMs: Math.max(0, now - merged.startedAt),
+      idleMs: Math.max(0, now - merged.lastActivityAt),
+    });
+  }
+
+  private async requestPeerPermission(
+    request: PeerPermissionRequestInput,
+    signal?: AbortSignal,
+  ): Promise<PermissionDecision> {
+    const permission = this.storage.createPermissionRequest(request);
+    const runtime = this.storage.getPeerRuntime(request.discussionId);
+    this.updatePeerRuntime(request.discussionId, request.dispatchId, {
+      state: 'WAITING_PERMISSION',
+      currentTool: request.actionType,
+    });
+    if (runtime) {
+      this.storage.appendPeerRuntimeEvent({
+        discussionId: request.discussionId,
+        dispatchId: request.dispatchId,
+        provider: runtime.provider,
+        type: 'permission_requested',
+        publicSummary: `Permission requested for ${request.actionType}`,
+        metadata: {
+          permissionId: permission.id,
+          method: request.method,
+          actionType: request.actionType,
+          command: request.command,
+          paths: request.paths,
+          risk: request.risk ?? 'unknown',
+        },
+      });
+    }
+    const deadline = Date.now() + this.permissionTimeoutMs;
+    while (Date.now() < deadline) {
+      const current = this.storage.getPermissionRequest(permission.id);
+      if (current?.status === 'APPROVED' || current?.status === 'DENIED' || current?.status === 'EXPIRED') {
+        this.updatePeerRuntime(request.discussionId, request.dispatchId, {
+          state: 'RUNNING',
+          currentTool: undefined,
+          lastActivityAt: Date.now(),
+        });
+        if (runtime) {
+          this.storage.appendPeerRuntimeEvent({
+            discussionId: request.discussionId,
+            dispatchId: request.dispatchId,
+            provider: runtime.provider,
+            type: 'permission_resolved',
+            publicSummary: `Permission ${current.status.toLowerCase()}`,
+            metadata: { permissionId: current.id, decision: current.decision, status: current.status },
+          });
+        }
+        return current.status === 'APPROVED' ? 'approve' : 'deny';
+      }
+      if (signal?.aborted) {
+        const denied = this.storage.resolvePermissionRequest(permission.id, 'deny', 'user');
+        this.updatePeerRuntime(request.discussionId, request.dispatchId, { state: 'RUNNING', currentTool: undefined });
+        this.storage.appendPeerRuntimeEvent({
+          discussionId: request.discussionId,
+          dispatchId: request.dispatchId,
+          provider: runtime?.provider ?? request.provider,
+          type: 'permission_resolved',
+          publicSummary: 'Permission denied because the dispatch was cancelled',
+          metadata: { permissionId: denied.id, decision: 'deny', status: denied.status },
+        });
+        return 'deny';
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    const expired = this.storage.expirePermissionRequest(permission.id);
+    this.updatePeerRuntime(request.discussionId, request.dispatchId, { state: 'RUNNING', currentTool: undefined });
+    this.storage.appendPeerRuntimeEvent({
+      discussionId: request.discussionId,
+      dispatchId: request.dispatchId,
+      provider: runtime?.provider ?? request.provider,
+      type: 'permission_resolved',
+      publicSummary: 'Permission request expired',
+      metadata: { permissionId: expired.id, decision: 'deny', status: expired.status },
+    });
+    return 'deny';
+  }
+
+  private recordPeerActivity(
+    discussionId: string,
+    dispatchId: string,
+    activity: PeerActivity,
+  ): void {
+    const current = this.storage.getPeerRuntime(discussionId);
+    if (!current || current.dispatchId !== dispatchId) return;
+    if (['COMPLETED', 'FAILED'].includes(current.state)) return;
+    const at = activity.at ?? Date.now();
+    let state: PeerRuntimePhase = current.state;
+    switch (activity.kind) {
+      case 'process_started':
+        state = 'STARTING';
+        break;
+      case 'provider_event':
+      case 'turn_started':
+        state = 'RUNNING';
+        break;
+      case 'output':
+        state = 'GENERATING';
+        break;
+      case 'tool_started':
+        state = 'WAITING_TOOL';
+        break;
+      case 'tool_completed':
+        state = 'RUNNING';
+        break;
+      case 'process_exited':
+        state = current.state === 'STALLED' ? 'STALLED' : 'FAILED';
+        break;
+      case 'turn_completed':
+      case 'process_heartbeat':
+        break;
+    }
+    if (current.state === 'STALLED') state = 'STALLED';
+    const patch: Partial<PeerRuntimeState> = {
+      state,
+      ...(activity.kind === 'process_heartbeat' ? {} : { lastActivityAt: at }),
+      ...(activity.kind === 'provider_event' || activity.kind.startsWith('turn_')
+        ? { lastProviderEventAt: at }
+        : {}),
+      ...(activity.kind === 'output' ? { lastOutputAt: at } : {}),
+      ...(activity.kind === 'tool_started' ? { lastToolStartedAt: at } : {}),
+      ...(activity.kind === 'tool_completed' ? { currentTool: undefined } : {}),
+      ...(activity.currentTool !== undefined ? { currentTool: activity.currentTool } : {}),
+      ...(activity.processAlive !== undefined ? { processAlive: activity.processAlive } : {}),
+      ...(activity.connectionAlive !== undefined ? { connectionAlive: activity.connectionAlive } : {}),
+      ...(activity.sessionAlive !== undefined ? { sessionAlive: activity.sessionAlive } : {}),
+    };
+    this.updatePeerRuntime(discussionId, dispatchId, patch);
+    const eventType: PeerRuntimeEvent['type'] = activity.kind === 'output'
+      ? 'agent_message_delta'
+      : activity.kind === 'tool_completed'
+        ? 'tool_finished'
+        : activity.kind === 'process_heartbeat'
+          ? 'process_heartbeat'
+          : activity.kind;
+    try {
+      this.storage.appendPeerRuntimeEvent({
+        discussionId,
+        dispatchId,
+        provider: current.provider,
+        type: eventType,
+        publicSummary: activity.detail,
+        metadata: {
+          currentTool: activity.currentTool,
+          processAlive: activity.processAlive,
+          connectionAlive: activity.connectionAlive,
+          sessionAlive: activity.sessionAlive,
+          detail: activity.detail,
+        },
+      });
+    } catch {
+      // Runtime event persistence must not break the provider transport.
+    }
+  }
+
+  private monitorPeerRuntime(
+    discussionId: string,
+    dispatchId: string,
+    controller: AbortController,
+  ): void {
+    const current = this.storage.getPeerRuntime(discussionId);
+    if (!current || current.dispatchId !== dispatchId) return;
+    if (['COMPLETED', 'FAILED'].includes(current.state)) return;
+    if (current.state === 'STALLED') return;
+    const now = Date.now();
+    const elapsedMs = now - current.startedAt;
+    const idleMs = now - current.lastActivityAt;
+    let nextState: PeerRuntimePhase = current.state;
+    let shouldAbort = false;
+    if (current.processAlive === false) {
+      nextState = 'FAILED';
+      shouldAbort = true;
+    } else if (elapsedMs >= this.turnHardLimitMs) {
+      nextState = 'STALLED';
+      shouldAbort = true;
+    } else if (current.state === 'STARTING' && elapsedMs >= this.startupTimeoutMs) {
+      nextState = 'STALLED';
+      shouldAbort = true;
+    } else if (current.state !== 'WAITING_PERMISSION' && idleMs >= this.idleTimeoutMs) {
+      nextState = idleMs >= this.idleTimeoutMs + this.stallGraceMs && !current.currentTool
+        ? 'STALLED'
+        : 'IDLE_SUSPECTED';
+      shouldAbort = nextState === 'STALLED';
+    }
+    if (nextState !== current.state) this.updatePeerRuntime(discussionId, dispatchId, { state: nextState });
+    if (shouldAbort && !controller.signal.aborted) controller.abort();
   }
 
   private ensureNoDispatchInFlight(discussionId: string): void {
@@ -1326,7 +2209,9 @@ function buildAgreementPrompt(conclusion: string, decisionHash: string): string 
     'Review the canonical conclusion below against the discussion context.',
     'Do not call AgentBridge tools. Return exactly one JSON object and no markdown.',
     `Use {"agentbridgeDecision":"accept","decisionHash":"${decisionHash}"} only if you accept it unchanged.`,
-    `Otherwise use {"agentbridgeDecision":"reject","decisionHash":"${decisionHash}","reason":"brief reason"}.`,
+    `Otherwise use {"agentbridgeDecision":"reject","decisionHash":"${decisionHash}","resolution":"continue","reason":"brief reason"} or set resolution to "user_decision".`,
+    'Use resolution="continue" only when new evidence or a concrete revision can still resolve the objection.',
+    'Use resolution="user_decision" when the disagreement depends on incompatible goals, risk tolerance, permissions, or product preferences.',
     'Canonical conclusion:',
     conclusion,
   ].join('\n\n');
@@ -1335,20 +2220,28 @@ function buildAgreementPrompt(conclusion: string, decisionHash: string): string 
 function parseAgreementResponse(
   content: string,
   expectedHash: string,
-): { accepted: boolean; reason?: string } {
+): { accepted: boolean; reason?: string; resolution?: AgreementResolution } {
   const start = content.indexOf('{');
   const end = content.lastIndexOf('}');
-  if (start < 0 || end <= start) return { accepted: false, reason: 'missing_json_confirmation' };
+  if (start < 0 || end <= start) {
+    return { accepted: false, reason: 'missing_json_confirmation', resolution: 'user_decision' };
+  }
   try {
     const value = JSON.parse(content.slice(start, end + 1)) as Record<string, unknown>;
-    if (value.decisionHash !== expectedHash) return { accepted: false, reason: 'decision_hash_mismatch' };
+    if (value.decisionHash !== expectedHash) {
+      return { accepted: false, reason: 'decision_hash_mismatch', resolution: 'user_decision' };
+    }
     if (value.agentbridgeDecision === 'accept') return { accepted: true };
+    const resolution = value.resolution === 'continue' || value.resolution === 'user_decision'
+      ? value.resolution
+      : 'user_decision';
     return {
       accepted: false,
       reason: typeof value.reason === 'string' ? value.reason : 'peer_rejected',
+      resolution,
     };
   } catch {
-    return { accepted: false, reason: 'invalid_json_confirmation' };
+    return { accepted: false, reason: 'invalid_json_confirmation', resolution: 'user_decision' };
   }
 }
 
@@ -1364,6 +2257,20 @@ function assertParticipants(driver: AgentType, peer: AgentType): void {
 
 function discussionModeRank(mode: DiscussionMode): number {
   return mode === 'review' ? 0 : mode === 'discussion' ? 1 : 2;
+}
+
+function oppositeAgent(agent: AgentType): AgentType {
+  return agent === 'claude' ? 'codex' : 'claude';
+}
+
+function stripDiscussionSignal(content: string): string {
+  return content
+    .replace(/\s*\[AGENTBRIDGE_SIGNAL:\s*(?:CONTINUE|READY_TO_CLOSE|NEEDS_USER_DECISION)\]\s*$/, '')
+    .trim();
+}
+
+function isAutomaticDiscussion(discussion: Discussion): boolean {
+  return discussion.orchestration === 'automatic';
 }
 
 function isLegacyRetryablePeerMessage(
@@ -1402,7 +2309,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, onTimeout?
 
 function classifyFailure(cause: unknown): 'FAILED' | 'PEER_BUSY' | 'TIMEOUT' | 'CANCELLED' | 'NEEDS_USER_DECISION' {
   if (cause instanceof SessionBusyError) return 'PEER_BUSY';
-  if (isProviderError(cause)) {
+  if (isProviderErrorLike(cause)) {
     if (cause.ambiguous) return 'NEEDS_USER_DECISION';
     if (cause.code === 'BUSY' || cause.code === 'UNAVAILABLE') return 'PEER_BUSY';
     if (cause.code === 'TIMEOUT') return 'TIMEOUT';
@@ -1417,15 +2324,24 @@ function classifyFailure(cause: unknown): 'FAILED' | 'PEER_BUSY' | 'TIMEOUT' | '
 function diagnosticFromError(cause: unknown, receiver: AgentType, backend: unknown) {
   const message = redactDiagnostic(cause instanceof Error ? cause.message : String(cause));
   return {
-    code: isProviderError(cause) ? cause.code : 'FAILED',
+    code: isProviderErrorLike(cause) ? cause.code : 'FAILED',
     message,
-    backend: isProviderError(cause) && cause.backend
+    backend: isProviderErrorLike(cause) && cause.backend
       ? cause.backend
       : typeof backend === 'string' ? backend : receiver,
-    retryable: isProviderError(cause) ? cause.retryable : true,
-    ambiguous: isProviderError(cause) ? cause.ambiguous : false,
+    retryable: isProviderErrorLike(cause) ? cause.retryable : true,
+    ambiguous: isProviderErrorLike(cause) ? cause.ambiguous : false,
     at: new Date().toISOString(),
   };
+}
+
+function isProviderErrorLike(value: unknown): value is ProviderError {
+  if (isProviderError(value)) return true;
+  if ((typeof value !== 'object' && typeof value !== 'function') || value === null) return false;
+  const candidate = value as { name?: unknown; code?: unknown; ambiguous?: unknown };
+  return candidate.name === 'ProviderError'
+    && typeof candidate.code === 'string'
+    && typeof candidate.ambiguous === 'boolean';
 }
 
 function redactDiagnostic(value: string): string {
@@ -1434,11 +2350,22 @@ function redactDiagnostic(value: string): string {
     .slice(0, 4_096);
 }
 
-async function waitForCompletion(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+function isOwnerProcessAlive(ownerId: string): boolean {
+  const match = /^collaboration:(\d+):/.exec(ownerId);
+  if (!match) return false;
+  try {
+    process.kill(Number(match[1]), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForCompletion(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      promise.then(() => true),
+      promise.then(() => true, () => true),
       new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); }),
     ]);
   } finally {

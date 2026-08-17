@@ -17,6 +17,9 @@ export type SessionPolicy = 'auto' | 'reuse' | 'fresh';
 export const DISCUSSION_MODES = ['review', 'discussion', 'deep-discussion'] as const;
 export type DiscussionMode = (typeof DISCUSSION_MODES)[number];
 export type DiscussionSignal = 'CONTINUE' | 'READY_TO_CLOSE' | 'NEEDS_USER_DECISION';
+export type DiscussionOrchestration = 'single-turn' | 'automatic';
+export type DiscussionNextAction = 'WAIT' | 'REPLY' | 'PROVIDE_USER_DECISION' | 'RETRY' | 'NONE';
+export type AgreementResolution = 'continue' | 'user_decision';
 export const DEFAULT_DISCUSSION_MODE: DiscussionMode = 'discussion';
 export const DEFAULT_MAX_TURNS_BY_MODE: Readonly<Record<DiscussionMode, number>> = {
   review: 3,
@@ -26,13 +29,122 @@ export const DEFAULT_MAX_TURNS_BY_MODE: Readonly<Record<DiscussionMode, number>>
 export type SessionStatus = 'IDLE' | 'BUSY' | 'BRIDGE_OWNED' | 'ARCHIVED' | 'UNKNOWN';
 export type PeerAvailability = 'INTERACTIVE' | 'BACKGROUND' | 'UNAVAILABLE';
 export type DispatchState = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED';
+export type PeerRuntimePhase =
+  | 'STARTING'
+  | 'RUNNING'
+  | 'WAITING_TOOL'
+  | 'WAITING_PERMISSION'
+  | 'GENERATING'
+  | 'IDLE_SUSPECTED'
+  | 'STALLED'
+  | 'COMPLETED'
+  | 'FAILED';
+export type PeerActivityKind =
+  | 'process_started'
+  | 'process_heartbeat'
+  | 'provider_event'
+  | 'output'
+  | 'tool_started'
+  | 'tool_completed'
+  | 'turn_started'
+  | 'turn_completed'
+  | 'process_exited';
+
+/** Runtime-level activity emitted by a provider connector, never by the model. */
+export interface PeerActivity {
+  kind: PeerActivityKind;
+  at?: number;
+  currentTool?: string;
+  processAlive?: boolean;
+  connectionAlive?: boolean;
+  sessionAlive?: boolean;
+  detail?: string;
+}
+
+export type PeerRuntimeEventType =
+  | 'process_started'
+  | 'process_heartbeat'
+  | 'provider_event'
+  | 'agent_message_delta'
+  | 'tool_started'
+  | 'tool_finished'
+  | 'turn_started'
+  | 'turn_completed'
+  | 'process_exited'
+  | 'permission_requested'
+  | 'permission_resolved';
+
+export interface PeerRuntimeEvent {
+  id: string;
+  sequence: number;
+  discussionId: string;
+  dispatchId: string;
+  provider: AgentType;
+  type: PeerRuntimeEventType;
+  timestamp: string;
+  publicSummary?: string;
+  metadata: Record<string, unknown>;
+}
+
+export type PermissionRequestStatus = 'PENDING' | 'APPROVED' | 'DENIED' | 'EXPIRED';
+export type PermissionDecision = 'approve' | 'deny';
+
+export interface PermissionRequest {
+  id: string;
+  discussionId: string;
+  dispatchId: string;
+  provider: AgentType;
+  method: string;
+  actionType: string;
+  command?: string;
+  paths?: string[];
+  reason?: string;
+  risk: 'low' | 'medium' | 'high' | 'unknown';
+  status: PermissionRequestStatus;
+  createdAt: string;
+  resolvedAt?: string;
+  resolvedBy?: 'user' | 'driver-policy';
+  decision?: PermissionDecision;
+}
+
+export interface PeerPermissionRequestInput {
+  discussionId: string;
+  dispatchId: string;
+  provider: AgentType;
+  method: string;
+  actionType: string;
+  command?: string;
+  paths?: string[];
+  reason?: string;
+  risk?: PermissionRequest['risk'];
+}
+
+/** Durable liveness snapshot for one provider dispatch. */
+export interface PeerRuntimeState {
+  discussionId: string;
+  dispatchId: string;
+  provider: AgentType;
+  state: PeerRuntimePhase;
+  startedAt: number;
+  lastActivityAt: number;
+  lastProviderEventAt?: number;
+  lastOutputAt?: number;
+  lastToolStartedAt?: number;
+  currentTool?: string;
+  processAlive?: boolean;
+  connectionAlive?: boolean;
+  sessionAlive?: boolean;
+  elapsedMs: number;
+  idleMs: number;
+}
 export type DiscussionStopReason =
   | 'MAX_TURNS'
   | 'MAX_DURATION'
   | 'MESSAGE_BUDGET'
   | 'PROVIDER_ERROR'
-  | 'PEER_REQUESTED_USER_DECISION';
-export type DiscussionOperationKind = 'peer_message' | 'agreement_confirmation';
+  | 'PEER_REQUESTED_USER_DECISION'
+  | 'UNRESOLVED_DISAGREEMENT';
+export type DiscussionOperationKind = 'peer_message' | 'automatic_turn' | 'agreement_confirmation';
 
 export interface DiscussionError {
   code: string;
@@ -79,6 +191,7 @@ export interface Discussion {
   topic: string;
   /** Persisted behavior contract controlling evidence, challenge, and convergence depth. */
   mode: DiscussionMode;
+  orchestration: DiscussionOrchestration;
   status: DiscussionStatus;
   driver: AgentType; // Who initiated this discussion
   peer: AgentType;
@@ -107,6 +220,8 @@ export interface Discussion {
   failedDispatchReceiver: AgentType | null;
   failedMessageId: string | null;
   failedOperationKind: DiscussionOperationKind | null;
+  pendingOperationKind: DiscussionOperationKind | null;
+  pendingMessageId: string | null;
 }
 
 export interface AgentSession {
@@ -147,7 +262,7 @@ export interface AskPeerInput {
   projectPath?: string;
   /** Discussion behavior contract; defaults to discussion. */
   mode?: DiscussionMode;
-  /** Maximum successful provider responses for this discussion. */
+  /** Maximum substantive provider responses; protocol confirmation calls do not consume this ceiling. */
   maxTurns?: number;
   /** Provider-session reuse policy; defaults to the service's auto policy. */
   sessionPolicy?: SessionPolicy;
@@ -172,6 +287,8 @@ export interface AskPeerOutput {
   maxTurns: number;
   messageId: string;
   status: DiscussionStatus;
+  orchestration: DiscussionOrchestration;
+  nextAction: DiscussionNextAction;
   dispatchState?: DispatchState;
   peerResponse?: Message;
 }
@@ -186,6 +303,7 @@ export interface ReplyPeerInput {
 export interface ReplyPeerOutput {
   messageId: string;
   status: DiscussionStatus;
+  nextAction: DiscussionNextAction;
   dispatchState?: DispatchState;
   peerResponse?: Message;
 }
@@ -199,6 +317,15 @@ export interface GetDiscussionOutput {
   messages: Message[];
   decision: Decision | null;
   providerSessions: ProviderSessionSummary[];
+  peerRuntime: PeerRuntimeState | null;
+  pendingPermissions: PermissionRequest[];
+  nextAction: DiscussionNextAction;
+}
+
+export interface WatchDiscussionOutput extends GetDiscussionOutput {
+  events: PeerRuntimeEvent[];
+  waitTimedOut: boolean;
+  lastSequence: number | null;
 }
 
 export interface ProviderSessionSummary {

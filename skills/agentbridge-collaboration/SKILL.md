@@ -15,6 +15,8 @@ Treat AgentBridge as a bounded, evidence-driven collaboration channel. Reuse one
 
 Keep each mode's default response ceiling unless risk or scope justifies an explicit `maxTurns`. Treat the ceiling as a safety limit, never a target.
 
+`review` is a single-turn independent review. `discussion` and `deep-discussion` are automatic alternating runs when both providers are available; they stop as soon as the providers agree or an irreconcilable decision is surfaced. The service performs the follow-up provider calls, so the initiating Agent must not summarize an intermediate result as final. Missing connectors are reported as `UNAVAILABLE` and never downgraded to a single-turn result.
+
 ## Start
 
 1. Call `ask_peer` once with one concrete topic, the selected `mode`, and the project path.
@@ -25,6 +27,7 @@ Keep each mode's default response ceiling unless risk or scope justifies an expl
 ## Continue
 
 - For `QUEUED` or `RUNNING`, call `wait_discussion` with the same discussion ID and latest message ID.
+- For automatic `discussion` or `deep-discussion`, keep waiting while `nextAction=WAIT`, even if an intermediate message is returned. Inspect the full transcript after completion.
 - Call `reply_peer` only with new evidence, a concrete objection, a revised position, or an unresolved decision.
 - Honor the peer's final `AGENTBRIDGE_SIGNAL`: verify `READY_TO_CLOSE`; continue only when `CONTINUE` is backed by substance; surface the exact choice on `NEEDS_USER_DECISION`.
 - Do not repeat prior content or allow recursive AgentBridge calls from the peer.
