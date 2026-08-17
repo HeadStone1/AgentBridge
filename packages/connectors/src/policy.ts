@@ -17,7 +17,9 @@ export class HeadlessPeerPolicy {
   private readonly projectPath: string;
 
   constructor(projectPath: string) {
-    this.projectPath = resolve(projectPath);
+    this.projectPath = isWindowsPath(projectPath)
+      ? win32.normalize(projectPath)
+      : resolve(projectPath);
   }
 
   decide(request: HeadlessPolicyRequest): HeadlessPolicyDecision {

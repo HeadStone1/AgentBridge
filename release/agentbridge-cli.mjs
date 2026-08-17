@@ -9521,7 +9521,7 @@ var HeadlessPeerPolicy = class {
   profile = "HEADLESS_PEER";
   projectPath;
   constructor(projectPath) {
-    this.projectPath = resolve4(projectPath);
+    this.projectPath = isWindowsPath(projectPath) ? win32.normalize(projectPath) : resolve4(projectPath);
   }
   decide(request) {
     const method = request.method.toLowerCase();
