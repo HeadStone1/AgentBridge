@@ -9516,7 +9516,7 @@ ${result.stdout}`.toLowerCase();
 import { spawn as spawn3 } from "node:child_process";
 
 // packages/connectors/dist/policy.js
-import { isAbsolute, relative, resolve as resolve4 } from "node:path";
+import { isAbsolute, relative, resolve as resolve4, win32 } from "node:path";
 var HeadlessPeerPolicy = class {
   profile = "HEADLESS_PEER";
   projectPath;
@@ -9549,11 +9549,20 @@ ${command ?? ""}`;
     return /rm\s+(-[rf]+\s+)?["']?(\/|~|%userprofile%|\$home)|git\s+(reset\s+--hard|clean\s+-fdx)|sudo\b|force[- ]push|\b(reg|sc)\s+(add|delete|config)|shutdown\b|credential|password|api[_ -]?key|production\s+database/.test(value);
   }
   isProjectPath(value) {
+    if (isWindowsPath(this.projectPath) || isWindowsPath(value)) {
+      const projectRoot = win32.resolve(this.projectPath);
+      const candidate2 = win32.resolve(isWindowsPath(value) ? value : win32.join(projectRoot, value));
+      const remainder2 = win32.relative(projectRoot, candidate2);
+      return remainder2 === "" || !remainder2.startsWith("..") && !win32.isAbsolute(remainder2);
+    }
     const candidate = resolve4(isAbsolute(value) ? value : resolve4(this.projectPath, value));
     const remainder = relative(this.projectPath, candidate);
     return remainder === "" || !remainder.startsWith("..") && !isAbsolute(remainder);
   }
 };
+function isWindowsPath(value) {
+  return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
+}
 function readText(params, keys) {
   if (!params)
     return void 0;
@@ -10129,14 +10138,14 @@ function withStderr(error2, stderrTail, ambiguous = false) {
 import { createRequire as createRequire2 } from "node:module";
 import { existsSync as existsSync3, readdirSync } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname5, join as join4, posix, win32 } from "node:path";
+import { dirname as dirname5, join as join4, posix, win32 as win322 } from "node:path";
 function discoverCodexCommands(options = {}) {
   const platform = options.platform ?? process.platform;
   const env = options.env ?? process.env;
   const home = options.homeDirectory ?? homedir3();
   const pathExists = options.pathExists ?? existsSync3;
   const readDirectory = options.readDirectory ?? ((path) => readdirSync(path));
-  const pathApi = platform === "win32" ? win32 : posix;
+  const pathApi = platform === "win32" ? win322 : posix;
   const candidates = [];
   addEnvironmentCandidate(candidates, env.AGENTBRIDGE_CODEX_APP_COMMAND, "AGENTBRIDGE_CODEX_APP_COMMAND", "app-server");
   addEnvironmentCandidate(candidates, env.AGENTBRIDGE_CODEX_COMMAND, "AGENTBRIDGE_CODEX_COMMAND", "auto");

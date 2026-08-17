@@ -1,4 +1,4 @@
-import { isAbsolute, relative, resolve } from 'node:path';
+import { isAbsolute, relative, resolve, win32 } from 'node:path';
 
 export type HeadlessPolicyDecision = 'ALLOW' | 'DENY' | 'NEEDS_USER_DECISION';
 
@@ -43,10 +43,20 @@ export class HeadlessPeerPolicy {
   }
 
   private isProjectPath(value: string): boolean {
+    if (isWindowsPath(this.projectPath) || isWindowsPath(value)) {
+      const projectRoot = win32.resolve(this.projectPath);
+      const candidate = win32.resolve(isWindowsPath(value) ? value : win32.join(projectRoot, value));
+      const remainder = win32.relative(projectRoot, candidate);
+      return remainder === '' || (!remainder.startsWith('..') && !win32.isAbsolute(remainder));
+    }
     const candidate = resolve(isAbsolute(value) ? value : resolve(this.projectPath, value));
     const remainder = relative(this.projectPath, candidate);
     return remainder === '' || (!remainder.startsWith('..') && !isAbsolute(remainder));
   }
+}
+
+function isWindowsPath(value: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith('\\\\');
 }
 
 function readText(params: Record<string, unknown> | undefined, keys: string[]): string | undefined {
