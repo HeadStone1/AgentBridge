@@ -1,5 +1,22 @@
 # AgentBridge 开发日志
 
+## 2026-08-18
+
+### v0.7.5 柔性双 Agent 讨论协议
+
+- 汇总自动化讨论架构的三份设计结论，采用“自由讨论，状态受控”的原则：正文可以保持自然语言；只有需要推进状态时，Agent 才附加可选的 JSON 控制事件。既有 `[AGENTBRIDGE_SIGNAL: ...]` 文本信号继续兼容。
+- 新增 `CONFIRMING` 状态。`PROPOSE_CLOSE` / `READY_TO_CLOSE` 只会提出候选结论，Backend 将其发送给另一方进行一次 hash 绑定的确认；对方提出可解决异议时恢复 `DISCUSSING`，涉及目标、风险、权限或偏好的不可调和分歧则进入 `NEEDS_USER_DECISION`。
+- `ask_peer` 增加 `taskType`（`code`、`design`、`qa`、`explain`）、`validationMode` 和 `peerTemperature`。默认不强制证据；当代码任务显式设置 `evidence_required` 时，关闭前必须存在一条通过的 `tool_finished` 运行时结果。
+- Codex App Server Connector 现在从工具完成事件中提取 `exitCode`、`success` / `passed` 与状态字段，并以 `passed`、`failed` 或 `unknown` 形式写入运行时遥测；不再把“工具启动过”误当作验证已通过。
+- Discussions 增加带来源的 Shared Blackboard：记录目标、候选结论、分歧和验收条件，并只向后续自动回合注入最近快照。黑板只作为记忆辅助；与原始消息冲突时始终以引用的消息为准。
+- 协议 prompt 增加反盲从软性引导：同意时说明关键理由，反对时给出反例、证据或可验证条件；不规定最小讨论轮数，也不强制每轮反对或输出 JSON。
+
+### 验证
+
+- `npm run build` 通过：protocol、storage、audit、connectors、collaboration、mcp、cli 均成功编译。
+- `collaboration.test.ts` 定向回归 38/38 通过；讨论策略、状态机、存储与协作服务相关测试均已运行，无新增失败。
+- 新增测试覆盖：结构化控制事件兼容、`CONFIRMING` 状态往返、任务验证元数据，以及带来源的黑板持久化与注入。
+
 ## 2026-08-11
 
 ### v0.6.1 会话隔离、生命周期与 CI 修复

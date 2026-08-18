@@ -43,6 +43,8 @@ export interface AgentConnector {
     previousMessages?: Message[];
     providerSessionId?: string;
     providerSessionKind?: ProviderSessionKind;
+    /** Optional provider setting supplied by the discussion policy. */
+    peerTemperature?: number;
     signal?: AbortSignal;
     onActivity?: (activity: PeerActivity) => void;
     onPermissionRequest?: (request: PeerPermissionRequestInput) => Promise<PermissionDecision>;

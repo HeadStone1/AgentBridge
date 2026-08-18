@@ -7534,7 +7534,8 @@ import { resolve } from "node:path";
 // packages/protocol/dist/stateMachine.js
 var validTransitions = {
   CREATED: ["DISCUSSING", "CANCELLED", "NEEDS_USER_DECISION"],
-  DISCUSSING: ["AGREED", "FAILED", "CANCELLED", "PEER_BUSY", "TIMEOUT", "NEEDS_USER_DECISION"],
+  DISCUSSING: ["CONFIRMING", "AGREED", "FAILED", "CANCELLED", "PEER_BUSY", "TIMEOUT", "NEEDS_USER_DECISION"],
+  CONFIRMING: ["DISCUSSING", "AGREED", "FAILED", "CANCELLED", "PEER_BUSY", "TIMEOUT", "NEEDS_USER_DECISION"],
   // Local MVP discussions may end after both agents agree without entering an
   // implementation workflow. Full implementations can still continue through
   // IMPLEMENTING/REVIEWING.
@@ -7725,6 +7726,8 @@ function samePath(left, right) {
 
 // packages/storage/dist/index.js
 var DEFAULT_MAX_TURNS = 12;
+var DEFAULT_TASK_TYPE = "explain";
+var DEFAULT_VALIDATION_MODE = "none";
 var MAX_ALLOWED_TURNS = 50;
 var MAX_TEXT_LENGTH = 1e5;
 var SQLITE_STARTUP_TIMEOUT_MS = 5e3;
@@ -7737,6 +7740,10 @@ CREATE TABLE IF NOT EXISTS discussions (
   id TEXT PRIMARY KEY,
   topic TEXT NOT NULL,
   mode TEXT NOT NULL DEFAULT 'discussion',
+  task_type TEXT NOT NULL DEFAULT 'explain',
+  validation_mode TEXT NOT NULL DEFAULT 'none',
+  peer_temperature REAL,
+  shared_blackboard TEXT,
   orchestration TEXT NOT NULL DEFAULT 'single-turn',
   status TEXT NOT NULL DEFAULT 'CREATED',
   dispatch_state TEXT,
@@ -7957,6 +7964,10 @@ var Storage = class {
     this.ensureColumn("discussions", "failed_operation_kind", "ALTER TABLE discussions ADD COLUMN failed_operation_kind TEXT");
     this.ensureColumn("discussions", "collaboration_session_id", "ALTER TABLE discussions ADD COLUMN collaboration_session_id TEXT");
     this.ensureColumn("discussions", "mode", "ALTER TABLE discussions ADD COLUMN mode TEXT NOT NULL DEFAULT 'discussion'");
+    this.ensureColumn("discussions", "task_type", "ALTER TABLE discussions ADD COLUMN task_type TEXT NOT NULL DEFAULT 'explain'");
+    this.ensureColumn("discussions", "validation_mode", "ALTER TABLE discussions ADD COLUMN validation_mode TEXT NOT NULL DEFAULT 'none'");
+    this.ensureColumn("discussions", "peer_temperature", "ALTER TABLE discussions ADD COLUMN peer_temperature REAL");
+    this.ensureColumn("discussions", "shared_blackboard", "ALTER TABLE discussions ADD COLUMN shared_blackboard TEXT");
     this.ensureColumn("discussions", "orchestration", "ALTER TABLE discussions ADD COLUMN orchestration TEXT NOT NULL DEFAULT 'single-turn'");
     this.ensureColumn("discussions", "pending_operation_kind", "ALTER TABLE discussions ADD COLUMN pending_operation_kind TEXT");
     this.ensureColumn("discussions", "pending_message_id", "ALTER TABLE discussions ADD COLUMN pending_message_id TEXT");
@@ -7997,17 +8008,23 @@ var Storage = class {
     const maxRetries = data.maxRetries ?? 2;
     const peer = data.peer ?? (data.driver === "claude" ? "codex" : "claude");
     const mode = data.mode ?? DEFAULT_DISCUSSION_MODE;
+    const taskType = data.taskType ?? DEFAULT_TASK_TYPE;
+    const validationMode = data.validationMode ?? DEFAULT_VALIDATION_MODE;
+    const peerTemperature = data.peerTemperature ?? null;
     const orchestration = data.orchestration ?? "single-turn";
     assertText(data.topic, "topic");
     assertText(data.traceId, "traceId");
     assertTurns(maxTurns);
     assertRetries(maxRetries);
     assertDiscussionMode(mode);
+    assertTaskType(taskType);
+    assertValidationMode(validationMode);
+    assertPeerTemperature(peerTemperature);
     if (!["single-turn", "automatic"].includes(orchestration)) {
       throw new Error("orchestration must be single-turn or automatic");
     }
-    this.db.prepare(`INSERT INTO discussions (id, topic, mode, orchestration, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id, collaboration_session_id)
-         VALUES (?, ?, ?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?)`).run(id, data.topic, mode, orchestration, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId, data.collaborationSessionId ?? null);
+    this.db.prepare(`INSERT INTO discussions (id, topic, mode, task_type, validation_mode, peer_temperature, orchestration, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id, collaboration_session_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?)`).run(id, data.topic, mode, taskType, validationMode, peerTemperature, orchestration, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId, data.collaborationSessionId ?? null);
     return this.getDiscussion(id);
   }
   // --- Project-scoped collaboration sessions ---
@@ -8210,6 +8227,28 @@ var Storage = class {
       throw new Error("orchestration must be single-turn or automatic");
     }
     this.db.prepare("UPDATE discussions SET mode = ?, orchestration = ?, updated_at = ? WHERE id = ?").run(mode, orchestration, (/* @__PURE__ */ new Date()).toISOString(), id);
+  }
+  appendBlackboardEntry(id, entry) {
+    const discussion = this.getDiscussion(id);
+    if (!discussion)
+      throw new Error(`Discussion ${id} not found`);
+    assertBlackboardEntry(entry);
+    const current = discussion.sharedBlackboard ?? { version: 0, entries: [] };
+    const version2 = current.version + 1;
+    const next = {
+      version: version2,
+      entries: [
+        ...current.entries,
+        {
+          ...entry,
+          text: entry.text.trim().slice(0, 4e3),
+          timestamp: entry.timestamp ?? (/* @__PURE__ */ new Date()).toISOString(),
+          versionAdded: version2
+        }
+      ].slice(-50)
+    };
+    this.db.prepare("UPDATE discussions SET shared_blackboard = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), id);
+    return next;
   }
   updateDiscussionDispatch(id, state, waitingFor = null) {
     if (!this.getDiscussion(id))
@@ -8647,6 +8686,10 @@ function rowToDiscussion(row) {
     id: row.id,
     topic: row.topic,
     mode: row.mode ?? DEFAULT_DISCUSSION_MODE,
+    taskType: isTaskType(row.task_type) ? row.task_type : DEFAULT_TASK_TYPE,
+    validationMode: isValidationMode(row.validation_mode) ? row.validation_mode : DEFAULT_VALIDATION_MODE,
+    peerTemperature: typeof row.peer_temperature === "number" && Number.isFinite(row.peer_temperature) ? row.peer_temperature : null,
+    sharedBlackboard: parseSharedBlackboard(row.shared_blackboard),
     orchestration: row.orchestration ?? "single-turn",
     status: row.status,
     driver,
@@ -8805,6 +8848,70 @@ function rowToAgentSession(row) {
 }
 function isReusableBridgeSession(session) {
   return (session.status === "IDLE" || session.status === "BRIDGE_OWNED") && session.metadata.bridgeOwned === true && typeof session.metadata.supersededBy !== "string";
+}
+function assertTaskType(value) {
+  if (!isTaskType(value))
+    throw new Error("taskType must be one of: code, design, qa, explain");
+}
+function isTaskType(value) {
+  return value === "code" || value === "design" || value === "qa" || value === "explain";
+}
+function assertValidationMode(value) {
+  if (!isValidationMode(value))
+    throw new Error("validationMode must be none or evidence_required");
+}
+function isValidationMode(value) {
+  return value === "none" || value === "evidence_required";
+}
+function assertPeerTemperature(value) {
+  if (value === null)
+    return;
+  if (!Number.isFinite(value) || value < 0 || value > 2) {
+    throw new Error("peerTemperature must be between 0 and 2");
+  }
+}
+function assertBlackboardEntry(entry) {
+  if (!["goal", "candidate", "evidence", "criterion", "disputed"].includes(entry.kind)) {
+    throw new Error("invalid blackboard entry kind");
+  }
+  assertText(entry.text, "blackboard entry text");
+  assertText(entry.sourceMessageId, "blackboard entry sourceMessageId");
+  if (entry.agent !== "claude" && entry.agent !== "codex" && entry.agent !== "system") {
+    throw new Error("invalid blackboard entry agent");
+  }
+}
+function parseSharedBlackboard(value) {
+  const parsed = parseJsonObject(value);
+  const version2 = parsed?.version;
+  if (!parsed || typeof version2 !== "number" || !Number.isInteger(version2) || version2 < 0 || !Array.isArray(parsed.entries))
+    return null;
+  const entries = parsed.entries.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry))
+      return [];
+    const candidate = entry;
+    if (!["goal", "candidate", "evidence", "criterion", "disputed"].includes(String(candidate.kind)))
+      return [];
+    if (typeof candidate.text !== "string" || typeof candidate.sourceMessageId !== "string")
+      return [];
+    if (candidate.agent !== "claude" && candidate.agent !== "codex" && candidate.agent !== "system")
+      return [];
+    const versionAdded = candidate.versionAdded;
+    if (typeof candidate.timestamp !== "string" || typeof versionAdded !== "number" || !Number.isInteger(versionAdded))
+      return [];
+    return [{
+      kind: candidate.kind,
+      text: candidate.text,
+      sourceMessageId: candidate.sourceMessageId,
+      agent: candidate.agent,
+      timestamp: candidate.timestamp,
+      versionAdded
+    }];
+  });
+  return {
+    version: version2,
+    entries,
+    ...typeof parsed.lastCompressedAt === "string" ? { lastCompressedAt: parsed.lastCompressedAt } : {}
+  };
 }
 function assertSessionPolicy(value) {
   if (value !== "auto" && value !== "reuse" && value !== "fresh") {
@@ -9929,7 +10036,15 @@ var CodexAppServerConnector = class {
       if (method && isToolStartedMethod(method)) {
         this.activeActivity?.({ kind: "tool_started", at: Date.now(), currentTool: tool ?? method, processAlive: true, connectionAlive: true, sessionAlive: true });
       } else if (method && isToolCompletedMethod(method)) {
-        this.activeActivity?.({ kind: "tool_completed", at: Date.now(), currentTool: tool, processAlive: true, connectionAlive: true, sessionAlive: true });
+        this.activeActivity?.({
+          kind: "tool_completed",
+          at: Date.now(),
+          currentTool: tool,
+          processAlive: true,
+          connectionAlive: true,
+          sessionAlive: true,
+          toolResult: readToolResult(params)
+        });
       }
       const id = typeof message.id === "number" ? message.id : void 0;
       if (id !== void 0 && this.pending.has(id)) {
@@ -10065,6 +10180,35 @@ function readNestedString(value, path) {
     current = current[key];
   }
   return readString(current);
+}
+function readToolResult(params) {
+  const result = isRecord3(params.result) ? params.result : params;
+  const exitCode = readNumber(result.exitCode) ?? readNumber(result.exit_code) ?? readNestedNumber(params, ["item", "exitCode"]) ?? readNestedNumber(params, ["item", "exit_code"]);
+  if (exitCode !== void 0)
+    return { status: exitCode === 0 ? "passed" : "failed", exitCode };
+  const success = result.success ?? result.passed;
+  if (success === true)
+    return { status: "passed" };
+  if (success === false)
+    return { status: "failed" };
+  const status2 = readString(result.status)?.toLowerCase();
+  if (status2 === "passed" || status2 === "success" || status2 === "succeeded")
+    return { status: "passed" };
+  if (status2 === "failed" || status2 === "error")
+    return { status: "failed" };
+  return { status: "unknown" };
+}
+function readNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : void 0;
+}
+function readNestedNumber(value, path) {
+  let current = value;
+  for (const key of path) {
+    if (!isRecord3(current))
+      return void 0;
+    current = current[key];
+  }
+  return readNumber(current);
 }
 function isRecord3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -18413,7 +18557,7 @@ import { homedir as homedir6, tmpdir } from "node:os";
 import { basename as basename3, join as join8, resolve as resolve8 } from "node:path";
 import { spawnSync } from "node:child_process";
 import process8 from "node:process";
-var CURRENT_VERSION = true ? "0.7.4" : readWorkspaceVersion();
+var CURRENT_VERSION = true ? "0.7.5" : readWorkspaceVersion();
 var DEFAULT_RELEASE_REPOSITORY = "HeadStone1/AgentBridge";
 function normalizeVersion(value) {
   return value.trim().replace(/^v/i, "").split("+", 1)[0];

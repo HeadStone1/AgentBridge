@@ -392,7 +392,15 @@ export class CodexAppServerConnector implements AgentConnector {
       if (method && isToolStartedMethod(method)) {
         this.activeActivity?.({ kind: 'tool_started', at: Date.now(), currentTool: tool ?? method, processAlive: true, connectionAlive: true, sessionAlive: true });
       } else if (method && isToolCompletedMethod(method)) {
-        this.activeActivity?.({ kind: 'tool_completed', at: Date.now(), currentTool: tool, processAlive: true, connectionAlive: true, sessionAlive: true });
+        this.activeActivity?.({
+          kind: 'tool_completed',
+          at: Date.now(),
+          currentTool: tool,
+          processAlive: true,
+          connectionAlive: true,
+          sessionAlive: true,
+          toolResult: readToolResult(params),
+        });
       }
       const id = typeof message.id === 'number' ? message.id : undefined;
       if (id !== undefined && this.pending.has(id)) {
@@ -518,6 +526,35 @@ function readNestedString(value: unknown, path: string[]): string | undefined {
     current = current[key];
   }
   return readString(current);
+}
+
+function readToolResult(params: JsonObject): { status: 'passed' | 'failed' | 'unknown'; exitCode?: number } {
+  const result = isRecord(params.result) ? params.result : params;
+  const exitCode = readNumber(result.exitCode)
+    ?? readNumber(result.exit_code)
+    ?? readNestedNumber(params, ['item', 'exitCode'])
+    ?? readNestedNumber(params, ['item', 'exit_code']);
+  if (exitCode !== undefined) return { status: exitCode === 0 ? 'passed' : 'failed', exitCode };
+  const success = result.success ?? result.passed;
+  if (success === true) return { status: 'passed' };
+  if (success === false) return { status: 'failed' };
+  const status = readString(result.status)?.toLowerCase();
+  if (status === 'passed' || status === 'success' || status === 'succeeded') return { status: 'passed' };
+  if (status === 'failed' || status === 'error') return { status: 'failed' };
+  return { status: 'unknown' };
+}
+
+function readNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function readNestedNumber(value: unknown, path: string[]): number | undefined {
+  let current: unknown = value;
+  for (const key of path) {
+    if (!isRecord(current)) return undefined;
+    current = current[key];
+  }
+  return readNumber(current);
 }
 
 function isRecord(value: unknown): value is JsonObject {

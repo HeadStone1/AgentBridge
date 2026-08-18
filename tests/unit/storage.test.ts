@@ -74,6 +74,33 @@ describe('Storage', () => {
       })).toThrow('mode must be one of');
     });
 
+    it('persists task validation metadata and source-linked blackboard entries', () => {
+      const discussion = storage.createDiscussion({
+        topic: 'Verify a fix',
+        driver: 'claude',
+        traceId: 'tr_evidence_policy',
+        taskType: 'code',
+        validationMode: 'evidence_required',
+        peerTemperature: 0.3,
+      });
+      const blackboard = storage.appendBlackboardEntry(discussion.id, {
+        kind: 'criterion',
+        text: 'Run the focused test suite.',
+        sourceMessageId: 'msg_requirement',
+        agent: 'system',
+      });
+      expect(storage.getDiscussion(discussion.id)).toMatchObject({
+        taskType: 'code',
+        validationMode: 'evidence_required',
+        peerTemperature: 0.3,
+      });
+      expect(blackboard.entries).toMatchObject([{
+        kind: 'criterion',
+        sourceMessageId: 'msg_requirement',
+        versionAdded: 1,
+      }]);
+    });
+
     it('migrates a pre-mode database with a backward-compatible default', () => {
       const directory = mkdtempSync(join(tmpdir(), 'agentbridge-mode-migration-'));
       const dbPath = join(directory, 'legacy.sqlite');

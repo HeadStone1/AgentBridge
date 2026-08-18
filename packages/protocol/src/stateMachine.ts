@@ -2,7 +2,8 @@ import type { DiscussionStatus } from './index.js';
 
 const validTransitions: Record<DiscussionStatus, DiscussionStatus[]> = {
   CREATED: ['DISCUSSING', 'CANCELLED', 'NEEDS_USER_DECISION'],
-  DISCUSSING: ['AGREED', 'FAILED', 'CANCELLED', 'PEER_BUSY', 'TIMEOUT', 'NEEDS_USER_DECISION'],
+  DISCUSSING: ['CONFIRMING', 'AGREED', 'FAILED', 'CANCELLED', 'PEER_BUSY', 'TIMEOUT', 'NEEDS_USER_DECISION'],
+  CONFIRMING: ['DISCUSSING', 'AGREED', 'FAILED', 'CANCELLED', 'PEER_BUSY', 'TIMEOUT', 'NEEDS_USER_DECISION'],
   // Local MVP discussions may end after both agents agree without entering an
   // implementation workflow. Full implementations can still continue through
   // IMPLEMENTING/REVIEWING.

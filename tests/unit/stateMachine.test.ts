@@ -12,6 +12,12 @@ describe('State Machine', () => {
       expect(canTransition('DISCUSSING', 'AGREED')).toBe(true);
     });
 
+    it('uses CONFIRMING only for the candidate conclusion handshake', () => {
+      expect(canTransition('DISCUSSING', 'CONFIRMING')).toBe(true);
+      expect(canTransition('CONFIRMING', 'DISCUSSING')).toBe(true);
+      expect(canTransition('CONFIRMING', 'AGREED')).toBe(true);
+    });
+
     it('DISCUSSING -> COMPLETED is invalid', () => {
       expect(canTransition('DISCUSSING', 'COMPLETED')).toBe(false);
     });

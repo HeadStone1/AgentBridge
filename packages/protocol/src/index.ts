@@ -16,7 +16,29 @@ export type AgentType = 'claude' | 'codex';
 export type SessionPolicy = 'auto' | 'reuse' | 'fresh';
 export const DISCUSSION_MODES = ['review', 'discussion', 'deep-discussion'] as const;
 export type DiscussionMode = (typeof DISCUSSION_MODES)[number];
+export const TASK_TYPES = ['code', 'design', 'qa', 'explain'] as const;
+export type TaskType = (typeof TASK_TYPES)[number];
+export const VALIDATION_MODES = ['none', 'evidence_required'] as const;
+export type ValidationMode = (typeof VALIDATION_MODES)[number];
 export type DiscussionSignal = 'CONTINUE' | 'READY_TO_CLOSE' | 'NEEDS_USER_DECISION';
+export type DiscussionControlAction = 'PROPOSE_CLOSE' | 'CONTINUE' | 'REQUEST_USER';
+export type BlackboardEntryKind = 'goal' | 'candidate' | 'evidence' | 'criterion' | 'disputed';
+
+/** An append-only, source-linked memory aid. It is never an authority over messages. */
+export interface SharedBlackboardEntry {
+  kind: BlackboardEntryKind;
+  text: string;
+  sourceMessageId: string;
+  agent: AgentType | 'system';
+  timestamp: string;
+  versionAdded: number;
+}
+
+export interface SharedBlackboard {
+  version: number;
+  entries: SharedBlackboardEntry[];
+  lastCompressedAt?: string;
+}
 export type DiscussionOrchestration = 'single-turn' | 'automatic';
 export type DiscussionNextAction = 'WAIT' | 'REPLY' | 'PROVIDE_USER_DECISION' | 'RETRY' | 'NONE';
 export type AgreementResolution = 'continue' | 'user_decision';
@@ -59,6 +81,11 @@ export interface PeerActivity {
   connectionAlive?: boolean;
   sessionAlive?: boolean;
   detail?: string;
+  /** Provider-reported tool outcome when the connector can expose one. */
+  toolResult?: {
+    status: 'passed' | 'failed' | 'unknown';
+    exitCode?: number;
+  };
 }
 
 export type PeerRuntimeEventType =
@@ -157,6 +184,7 @@ export interface DiscussionError {
 export type DiscussionStatus =
   | 'CREATED'
   | 'DISCUSSING'
+  | 'CONFIRMING'
   | 'AGREED'
   | 'IMPLEMENTING'
   | 'REVIEWING'
@@ -191,6 +219,13 @@ export interface Discussion {
   topic: string;
   /** Persisted behavior contract controlling evidence, challenge, and convergence depth. */
   mode: DiscussionMode;
+  /** Declares what type of external evidence, if any, applies to this discussion. */
+  taskType: TaskType;
+  validationMode: ValidationMode;
+  /** Provider-facing hint retained for connectors that support temperature control. */
+  peerTemperature: number | null;
+  /** Source-linked working memory; original messages always remain authoritative. */
+  sharedBlackboard: SharedBlackboard | null;
   orchestration: DiscussionOrchestration;
   status: DiscussionStatus;
   driver: AgentType; // Who initiated this discussion
@@ -262,6 +297,9 @@ export interface AskPeerInput {
   projectPath?: string;
   /** Discussion behavior contract; defaults to discussion. */
   mode?: DiscussionMode;
+  taskType?: TaskType;
+  validationMode?: ValidationMode;
+  peerTemperature?: number;
   /** Maximum substantive provider responses; protocol confirmation calls do not consume this ceiling. */
   maxTurns?: number;
   /** Provider-session reuse policy; defaults to the service's auto policy. */
