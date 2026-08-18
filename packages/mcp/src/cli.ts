@@ -90,7 +90,7 @@ async function createRuntime(projectPath: string): Promise<MCPRuntime> {
       stallGraceMs,
       turnHardLimitMs,
       maxDurationMs,
-      asyncDispatch: readBoolean('AGENTBRIDGE_ASYNC_DISPATCH', true),
+      asyncDispatch: readBoolean('AGENTBRIDGE_ASYNC_DISPATCH', false),
       archiveSessionsOnClose: readBoolean('AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE', false),
     },
     {

@@ -435,6 +435,58 @@ describe('CollaborationService', () => {
     asyncStorage.close();
   });
 
+  it('lets both providers complete multiple turns without repeating the full contract or goal', async () => {
+    const promptStorage = new Storage(':memory:');
+    const prompts = { codex: [] as string[], claude: [] as string[] };
+    const promptCollaboration = new CollaborationService(
+      promptStorage,
+      new AuditService(promptStorage),
+      { timeoutMs: 5_000, maxTurns: 4 },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => {
+            prompts.codex.push(prompt);
+            return { content: 'Codex advances the discussion.', duration: 1 };
+          },
+        },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => {
+            prompts.claude.push(prompt);
+            return { content: 'Claude advances the discussion.', duration: 1 };
+          },
+        },
+      },
+    );
+
+    const started = await promptCollaboration.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'prompt continuity',
+      initialMessage: 'Reach one complete answer across several turns.',
+      traceId: 'tr_prompt_continuity',
+      mode: 'discussion',
+    });
+
+    expect(started.status).toBe('NEEDS_USER_DECISION');
+    expect(prompts.codex).toHaveLength(2);
+    expect(prompts.claude).toHaveLength(2);
+    for (const providerPrompts of [prompts.codex, prompts.claude]) {
+      expect(providerPrompts[0]).toContain('<agentbridge-discussion-contract>');
+      expect(providerPrompts[0]).toContain('Goal:');
+      expect(providerPrompts[1]).not.toContain('<agentbridge-discussion-contract>');
+      expect(providerPrompts[1]).not.toContain('Goal:');
+      expect(providerPrompts[1]).toContain('[agentbridge discussion;');
+    }
+    expect(promptStorage.getDiscussion(started.discussionId)?.roundCount).toBe(4);
+    promptStorage.close();
+  });
+
   it('does not impose a deeper minimum before accepting a conclusion', async () => {
     const deepStorage = new Storage(':memory:');
     let codexTurns = 0;

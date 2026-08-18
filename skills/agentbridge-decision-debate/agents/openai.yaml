@@ -3,4 +3,4 @@ interface:
   short_description: "Debate high-impact technical decisions deeply"
   default_prompt: "Use $agentbridge-decision-debate to challenge the leading option, test evidence, and converge on a decision."
 policy:
-  allow_implicit_invocation: true
+  allow_implicit_invocation: false

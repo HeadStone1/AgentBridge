@@ -261,13 +261,6 @@ export class CollaborationService {
       content: params.initialMessage,
       projectPath,
     });
-    this.storage.appendBlackboardEntry(discussion.id, {
-      kind: 'goal',
-      text: params.initialMessage,
-      sourceMessageId: message.id,
-      agent: params.driver,
-    });
-
     this.audit.log({
       traceId: params.traceId,
       discussionId: discussion.id,
@@ -1270,6 +1263,9 @@ export class CollaborationService {
 
         const previousMessages = this.storage.getMessages(discussionId)
           .filter((message) => message.id !== latestMessageId);
+        const firstTurnForReceiver = !previousMessages.some((message) => (
+          message.sender === receiver && message.role === 'response'
+        ));
         const prompt = buildAutomaticTurnPrompt({
           mode: discussion.mode,
           completedResponses: discussion.roundCount,
@@ -1277,7 +1273,9 @@ export class CollaborationService {
           originalRequest,
           latestMessage: latestMessage.content,
           latestSender: latestMessage.sender,
-          blackboard: discussion.sharedBlackboard,
+          includeContract: firstTurnForReceiver,
+          includeOriginalRequest: firstTurnForReceiver,
+          blackboard: discussion.roundCount >= 2 ? discussion.sharedBlackboard : null,
           taskType: discussion.taskType,
           validationMode: discussion.validationMode,
           peerTemperature: discussion.peerTemperature,
@@ -1288,7 +1286,7 @@ export class CollaborationService {
           discussionId,
           receiver,
           prompt,
-          previousMessages,
+          firstTurnForReceiver ? previousMessages.slice(1) : previousMessages,
           {
             applyDiscussionPolicy: false,
             failedMessageId: latestMessageId,
@@ -1659,6 +1657,9 @@ export class CollaborationService {
       }
     const providerSessionKind = readProviderSessionKind(persistedSession?.metadata.sessionKind);
       const completedResponses = discussion.roundCount;
+      const firstTurnForReceiver = !previousMessages.some((message) => (
+        message.sender === receiver && message.role === 'response'
+      ));
       const effectivePrompt = options.applyDiscussionPolicy === false
         ? prompt
         : buildDiscussionPrompt({
@@ -1666,6 +1667,7 @@ export class CollaborationService {
           completedResponses,
           maxTurns: discussion.maxTurns,
           prompt,
+          includeContract: firstTurnForReceiver,
           taskType: discussion.taskType,
           validationMode: discussion.validationMode,
           peerTemperature: discussion.peerTemperature,

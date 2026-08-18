@@ -9,7 +9,7 @@ describe('bounded peer context', () => {
 
     expect(prompt).toContain('message-0-');
     expect(prompt).toContain('message-19-');
-    expect(prompt).toContain('Earlier messages were omitted');
+    expect(prompt).toContain('earlier messages omitted');
     expect(prompt.length).toBeLessThan(1_600);
     expect(prompt.match(/message-10-/)).toBeNull();
   });
