@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildDiscussionPrompt,
+  buildAutomaticTurnPrompt,
   defaultMaxTurnsForMode,
   discussionPhase,
   isAutomaticDiscussionMode,
   parseDiscussionSignal,
+  parseStructuredTurn,
   resolveDiscussionMode,
 } from '../../packages/collaboration/src/discussionPolicy';
 
@@ -45,5 +47,44 @@ describe('discussion depth policy', () => {
       .toBeNull();
     expect(parseDiscussionSignal('[AGENTBRIDGE_SIGNAL: CONTINUE]\ntrailing text')).toBeNull();
     expect(parseDiscussionSignal('READY_TO_CLOSE')).toBeNull();
+  });
+
+  it('accepts an optional final structured control event while preserving natural reply text', () => {
+    const content = [
+      'The migration can close if the index build is monitored.',
+      '```json',
+      '{"agentbridge":{"action":"PROPOSE_CLOSE","summary":"Use the online migration"}}',
+      '```',
+    ].join('\n');
+    expect(parseStructuredTurn(content)).toMatchObject({
+      action: 'PROPOSE_CLOSE',
+      summary: 'Use the online migration',
+    });
+    expect(parseDiscussionSignal(content)).toBe('READY_TO_CLOSE');
+  });
+
+  it('injects only a source-linked blackboard snapshot into automatic turns', () => {
+    const prompt = buildAutomaticTurnPrompt({
+      mode: 'discussion',
+      completedResponses: 1,
+      maxTurns: 12,
+      originalRequest: 'Choose a migration.',
+      latestMessage: 'Prefer online migration.',
+      latestSender: 'claude',
+      blackboard: {
+        version: 2,
+        entries: [{
+          kind: 'criterion',
+          text: 'Avoid downtime.',
+          sourceMessageId: 'msg_source',
+          agent: 'claude',
+          timestamp: '2026-08-17T00:00:00.000Z',
+          versionAdded: 2,
+        }],
+      },
+    });
+    expect(prompt).toContain('<shared-blackboard>');
+    expect(prompt).toContain('msg_source');
+    expect(prompt).toContain('memory aid, not ground truth');
   });
 });

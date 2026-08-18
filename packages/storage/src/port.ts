@@ -11,6 +11,10 @@ import type {
   DiscussionOperationKind,
   DiscussionOrchestration,
   DiscussionMode,
+  TaskType,
+  ValidationMode,
+  SharedBlackboard,
+  SharedBlackboardEntry,
   DiscussionSignal,
   Message,
   MessageRole,
@@ -39,6 +43,9 @@ export interface StoragePort {
     peer?: AgentType;
     traceId: string;
     mode?: DiscussionMode;
+    taskType?: TaskType;
+    validationMode?: ValidationMode;
+    peerTemperature?: number | null;
     maxTurns?: number;
     maxRetries?: number;
     collaborationSessionId?: string;
@@ -77,6 +84,7 @@ export interface StoragePort {
   updateDiscussionStatus(id: string, status: DiscussionStatus, extra?: Partial<Discussion>): void;
   updateDiscussionMode(id: string, mode: DiscussionMode): void;
   updateDiscussionPolicy(id: string, mode: DiscussionMode, orchestration: DiscussionOrchestration): void;
+  appendBlackboardEntry(id: string, entry: Omit<SharedBlackboardEntry, 'timestamp' | 'versionAdded'> & { timestamp?: string }): SharedBlackboard;
   updateDiscussionDispatch(id: string, state: DispatchState | null, waitingFor?: AgentType | null): void;
   updateDiscussionFailure(id: string, failure: {
     receiver: AgentType | null;

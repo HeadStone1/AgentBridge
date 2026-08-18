@@ -2,8 +2,12 @@ import {
   DEFAULT_DISCUSSION_MODE,
   DEFAULT_MAX_TURNS_BY_MODE,
   DISCUSSION_MODES,
+  type SharedBlackboard,
+  type DiscussionControlAction,
   type DiscussionMode,
   type DiscussionSignal,
+  type TaskType,
+  type ValidationMode,
 } from '@agentbridge/protocol';
 
 const DEEP_PHASES = ['challenge', 'evidence', 'rebuttal', 'revision', 'verification', 'convergence'] as const;
@@ -43,6 +47,9 @@ export function buildDiscussionPrompt(params: {
   completedResponses: number;
   maxTurns: number;
   prompt: string;
+  taskType?: TaskType;
+  validationMode?: ValidationMode;
+  peerTemperature?: number | null;
 }): string {
   const phase = discussionPhase(params.mode, params.completedResponses);
   const modeRules = params.mode === 'review'
@@ -65,12 +72,17 @@ export function buildDiscussionPrompt(params: {
     `mode: ${params.mode}`,
     `phase: ${phase}`,
     `successful-provider-responses: ${params.completedResponses}/${params.maxTurns}`,
+    ...(params.taskType ? [`task-type: ${params.taskType}`] : []),
+    ...(params.validationMode ? [`validation-mode: ${params.validationMode}`] : []),
+    ...(params.peerTemperature === null || params.peerTemperature === undefined
+      ? []
+      : [`peer-temperature-hint: ${params.peerTemperature}`]),
     'The response limit is a safety ceiling, not a target. Converge early when acceptance criteria are met.',
     ...modeRules,
-    'End with exactly one signal line:',
-    '[AGENTBRIDGE_SIGNAL: CONTINUE] when new evidence or a material objection remains;',
-    '[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE] when a canonical conclusion is supportable;',
-    '[AGENTBRIDGE_SIGNAL: NEEDS_USER_DECISION] when the blocker is a product, risk, permission, or preference choice.',
+    'Do not agree merely to be agreeable: when accepting a substantive conclusion, name the key reason; when objecting, give a concrete counterexample, new evidence, or testable condition.',
+    'Ordinary replies stay natural-language and need no control marker. Only when changing discussion state, append one final control event:',
+    'a JSON code block with {"agentbridge":{"action":"PROPOSE_CLOSE|CONTINUE|REQUEST_USER","summary":"short reason","objections":["optional unresolved issue"]}}.',
+    'Legacy final signal lines remain supported: [AGENTBRIDGE_SIGNAL: CONTINUE], [AGENTBRIDGE_SIGNAL: READY_TO_CLOSE], or [AGENTBRIDGE_SIGNAL: NEEDS_USER_DECISION].',
     '</agentbridge-discussion-contract>',
     '',
     '<current-request>',
@@ -86,12 +98,20 @@ export function buildAutomaticTurnPrompt(params: {
   originalRequest: string;
   latestMessage: string;
   latestSender: string;
+  blackboard?: SharedBlackboard | null;
+  taskType?: TaskType;
+  validationMode?: ValidationMode;
+  peerTemperature?: number | null;
 }): string {
   const boundedLatest = params.latestMessage.trim();
+  const blackboard = renderBlackboard(params.blackboard);
   return buildDiscussionPrompt({
     mode: params.mode,
     completedResponses: params.completedResponses,
     maxTurns: params.maxTurns,
+    taskType: params.taskType,
+    validationMode: params.validationMode,
+    peerTemperature: params.peerTemperature,
     prompt: [
       '<automatic-discussion-context>',
       '<original-request>',
@@ -103,14 +123,85 @@ export function buildAutomaticTurnPrompt(params: {
       '</latest-peer-message>',
       'Respond to the latest peer message and advance the discussion. Do not call AgentBridge tools.',
       '</automatic-discussion-context>',
+      ...(blackboard ? [blackboard] : []),
     ].join('\n'),
   });
 }
 
 export function parseDiscussionSignal(content: string): DiscussionSignal | null {
+  const structured = parseStructuredTurn(content);
+  if (structured) return signalForAction(structured.action);
   const matches = [...content.matchAll(/\[AGENTBRIDGE_SIGNAL:\s*(CONTINUE|READY_TO_CLOSE|NEEDS_USER_DECISION)\]/g)];
   if (matches.length !== 1) return null;
   const match = matches[0];
   if (!content.trimEnd().endsWith(match[0])) return null;
   return match[1] as DiscussionSignal;
+}
+
+export interface StructuredTurn {
+  action: DiscussionControlAction;
+  summary?: string;
+  objections?: string[];
+}
+
+/**
+ * Reads the optional, final JSON control event without making the discussion
+ * body a rigid schema. The legacy text signal remains the fallback.
+ */
+export function parseStructuredTurn(content: string): StructuredTurn | null {
+  const match = content.trim().match(/```(?:json)?\s*\n?([\s\S]*?)\n?```\s*$/i);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[1]) as unknown;
+    if (!isRecord(parsed)) return null;
+    const payload = isRecord(parsed.agentbridge) ? parsed.agentbridge : parsed;
+    const action = payload.action;
+    if (action !== 'PROPOSE_CLOSE' && action !== 'CONTINUE' && action !== 'REQUEST_USER') return null;
+    const objections = Array.isArray(payload.objections)
+      ? payload.objections.filter((value): value is string => typeof value === 'string').slice(0, 12)
+      : undefined;
+    return {
+      action,
+      ...(typeof payload.summary === 'string' && payload.summary.trim() ? { summary: payload.summary.trim() } : {}),
+      ...(objections?.length ? { objections } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function stripDiscussionControl(content: string): string {
+  const withoutStructured = content.trim().replace(/\s*```(?:json)?\s*\n?[\s\S]*?\n?```\s*$/i, (block) => (
+    parseStructuredTurn(block) ? '' : block
+  ));
+  return withoutStructured
+    .replace(/\s*\[AGENTBRIDGE_SIGNAL:\s*(?:CONTINUE|READY_TO_CLOSE|NEEDS_USER_DECISION)\]\s*$/, '')
+    .trim();
+}
+
+function signalForAction(action: DiscussionControlAction): DiscussionSignal {
+  return action === 'PROPOSE_CLOSE'
+    ? 'READY_TO_CLOSE'
+    : action === 'REQUEST_USER'
+      ? 'NEEDS_USER_DECISION'
+      : 'CONTINUE';
+}
+
+function renderBlackboard(blackboard: SharedBlackboard | null | undefined): string | null {
+  if (!blackboard?.entries.length) return null;
+  const entries = blackboard.entries.slice(-12).map((entry) => ({
+    kind: entry.kind,
+    text: entry.text,
+    sourceMessageId: entry.sourceMessageId,
+  }));
+  return [
+    '<shared-blackboard>',
+    'This is a source-linked memory aid, not ground truth. Resolve conflicts by checking the cited original message.',
+    JSON.stringify({ version: blackboard.version, entries }),
+    '</shared-blackboard>',
+  ].join('\n');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

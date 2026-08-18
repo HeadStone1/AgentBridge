@@ -21,6 +21,10 @@ import type {
   DiscussionMode,
   DiscussionOrchestration,
   DiscussionSignal,
+  TaskType,
+  ValidationMode,
+  SharedBlackboard,
+  SharedBlackboardEntry,
   PermissionDecision,
   PermissionRequest,
   PermissionRequestStatus,
@@ -48,6 +52,8 @@ export {
 export type { RegisteredProject } from './registry.js';
 
 const DEFAULT_MAX_TURNS = 12;
+const DEFAULT_TASK_TYPE: TaskType = 'explain';
+const DEFAULT_VALIDATION_MODE: ValidationMode = 'none';
 const MAX_ALLOWED_TURNS = 50;
 const MAX_TEXT_LENGTH = 100_000;
 const SQLITE_STARTUP_TIMEOUT_MS = 5_000;
@@ -76,6 +82,10 @@ CREATE TABLE IF NOT EXISTS discussions (
   id TEXT PRIMARY KEY,
   topic TEXT NOT NULL,
   mode TEXT NOT NULL DEFAULT 'discussion',
+  task_type TEXT NOT NULL DEFAULT 'explain',
+  validation_mode TEXT NOT NULL DEFAULT 'none',
+  peer_temperature REAL,
+  shared_blackboard TEXT,
   orchestration TEXT NOT NULL DEFAULT 'single-turn',
   status TEXT NOT NULL DEFAULT 'CREATED',
   dispatch_state TEXT,
@@ -302,6 +312,10 @@ export class Storage {
     this.ensureColumn('discussions', 'failed_operation_kind', 'ALTER TABLE discussions ADD COLUMN failed_operation_kind TEXT');
     this.ensureColumn('discussions', 'collaboration_session_id', 'ALTER TABLE discussions ADD COLUMN collaboration_session_id TEXT');
     this.ensureColumn('discussions', 'mode', "ALTER TABLE discussions ADD COLUMN mode TEXT NOT NULL DEFAULT 'discussion'");
+    this.ensureColumn('discussions', 'task_type', "ALTER TABLE discussions ADD COLUMN task_type TEXT NOT NULL DEFAULT 'explain'");
+    this.ensureColumn('discussions', 'validation_mode', "ALTER TABLE discussions ADD COLUMN validation_mode TEXT NOT NULL DEFAULT 'none'");
+    this.ensureColumn('discussions', 'peer_temperature', 'ALTER TABLE discussions ADD COLUMN peer_temperature REAL');
+    this.ensureColumn('discussions', 'shared_blackboard', 'ALTER TABLE discussions ADD COLUMN shared_blackboard TEXT');
     // Existing discussions were created with the manual one-turn contract.
     // New automatic discussions opt in explicitly at creation time.
     this.ensureColumn('discussions', 'orchestration', "ALTER TABLE discussions ADD COLUMN orchestration TEXT NOT NULL DEFAULT 'single-turn'");
@@ -347,6 +361,9 @@ export class Storage {
     peer?: AgentType;
     traceId: string;
     mode?: DiscussionMode;
+    taskType?: TaskType;
+    validationMode?: ValidationMode;
+    peerTemperature?: number | null;
     maxTurns?: number;
     maxRetries?: number;
     collaborationSessionId?: string;
@@ -358,6 +375,9 @@ export class Storage {
     const maxRetries = data.maxRetries ?? 2;
     const peer = data.peer ?? (data.driver === 'claude' ? 'codex' : 'claude');
     const mode = data.mode ?? DEFAULT_DISCUSSION_MODE;
+    const taskType = data.taskType ?? DEFAULT_TASK_TYPE;
+    const validationMode = data.validationMode ?? DEFAULT_VALIDATION_MODE;
+    const peerTemperature = data.peerTemperature ?? null;
     const orchestration = data.orchestration ?? 'single-turn';
 
     assertText(data.topic, 'topic');
@@ -365,16 +385,19 @@ export class Storage {
     assertTurns(maxTurns);
     assertRetries(maxRetries);
     assertDiscussionMode(mode);
+    assertTaskType(taskType);
+    assertValidationMode(validationMode);
+    assertPeerTemperature(peerTemperature);
     if (!['single-turn', 'automatic'].includes(orchestration)) {
       throw new Error('orchestration must be single-turn or automatic');
     }
 
     this.db
       .prepare(
-        `INSERT INTO discussions (id, topic, mode, orchestration, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id, collaboration_session_id)
-         VALUES (?, ?, ?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO discussions (id, topic, mode, task_type, validation_mode, peer_temperature, orchestration, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id, collaboration_session_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, data.topic, mode, orchestration, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId, data.collaborationSessionId ?? null);
+      .run(id, data.topic, mode, taskType, validationMode, peerTemperature, orchestration, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId, data.collaborationSessionId ?? null);
 
     return this.getDiscussion(id)!;
   }
@@ -663,6 +686,33 @@ export class Storage {
     this.db.prepare(
       'UPDATE discussions SET mode = ?, orchestration = ?, updated_at = ? WHERE id = ?',
     ).run(mode, orchestration, new Date().toISOString(), id);
+  }
+
+  appendBlackboardEntry(
+    id: string,
+    entry: Omit<SharedBlackboardEntry, 'timestamp' | 'versionAdded'> & { timestamp?: string },
+  ): SharedBlackboard {
+    const discussion = this.getDiscussion(id);
+    if (!discussion) throw new Error(`Discussion ${id} not found`);
+    assertBlackboardEntry(entry);
+    const current = discussion.sharedBlackboard ?? { version: 0, entries: [] };
+    const version = current.version + 1;
+    const next: SharedBlackboard = {
+      version,
+      entries: [
+        ...current.entries,
+        {
+          ...entry,
+          text: entry.text.trim().slice(0, 4_000),
+          timestamp: entry.timestamp ?? new Date().toISOString(),
+          versionAdded: version,
+        },
+      ].slice(-50),
+    };
+    this.db.prepare(
+      'UPDATE discussions SET shared_blackboard = ?, updated_at = ? WHERE id = ?',
+    ).run(JSON.stringify(next), new Date().toISOString(), id);
+    return next;
   }
 
   updateDiscussionDispatch(id: string, state: DispatchState | null, waitingFor: AgentType | null = null): void {
@@ -1336,6 +1386,12 @@ function rowToDiscussion(row: Record<string, unknown>): Discussion {
     id: row.id as string,
     topic: row.topic as string,
     mode: (row.mode as DiscussionMode | null) ?? DEFAULT_DISCUSSION_MODE,
+    taskType: isTaskType(row.task_type) ? row.task_type : DEFAULT_TASK_TYPE,
+    validationMode: isValidationMode(row.validation_mode) ? row.validation_mode : DEFAULT_VALIDATION_MODE,
+    peerTemperature: typeof row.peer_temperature === 'number' && Number.isFinite(row.peer_temperature)
+      ? row.peer_temperature
+      : null,
+    sharedBlackboard: parseSharedBlackboard(row.shared_blackboard),
     orchestration: (row.orchestration as DiscussionOrchestration | null) ?? 'single-turn',
     status: row.status as DiscussionStatus,
     driver,
@@ -1507,6 +1563,68 @@ function isReusableBridgeSession(session: AgentSession): boolean {
   return (session.status === 'IDLE' || session.status === 'BRIDGE_OWNED')
     && session.metadata.bridgeOwned === true
     && typeof session.metadata.supersededBy !== 'string';
+}
+
+function assertTaskType(value: string): asserts value is TaskType {
+  if (!isTaskType(value)) throw new Error('taskType must be one of: code, design, qa, explain');
+}
+
+function isTaskType(value: unknown): value is TaskType {
+  return value === 'code' || value === 'design' || value === 'qa' || value === 'explain';
+}
+
+function assertValidationMode(value: string): asserts value is ValidationMode {
+  if (!isValidationMode(value)) throw new Error('validationMode must be none or evidence_required');
+}
+
+function isValidationMode(value: unknown): value is ValidationMode {
+  return value === 'none' || value === 'evidence_required';
+}
+
+function assertPeerTemperature(value: number | null): void {
+  if (value === null) return;
+  if (!Number.isFinite(value) || value < 0 || value > 2) {
+    throw new Error('peerTemperature must be between 0 and 2');
+  }
+}
+
+function assertBlackboardEntry(entry: Omit<SharedBlackboardEntry, 'timestamp' | 'versionAdded'>): void {
+  if (!['goal', 'candidate', 'evidence', 'criterion', 'disputed'].includes(entry.kind)) {
+    throw new Error('invalid blackboard entry kind');
+  }
+  assertText(entry.text, 'blackboard entry text');
+  assertText(entry.sourceMessageId, 'blackboard entry sourceMessageId');
+  if (entry.agent !== 'claude' && entry.agent !== 'codex' && entry.agent !== 'system') {
+    throw new Error('invalid blackboard entry agent');
+  }
+}
+
+function parseSharedBlackboard(value: unknown): SharedBlackboard | null {
+  const parsed = parseJsonObject(value);
+  const version = parsed?.version;
+  if (!parsed || typeof version !== 'number' || !Number.isInteger(version) || version < 0 || !Array.isArray(parsed.entries)) return null;
+  const entries = parsed.entries.flatMap((entry): SharedBlackboardEntry[] => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+    const candidate = entry as Record<string, unknown>;
+    if (!['goal', 'candidate', 'evidence', 'criterion', 'disputed'].includes(String(candidate.kind))) return [];
+    if (typeof candidate.text !== 'string' || typeof candidate.sourceMessageId !== 'string') return [];
+    if (candidate.agent !== 'claude' && candidate.agent !== 'codex' && candidate.agent !== 'system') return [];
+    const versionAdded = candidate.versionAdded;
+    if (typeof candidate.timestamp !== 'string' || typeof versionAdded !== 'number' || !Number.isInteger(versionAdded)) return [];
+    return [{
+      kind: candidate.kind as SharedBlackboardEntry['kind'],
+      text: candidate.text,
+      sourceMessageId: candidate.sourceMessageId,
+      agent: candidate.agent,
+      timestamp: candidate.timestamp,
+      versionAdded,
+    }];
+  });
+  return {
+    version,
+    entries,
+    ...(typeof parsed.lastCompressedAt === 'string' ? { lastCompressedAt: parsed.lastCompressedAt } : {}),
+  };
 }
 
 function assertSessionPolicy(value: string): asserts value is SessionPolicy {

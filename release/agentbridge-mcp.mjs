@@ -7027,7 +7027,8 @@ import { resolve } from "node:path";
 // packages/protocol/dist/stateMachine.js
 var validTransitions = {
   CREATED: ["DISCUSSING", "CANCELLED", "NEEDS_USER_DECISION"],
-  DISCUSSING: ["AGREED", "FAILED", "CANCELLED", "PEER_BUSY", "TIMEOUT", "NEEDS_USER_DECISION"],
+  DISCUSSING: ["CONFIRMING", "AGREED", "FAILED", "CANCELLED", "PEER_BUSY", "TIMEOUT", "NEEDS_USER_DECISION"],
+  CONFIRMING: ["DISCUSSING", "AGREED", "FAILED", "CANCELLED", "PEER_BUSY", "TIMEOUT", "NEEDS_USER_DECISION"],
   // Local MVP discussions may end after both agents agree without entering an
   // implementation workflow. Full implementations can still continue through
   // IMPLEMENTING/REVIEWING.
@@ -7090,6 +7091,8 @@ function resolveProjectPath(explicit, env = process.env, cwd = process.cwd()) {
   return resolve(candidate ?? cwd);
 }
 var DISCUSSION_MODES = ["review", "discussion", "deep-discussion"];
+var TASK_TYPES = ["code", "design", "qa", "explain"];
+var VALIDATION_MODES = ["none", "evidence_required"];
 var DEFAULT_DISCUSSION_MODE = "discussion";
 var DEFAULT_MAX_TURNS_BY_MODE = {
   review: 3,
@@ -7144,12 +7147,15 @@ function buildDiscussionPrompt(params) {
     `mode: ${params.mode}`,
     `phase: ${phase}`,
     `successful-provider-responses: ${params.completedResponses}/${params.maxTurns}`,
+    ...params.taskType ? [`task-type: ${params.taskType}`] : [],
+    ...params.validationMode ? [`validation-mode: ${params.validationMode}`] : [],
+    ...params.peerTemperature === null || params.peerTemperature === void 0 ? [] : [`peer-temperature-hint: ${params.peerTemperature}`],
     "The response limit is a safety ceiling, not a target. Converge early when acceptance criteria are met.",
     ...modeRules,
-    "End with exactly one signal line:",
-    "[AGENTBRIDGE_SIGNAL: CONTINUE] when new evidence or a material objection remains;",
-    "[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE] when a canonical conclusion is supportable;",
-    "[AGENTBRIDGE_SIGNAL: NEEDS_USER_DECISION] when the blocker is a product, risk, permission, or preference choice.",
+    "Do not agree merely to be agreeable: when accepting a substantive conclusion, name the key reason; when objecting, give a concrete counterexample, new evidence, or testable condition.",
+    "Ordinary replies stay natural-language and need no control marker. Only when changing discussion state, append one final control event:",
+    'a JSON code block with {"agentbridge":{"action":"PROPOSE_CLOSE|CONTINUE|REQUEST_USER","summary":"short reason","objections":["optional unresolved issue"]}}.',
+    "Legacy final signal lines remain supported: [AGENTBRIDGE_SIGNAL: CONTINUE], [AGENTBRIDGE_SIGNAL: READY_TO_CLOSE], or [AGENTBRIDGE_SIGNAL: NEEDS_USER_DECISION].",
     "</agentbridge-discussion-contract>",
     "",
     "<current-request>",
@@ -7159,10 +7165,14 @@ function buildDiscussionPrompt(params) {
 }
 function buildAutomaticTurnPrompt(params) {
   const boundedLatest = params.latestMessage.trim();
+  const blackboard = renderBlackboard(params.blackboard);
   return buildDiscussionPrompt({
     mode: params.mode,
     completedResponses: params.completedResponses,
     maxTurns: params.maxTurns,
+    taskType: params.taskType,
+    validationMode: params.validationMode,
+    peerTemperature: params.peerTemperature,
     prompt: [
       "<automatic-discussion-context>",
       "<original-request>",
@@ -7173,11 +7183,15 @@ function buildAutomaticTurnPrompt(params) {
       boundedLatest,
       "</latest-peer-message>",
       "Respond to the latest peer message and advance the discussion. Do not call AgentBridge tools.",
-      "</automatic-discussion-context>"
+      "</automatic-discussion-context>",
+      ...blackboard ? [blackboard] : []
     ].join("\n")
   });
 }
 function parseDiscussionSignal(content) {
+  const structured = parseStructuredTurn(content);
+  if (structured)
+    return signalForAction(structured.action);
   const matches = [...content.matchAll(/\[AGENTBRIDGE_SIGNAL:\s*(CONTINUE|READY_TO_CLOSE|NEEDS_USER_DECISION)\]/g)];
   if (matches.length !== 1)
     return null;
@@ -7185,6 +7199,53 @@ function parseDiscussionSignal(content) {
   if (!content.trimEnd().endsWith(match[0]))
     return null;
   return match[1];
+}
+function parseStructuredTurn(content) {
+  const match = content.trim().match(/```(?:json)?\s*\n?([\s\S]*?)\n?```\s*$/i);
+  if (!match)
+    return null;
+  try {
+    const parsed = JSON.parse(match[1]);
+    if (!isRecord(parsed))
+      return null;
+    const payload = isRecord(parsed.agentbridge) ? parsed.agentbridge : parsed;
+    const action = payload.action;
+    if (action !== "PROPOSE_CLOSE" && action !== "CONTINUE" && action !== "REQUEST_USER")
+      return null;
+    const objections = Array.isArray(payload.objections) ? payload.objections.filter((value) => typeof value === "string").slice(0, 12) : void 0;
+    return {
+      action,
+      ...typeof payload.summary === "string" && payload.summary.trim() ? { summary: payload.summary.trim() } : {},
+      ...objections?.length ? { objections } : {}
+    };
+  } catch {
+    return null;
+  }
+}
+function stripDiscussionControl(content) {
+  const withoutStructured = content.trim().replace(/\s*```(?:json)?\s*\n?[\s\S]*?\n?```\s*$/i, (block) => parseStructuredTurn(block) ? "" : block);
+  return withoutStructured.replace(/\s*\[AGENTBRIDGE_SIGNAL:\s*(?:CONTINUE|READY_TO_CLOSE|NEEDS_USER_DECISION)\]\s*$/, "").trim();
+}
+function signalForAction(action) {
+  return action === "PROPOSE_CLOSE" ? "READY_TO_CLOSE" : action === "REQUEST_USER" ? "NEEDS_USER_DECISION" : "CONTINUE";
+}
+function renderBlackboard(blackboard) {
+  if (!blackboard?.entries.length)
+    return null;
+  const entries = blackboard.entries.slice(-12).map((entry) => ({
+    kind: entry.kind,
+    text: entry.text,
+    sourceMessageId: entry.sourceMessageId
+  }));
+  return [
+    "<shared-blackboard>",
+    "This is a source-linked memory aid, not ground truth. Resolve conflicts by checking the cited original message.",
+    JSON.stringify({ version: blackboard.version, entries }),
+    "</shared-blackboard>"
+  ].join("\n");
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // packages/collaboration/dist/index.js
@@ -7205,6 +7266,7 @@ var CollaborationService = class {
   asyncDispatch;
   archiveSessionsOnClose;
   sessionPolicy;
+  validationMode;
   connectors;
   ownerId = `collaboration:${process.pid}:${randomUUID()}`;
   inFlight = /* @__PURE__ */ new Map();
@@ -7228,8 +7290,12 @@ var CollaborationService = class {
     this.asyncDispatch = config2.asyncDispatch ?? false;
     this.archiveSessionsOnClose = config2.archiveSessionsOnClose ?? false;
     this.sessionPolicy = config2.sessionPolicy ?? "auto";
+    this.validationMode = config2.validationMode ?? "none";
     if (!["auto", "reuse", "fresh"].includes(this.sessionPolicy))
       throw new Error("sessionPolicy must be auto, reuse, or fresh");
+    if (this.validationMode !== "none" && this.validationMode !== "evidence_required") {
+      throw new Error("validationMode must be none or evidence_required");
+    }
     if (!Number.isInteger(this.maxTurns) || this.maxTurns < 1 || this.maxTurns > 50) {
       throw new Error("maxTurns must be an integer between 1 and 50");
     }
@@ -7266,6 +7332,12 @@ var CollaborationService = class {
   async initiateDiscussion(params) {
     const projectPath = resolveProjectPath(params.projectPath);
     const mode = resolveDiscussionMode(params.mode);
+    const taskType = params.taskType ?? "explain";
+    const validationMode = params.validationMode ?? this.validationMode;
+    const peerTemperature = params.peerTemperature ?? null;
+    assertTaskType(taskType);
+    assertValidationMode(validationMode);
+    assertPeerTemperature(peerTemperature);
     const maxTurns = params.maxTurns ?? (this.maxTurnsWasConfigured ? this.maxTurns : defaultMaxTurnsForMode(mode));
     if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 50) {
       throw new Error("maxTurns must be an integer between 1 and 50");
@@ -7288,6 +7360,9 @@ var CollaborationService = class {
       projectPath,
       traceId: params.traceId,
       mode,
+      taskType,
+      validationMode,
+      peerTemperature,
       maxTurns,
       collaborationSessionId: collaborationSession.id,
       orchestration
@@ -7302,6 +7377,9 @@ var CollaborationService = class {
         topic: params.topic,
         projectPath,
         mode,
+        taskType,
+        validationMode,
+        peerTemperature,
         maxTurns,
         orchestration,
         sessionPolicy,
@@ -7315,6 +7393,12 @@ var CollaborationService = class {
       role: "proposal",
       content: params.initialMessage,
       projectPath
+    });
+    this.storage.appendBlackboardEntry(discussion.id, {
+      kind: "goal",
+      text: params.initialMessage,
+      sourceMessageId: message.id,
+      agent: params.driver
     });
     this.audit.log({
       traceId: params.traceId,
@@ -7637,6 +7721,9 @@ var CollaborationService = class {
     if (![discussion.driver, discussion.peer].includes(params.agent)) {
       throw new Error(`Agent ${params.agent} is not a participant in discussion ${params.discussionId}`);
     }
+    const validation = this.validateConclusion(discussion);
+    if (!validation.passed)
+      throw new Error(validation.reason);
     this.ensureNoDispatchInFlight(params.discussionId);
     const otherAgent = params.agent === discussion.driver ? discussion.peer : discussion.driver;
     this.ensureProviderNotLeased(otherAgent, discussion.projectPath);
@@ -7666,7 +7753,7 @@ var CollaborationService = class {
         return this.completeDiscussion(discussion, params.conclusion, agreement.agreedBy);
       }
       if (!existingConclusion) {
-        this.storage.createMessage({
+        const conclusionMessage = this.storage.createMessage({
           discussionId: params.discussionId,
           sender: params.agent,
           receiver: otherAgent,
@@ -7674,17 +7761,24 @@ var CollaborationService = class {
           content: params.conclusion,
           projectPath: discussion.projectPath
         });
+        this.storage.appendBlackboardEntry(params.discussionId, {
+          kind: "candidate",
+          text: params.conclusion,
+          sourceMessageId: conclusionMessage.id,
+          agent: params.agent
+        });
       }
       const messages = this.storage.getMessages(params.discussionId);
-      const agreementPrompt = buildAgreementPrompt(params.conclusion, agreement.decisionHash);
+      const agreementPrompt = buildAgreementPrompt(params.conclusion, agreement.decisionHash, discussion.taskType, discussion.validationMode);
       const conclusionMessageId = messages.find((message) => message.sender === params.agent && message.receiver === otherAgent && message.role === "conclusion" && message.content === params.conclusion)?.id ?? null;
+      this.storage.updateDiscussionStatus(params.discussionId, "CONFIRMING");
       this.queueDispatch(params.discussionId, otherAgent);
       if (this.asyncDispatch) {
         this.startBackgroundAgreementConfirmation(discussion.id, params.agent, otherAgent, params.conclusion, agreement.decisionHash, agreementPrompt, messages, conclusionMessageId);
         discussionLeaseOwned = false;
         return {
           discussionId: params.discussionId,
-          status: "DISCUSSING",
+          status: "CONFIRMING",
           waitingFor: [otherAgent],
           dispatchState: "QUEUED"
         };
@@ -7709,6 +7803,9 @@ var CollaborationService = class {
         });
       }
       if (!peerResponse) {
+        const current = this.storage.getDiscussion(params.discussionId);
+        if (current?.status === "CONFIRMING")
+          this.storage.updateDiscussionStatus(params.discussionId, "DISCUSSING");
         return {
           discussionId: params.discussionId,
           status: "DISCUSSING",
@@ -7724,6 +7821,8 @@ var CollaborationService = class {
           this.storage.updateDiscussionSignal(params.discussionId, "NEEDS_USER_DECISION");
           this.storage.updateDiscussionStatus(params.discussionId, "NEEDS_USER_DECISION");
           this.storage.updateDiscussionDiagnostic(params.discussionId, "UNRESOLVED_DISAGREEMENT");
+        } else {
+          this.storage.updateDiscussionStatus(params.discussionId, "DISCUSSING");
         }
         this.audit.log({
           traceId: discussion.traceId,
@@ -8035,9 +8134,10 @@ var CollaborationService = class {
         summary: conclusion
       });
       const messages = this.storage.getMessages(discussionId);
+      this.storage.updateDiscussionStatus(discussionId, "CONFIRMING");
       this.storage.updateDiscussionPending(discussionId, "agreement_confirmation", conclusionMessage.id);
       this.storage.updateDiscussionDispatch(discussionId, "RUNNING", receiver);
-      const peerResponse = await this.dispatchToAgent(discussionId, receiver, buildAgreementPrompt(conclusion, agreement.decisionHash), messages, {
+      const peerResponse = await this.dispatchToAgent(discussionId, receiver, buildAgreementPrompt(conclusion, agreement.decisionHash, discussion.taskType, discussion.validationMode), messages, {
         applyDiscussionPolicy: false,
         countRound: false,
         failedMessageId: conclusionMessage.id,
@@ -8061,6 +8161,8 @@ var CollaborationService = class {
       if (decision.resolution === "user_decision") {
         this.storage.updateDiscussionStatus(discussionId, "NEEDS_USER_DECISION");
         this.storage.updateDiscussionDiagnostic(discussionId, "UNRESOLVED_DISAGREEMENT");
+      } else {
+        this.storage.updateDiscussionStatus(discussionId, "DISCUSSING");
       }
       this.audit.log({
         traceId: discussion.traceId,
@@ -8107,7 +8209,11 @@ var CollaborationService = class {
           maxTurns: discussion.maxTurns,
           originalRequest,
           latestMessage: latestMessage.content,
-          latestSender: latestMessage.sender
+          latestSender: latestMessage.sender,
+          blackboard: discussion.sharedBlackboard,
+          taskType: discussion.taskType,
+          validationMode: discussion.validationMode,
+          peerTemperature: discussion.peerTemperature
         });
         this.storage.updateDiscussionPending(discussionId, "automatic_turn", latestMessageId);
         this.storage.updateDiscussionDispatch(discussionId, "RUNNING", receiver);
@@ -8126,10 +8232,17 @@ var CollaborationService = class {
         latestMessageId = response.id;
         this.storage.updateDiscussionPending(discussionId, null, null);
         const rawSignal = parseDiscussionSignal(response.content);
+        const structuredTurn = parseStructuredTurn(response.content);
         const afterResponse = this.storage.getDiscussion(discussionId);
         if (!afterResponse)
           return response;
         if (rawSignal === "NEEDS_USER_DECISION") {
+          this.storage.appendBlackboardEntry(discussionId, {
+            kind: "disputed",
+            text: structuredTurn?.summary ?? stripDiscussionControl(response.content),
+            sourceMessageId: response.id,
+            agent: response.sender
+          });
           this.storage.updateDiscussionSignal(discussionId, rawSignal);
           this.storage.updateDiscussionStatus(discussionId, "NEEDS_USER_DECISION");
           this.storage.updateDiscussionDiagnostic(discussionId, "PEER_REQUESTED_USER_DECISION");
@@ -8166,10 +8279,34 @@ var CollaborationService = class {
     }
   }
   async confirmAutomaticConclusion(discussion, candidate) {
-    const conclusion = stripDiscussionSignal(candidate.content);
+    const conclusion = stripDiscussionControl(candidate.content);
     if (!conclusion)
       return { accepted: false };
+    const validation = this.validateConclusion(discussion);
+    if (!validation.passed) {
+      this.storage.appendBlackboardEntry(discussion.id, {
+        kind: "criterion",
+        text: validation.reason,
+        sourceMessageId: candidate.id,
+        agent: "system"
+      });
+      this.storage.updateDiscussionSignal(discussion.id, "CONTINUE");
+      this.audit.log({
+        traceId: discussion.traceId,
+        discussionId: discussion.id,
+        action: "agreement.validation_blocked",
+        agent: "system",
+        metadata: { taskType: discussion.taskType, validationMode: discussion.validationMode, reason: validation.reason }
+      });
+      return { accepted: false };
+    }
     const otherAgent = oppositeAgent(candidate.sender);
+    this.storage.appendBlackboardEntry(discussion.id, {
+      kind: "candidate",
+      text: conclusion,
+      sourceMessageId: candidate.id,
+      agent: candidate.sender
+    });
     this.storage.clearAgreements(discussion.id);
     const agreement = this.storage.recordAgreement({
       discussionId: discussion.id,
@@ -8186,7 +8323,8 @@ var CollaborationService = class {
       projectPath: discussion.projectPath
     });
     const messages = this.storage.getMessages(discussion.id);
-    const agreementPrompt = buildAgreementPrompt(conclusion, agreement.decisionHash);
+    const agreementPrompt = buildAgreementPrompt(conclusion, agreement.decisionHash, discussion.taskType, discussion.validationMode);
+    this.storage.updateDiscussionStatus(discussion.id, "CONFIRMING");
     this.storage.updateDiscussionPending(discussion.id, "agreement_confirmation", conclusionMessage.id);
     this.storage.updateDiscussionDispatch(discussion.id, "RUNNING", otherAgent);
     const peerResponse = await this.dispatchToAgent(discussion.id, otherAgent, agreementPrompt, messages, {
@@ -8204,6 +8342,8 @@ var CollaborationService = class {
       if (decision.resolution === "user_decision") {
         this.storage.updateDiscussionStatus(discussion.id, "NEEDS_USER_DECISION");
         this.storage.updateDiscussionDiagnostic(discussion.id, "UNRESOLVED_DISAGREEMENT");
+      } else {
+        this.storage.updateDiscussionStatus(discussion.id, "DISCUSSING");
       }
       this.audit.log({
         traceId: discussion.traceId,
@@ -8418,7 +8558,10 @@ var CollaborationService = class {
         mode: discussion.mode,
         completedResponses,
         maxTurns: discussion.maxTurns,
-        prompt
+        prompt,
+        taskType: discussion.taskType,
+        validationMode: discussion.validationMode,
+        peerTemperature: discussion.peerTemperature
       });
       providerPromise = connector.sendAndWait({
         projectPath: discussion.projectPath,
@@ -8428,6 +8571,7 @@ var CollaborationService = class {
         previousMessages,
         providerSessionId: persistedSession?.sessionId,
         providerSessionKind,
+        ...discussion.peerTemperature === null ? {} : { peerTemperature: discussion.peerTemperature },
         signal: controller.signal,
         onActivity: (activity) => this.recordPeerActivity(discussionId, dispatchId, activity),
         onPermissionRequest: (request) => this.requestPeerPermission(request, controller.signal)
@@ -8766,7 +8910,8 @@ var CollaborationService = class {
           processAlive: activity.processAlive,
           connectionAlive: activity.connectionAlive,
           sessionAlive: activity.sessionAlive,
-          detail: activity.detail
+          detail: activity.detail,
+          toolResult: activity.toolResult
         }
       });
     } catch {
@@ -8830,14 +8975,25 @@ var CollaborationService = class {
       failedMessageId,
       operationKind: "agreement_confirmation"
     }).then((peerResponse) => {
-      if (!peerResponse)
+      if (!peerResponse) {
+        const current = this.storage.getDiscussion(discussionId);
+        if (current?.status === "CONFIRMING")
+          this.storage.updateDiscussionStatus(discussionId, "DISCUSSING");
         return;
+      }
       const decision = parseAgreementResponse(peerResponse.content, decisionHash);
       const discussion = this.storage.getDiscussion(discussionId);
       if (!discussion || isTerminal(discussion.status) || isPaused(discussion.status))
         return;
       if (!decision.accepted) {
         this.storage.updateDiscussionDispatch(discussionId, "COMPLETED", agent);
+        if (decision.resolution === "user_decision") {
+          this.storage.updateDiscussionSignal(discussionId, "NEEDS_USER_DECISION");
+          this.storage.updateDiscussionStatus(discussionId, "NEEDS_USER_DECISION");
+          this.storage.updateDiscussionDiagnostic(discussionId, "UNRESOLVED_DISAGREEMENT");
+        } else {
+          this.storage.updateDiscussionStatus(discussionId, "DISCUSSING");
+        }
         this.audit.log({
           traceId: discussion.traceId,
           discussionId,
@@ -8898,6 +9054,19 @@ var CollaborationService = class {
       });
       throw new Error(`Discussion ${discussion.id} exceeded message budget`);
     }
+  }
+  validateConclusion(discussion) {
+    if (discussion.validationMode !== "evidence_required")
+      return { passed: true };
+    if (discussion.taskType !== "code")
+      return { passed: true };
+    const results = this.storage.getPeerRuntimeEvents(discussion.id, 0, 1e3).filter((event) => event.type === "tool_finished").map((event) => readToolResultStatus(event.metadata.toolResult));
+    if (results.includes("failed")) {
+      return { passed: false, reason: "Code-task conclusion is blocked: a recorded tool result failed. Resolve or supersede that result before closing." };
+    }
+    if (results.includes("passed"))
+      return { passed: true };
+    return { passed: false, reason: "Code-task conclusion requires at least one recorded passing tool result. Run and report a relevant verification command before closing." };
   }
   completeDiscussion(discussion, conclusion, agreedBy) {
     if (discussion.status !== "AGREED") {
@@ -8971,7 +9140,7 @@ var CollaborationService = class {
     }
   }
 };
-function buildAgreementPrompt(conclusion, decisionHash) {
+function buildAgreementPrompt(conclusion, decisionHash, taskType, validationMode) {
   return [
     "AgentBridge agreement confirmation request.",
     "Review the canonical conclusion below against the discussion context.",
@@ -8980,6 +9149,7 @@ function buildAgreementPrompt(conclusion, decisionHash) {
     `Otherwise use {"agentbridgeDecision":"reject","decisionHash":"${decisionHash}","resolution":"continue","reason":"brief reason"} or set resolution to "user_decision".`,
     'Use resolution="continue" only when new evidence or a concrete revision can still resolve the objection.',
     'Use resolution="user_decision" when the disagreement depends on incompatible goals, risk tolerance, permissions, or product preferences.',
+    ...validationMode === "evidence_required" ? [`This is an evidence-gated ${taskType ?? "explain"} task. Reject if the conclusion does not meet the stated acceptance evidence.`] : [],
     "Canonical conclusion:",
     conclusion
   ].join("\n\n");
@@ -9020,9 +9190,6 @@ function discussionModeRank(mode) {
 function oppositeAgent(agent) {
   return agent === "claude" ? "codex" : "claude";
 }
-function stripDiscussionSignal(content) {
-  return content.replace(/\s*\[AGENTBRIDGE_SIGNAL:\s*(?:CONTINUE|READY_TO_CLOSE|NEEDS_USER_DECISION)\]\s*$/, "").trim();
-}
 function isAutomaticDiscussion(discussion) {
   return discussion.orchestration === "automatic";
 }
@@ -9034,6 +9201,29 @@ function assertText(value, label) {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new Error(`${label} must be a non-empty string`);
   }
+}
+function assertTaskType(value) {
+  if (!["code", "design", "qa", "explain"].includes(value)) {
+    throw new Error("taskType must be one of: code, design, qa, explain");
+  }
+}
+function assertValidationMode(value) {
+  if (value !== "none" && value !== "evidence_required") {
+    throw new Error("validationMode must be none or evidence_required");
+  }
+}
+function assertPeerTemperature(value) {
+  if (value === null)
+    return;
+  if (!Number.isFinite(value) || value < 0 || value > 2) {
+    throw new Error("peerTemperature must be between 0 and 2");
+  }
+}
+function readToolResultStatus(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return "unknown";
+  const status = value.status;
+  return status === "passed" || status === "failed" ? status : "unknown";
 }
 async function withTimeout(promise, timeoutMs, onTimeout) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
@@ -9444,7 +9634,7 @@ function parseCodexOutput(stdout) {
       if (event.type === "thread.started" && typeof event.thread_id === "string") {
         threadId = event.thread_id;
       }
-      const item = isRecord(event.item) ? event.item : event;
+      const item = isRecord2(event.item) ? event.item : event;
       if (item.type === "agent_message" && typeof item.text === "string") {
         messages.push(item.text);
       }
@@ -9454,7 +9644,7 @@ function parseCodexOutput(stdout) {
   if (messages.length > 0)
     return { content: messages[messages.length - 1], threadId };
   const finalEvent = rawEvents.at(-1);
-  if (isRecord(finalEvent)) {
+  if (isRecord2(finalEvent)) {
     for (const key of ["result", "response", "text", "message"]) {
       if (typeof finalEvent[key] === "string") {
         return { content: finalEvent[key], threadId };
@@ -9463,7 +9653,7 @@ function parseCodexOutput(stdout) {
   }
   throw new Error(`Codex CLI returned no agent message: ${stdout.slice(0, 1e3)}`);
 }
-function isRecord(value) {
+function isRecord2(value) {
   return typeof value === "object" && value !== null;
 }
 function runProcess2(command, args, cwd, timeoutMs, signal, onActivity) {
@@ -9863,7 +10053,7 @@ var CodexAppServerConnector = class {
     const deadline = Date.now() + this.hardTimeoutMs;
     while (Date.now() < deadline) {
       const event = await this.nextEvent(deadline - Date.now());
-      const params = isRecord2(event.params) ? event.params : {};
+      const params = isRecord3(event.params) ? event.params : {};
       const eventThreadId = readString(params.threadId);
       if (eventThreadId && eventThreadId !== threadId)
         continue;
@@ -9954,7 +10144,7 @@ var CodexAppServerConnector = class {
         continue;
       }
       const method = typeof message.method === "string" ? message.method : void 0;
-      const params = isRecord2(message.params) ? message.params : {};
+      const params = isRecord3(message.params) ? message.params : {};
       this.activeActivity?.({
         kind: "provider_event",
         at: Date.now(),
@@ -9975,16 +10165,24 @@ var CodexAppServerConnector = class {
       if (method && isToolStartedMethod(method)) {
         this.activeActivity?.({ kind: "tool_started", at: Date.now(), currentTool: tool ?? method, processAlive: true, connectionAlive: true, sessionAlive: true });
       } else if (method && isToolCompletedMethod(method)) {
-        this.activeActivity?.({ kind: "tool_completed", at: Date.now(), currentTool: tool, processAlive: true, connectionAlive: true, sessionAlive: true });
+        this.activeActivity?.({
+          kind: "tool_completed",
+          at: Date.now(),
+          currentTool: tool,
+          processAlive: true,
+          connectionAlive: true,
+          sessionAlive: true,
+          toolResult: readToolResult(params)
+        });
       }
       const id2 = typeof message.id === "number" ? message.id : void 0;
       if (id2 !== void 0 && this.pending.has(id2)) {
         const pending = this.pending.get(id2);
         this.pending.delete(id2);
-        if (isRecord2(message.error))
+        if (isRecord3(message.error))
           pending.reject(providerErrorFromMessage(message.error));
         else
-          pending.resolve(isRecord2(message.result) ? message.result : {});
+          pending.resolve(isRecord3(message.result) ? message.result : {});
       } else if (typeof message.method === "string" && message.id !== void 0) {
         void this.respondToServerRequest(message);
       } else if (typeof message.method === "string") {
@@ -10003,11 +10201,11 @@ var CodexAppServerConnector = class {
     const id2 = message.id;
     const policy = this.activePolicy?.decide({
       method,
-      params: isRecord2(message.params) ? message.params : void 0
+      params: isRecord3(message.params) ? message.params : void 0
     }) ?? "DENY";
     let decision;
     if (/approval|permission/i.test(method) && policy === "NEEDS_USER_DECISION" && this.activePermissionRequest) {
-      const params = isRecord2(message.params) ? message.params : {};
+      const params = isRecord3(message.params) ? message.params : {};
       try {
         decision = await this.activePermissionRequest({
           discussionId: this.activeDiscussionId ?? "",
@@ -10106,13 +10304,42 @@ function readTurnStatus(params) {
 function readNestedString(value, path) {
   let current = value;
   for (const key of path) {
-    if (!isRecord2(current))
+    if (!isRecord3(current))
       return void 0;
     current = current[key];
   }
   return readString(current);
 }
-function isRecord2(value) {
+function readToolResult(params) {
+  const result = isRecord3(params.result) ? params.result : params;
+  const exitCode = readNumber(result.exitCode) ?? readNumber(result.exit_code) ?? readNestedNumber(params, ["item", "exitCode"]) ?? readNestedNumber(params, ["item", "exit_code"]);
+  if (exitCode !== void 0)
+    return { status: exitCode === 0 ? "passed" : "failed", exitCode };
+  const success = result.success ?? result.passed;
+  if (success === true)
+    return { status: "passed" };
+  if (success === false)
+    return { status: "failed" };
+  const status = readString(result.status)?.toLowerCase();
+  if (status === "passed" || status === "success" || status === "succeeded")
+    return { status: "passed" };
+  if (status === "failed" || status === "error")
+    return { status: "failed" };
+  return { status: "unknown" };
+}
+function readNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : void 0;
+}
+function readNestedNumber(value, path) {
+  let current = value;
+  for (const key of path) {
+    if (!isRecord3(current))
+      return void 0;
+    current = current[key];
+  }
+  return readNumber(current);
+}
+function isRecord3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function isDeltaMethod(method) {
@@ -10125,7 +10352,7 @@ function isToolCompletedMethod(method) {
   return typeof method === "string" && /(tool|item|command|exec).*(complete|finish|end|completed|finished)/i.test(method);
 }
 function isMessageItem(value) {
-  if (!isRecord2(value))
+  if (!isRecord3(value))
     return false;
   const type = readString(value.type);
   return type === "agentMessage" || type === "agent_message";
@@ -10564,6 +10791,8 @@ function samePath(left, right) {
 
 // packages/storage/dist/index.js
 var DEFAULT_MAX_TURNS = 12;
+var DEFAULT_TASK_TYPE = "explain";
+var DEFAULT_VALIDATION_MODE = "none";
 var MAX_ALLOWED_TURNS = 50;
 var MAX_TEXT_LENGTH = 1e5;
 var SQLITE_STARTUP_TIMEOUT_MS = 5e3;
@@ -10576,6 +10805,10 @@ CREATE TABLE IF NOT EXISTS discussions (
   id TEXT PRIMARY KEY,
   topic TEXT NOT NULL,
   mode TEXT NOT NULL DEFAULT 'discussion',
+  task_type TEXT NOT NULL DEFAULT 'explain',
+  validation_mode TEXT NOT NULL DEFAULT 'none',
+  peer_temperature REAL,
+  shared_blackboard TEXT,
   orchestration TEXT NOT NULL DEFAULT 'single-turn',
   status TEXT NOT NULL DEFAULT 'CREATED',
   dispatch_state TEXT,
@@ -10796,6 +11029,10 @@ var Storage = class {
     this.ensureColumn("discussions", "failed_operation_kind", "ALTER TABLE discussions ADD COLUMN failed_operation_kind TEXT");
     this.ensureColumn("discussions", "collaboration_session_id", "ALTER TABLE discussions ADD COLUMN collaboration_session_id TEXT");
     this.ensureColumn("discussions", "mode", "ALTER TABLE discussions ADD COLUMN mode TEXT NOT NULL DEFAULT 'discussion'");
+    this.ensureColumn("discussions", "task_type", "ALTER TABLE discussions ADD COLUMN task_type TEXT NOT NULL DEFAULT 'explain'");
+    this.ensureColumn("discussions", "validation_mode", "ALTER TABLE discussions ADD COLUMN validation_mode TEXT NOT NULL DEFAULT 'none'");
+    this.ensureColumn("discussions", "peer_temperature", "ALTER TABLE discussions ADD COLUMN peer_temperature REAL");
+    this.ensureColumn("discussions", "shared_blackboard", "ALTER TABLE discussions ADD COLUMN shared_blackboard TEXT");
     this.ensureColumn("discussions", "orchestration", "ALTER TABLE discussions ADD COLUMN orchestration TEXT NOT NULL DEFAULT 'single-turn'");
     this.ensureColumn("discussions", "pending_operation_kind", "ALTER TABLE discussions ADD COLUMN pending_operation_kind TEXT");
     this.ensureColumn("discussions", "pending_message_id", "ALTER TABLE discussions ADD COLUMN pending_message_id TEXT");
@@ -10836,17 +11073,23 @@ var Storage = class {
     const maxRetries = data.maxRetries ?? 2;
     const peer = data.peer ?? (data.driver === "claude" ? "codex" : "claude");
     const mode = data.mode ?? DEFAULT_DISCUSSION_MODE;
+    const taskType = data.taskType ?? DEFAULT_TASK_TYPE;
+    const validationMode = data.validationMode ?? DEFAULT_VALIDATION_MODE;
+    const peerTemperature = data.peerTemperature ?? null;
     const orchestration = data.orchestration ?? "single-turn";
     assertText2(data.topic, "topic");
     assertText2(data.traceId, "traceId");
     assertTurns(maxTurns);
     assertRetries(maxRetries);
     assertDiscussionMode2(mode);
+    assertTaskType2(taskType);
+    assertValidationMode2(validationMode);
+    assertPeerTemperature2(peerTemperature);
     if (!["single-turn", "automatic"].includes(orchestration)) {
       throw new Error("orchestration must be single-turn or automatic");
     }
-    this.db.prepare(`INSERT INTO discussions (id, topic, mode, orchestration, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id, collaboration_session_id)
-         VALUES (?, ?, ?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?)`).run(id2, data.topic, mode, orchestration, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId, data.collaborationSessionId ?? null);
+    this.db.prepare(`INSERT INTO discussions (id, topic, mode, task_type, validation_mode, peer_temperature, orchestration, status, driver, peer, current_turn, round_count, max_turns, retry_count, max_retries, created_at, updated_at, project_path, trace_id, collaboration_session_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?)`).run(id2, data.topic, mode, taskType, validationMode, peerTemperature, orchestration, data.driver, peer, maxTurns, maxRetries, now, now, data.projectPath ?? resolveProjectPath(), data.traceId, data.collaborationSessionId ?? null);
     return this.getDiscussion(id2);
   }
   // --- Project-scoped collaboration sessions ---
@@ -11049,6 +11292,28 @@ var Storage = class {
       throw new Error("orchestration must be single-turn or automatic");
     }
     this.db.prepare("UPDATE discussions SET mode = ?, orchestration = ?, updated_at = ? WHERE id = ?").run(mode, orchestration, (/* @__PURE__ */ new Date()).toISOString(), id2);
+  }
+  appendBlackboardEntry(id2, entry) {
+    const discussion = this.getDiscussion(id2);
+    if (!discussion)
+      throw new Error(`Discussion ${id2} not found`);
+    assertBlackboardEntry(entry);
+    const current = discussion.sharedBlackboard ?? { version: 0, entries: [] };
+    const version2 = current.version + 1;
+    const next = {
+      version: version2,
+      entries: [
+        ...current.entries,
+        {
+          ...entry,
+          text: entry.text.trim().slice(0, 4e3),
+          timestamp: entry.timestamp ?? (/* @__PURE__ */ new Date()).toISOString(),
+          versionAdded: version2
+        }
+      ].slice(-50)
+    };
+    this.db.prepare("UPDATE discussions SET shared_blackboard = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), id2);
+    return next;
   }
   updateDiscussionDispatch(id2, state, waitingFor = null) {
     if (!this.getDiscussion(id2))
@@ -11486,6 +11751,10 @@ function rowToDiscussion(row) {
     id: row.id,
     topic: row.topic,
     mode: row.mode ?? DEFAULT_DISCUSSION_MODE,
+    taskType: isTaskType(row.task_type) ? row.task_type : DEFAULT_TASK_TYPE,
+    validationMode: isValidationMode(row.validation_mode) ? row.validation_mode : DEFAULT_VALIDATION_MODE,
+    peerTemperature: typeof row.peer_temperature === "number" && Number.isFinite(row.peer_temperature) ? row.peer_temperature : null,
+    sharedBlackboard: parseSharedBlackboard(row.shared_blackboard),
     orchestration: row.orchestration ?? "single-turn",
     status: row.status,
     driver,
@@ -11644,6 +11913,70 @@ function rowToAgentSession(row) {
 }
 function isReusableBridgeSession(session) {
   return (session.status === "IDLE" || session.status === "BRIDGE_OWNED") && session.metadata.bridgeOwned === true && typeof session.metadata.supersededBy !== "string";
+}
+function assertTaskType2(value) {
+  if (!isTaskType(value))
+    throw new Error("taskType must be one of: code, design, qa, explain");
+}
+function isTaskType(value) {
+  return value === "code" || value === "design" || value === "qa" || value === "explain";
+}
+function assertValidationMode2(value) {
+  if (!isValidationMode(value))
+    throw new Error("validationMode must be none or evidence_required");
+}
+function isValidationMode(value) {
+  return value === "none" || value === "evidence_required";
+}
+function assertPeerTemperature2(value) {
+  if (value === null)
+    return;
+  if (!Number.isFinite(value) || value < 0 || value > 2) {
+    throw new Error("peerTemperature must be between 0 and 2");
+  }
+}
+function assertBlackboardEntry(entry) {
+  if (!["goal", "candidate", "evidence", "criterion", "disputed"].includes(entry.kind)) {
+    throw new Error("invalid blackboard entry kind");
+  }
+  assertText2(entry.text, "blackboard entry text");
+  assertText2(entry.sourceMessageId, "blackboard entry sourceMessageId");
+  if (entry.agent !== "claude" && entry.agent !== "codex" && entry.agent !== "system") {
+    throw new Error("invalid blackboard entry agent");
+  }
+}
+function parseSharedBlackboard(value) {
+  const parsed = parseJsonObject(value);
+  const version2 = parsed?.version;
+  if (!parsed || typeof version2 !== "number" || !Number.isInteger(version2) || version2 < 0 || !Array.isArray(parsed.entries))
+    return null;
+  const entries = parsed.entries.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry))
+      return [];
+    const candidate = entry;
+    if (!["goal", "candidate", "evidence", "criterion", "disputed"].includes(String(candidate.kind)))
+      return [];
+    if (typeof candidate.text !== "string" || typeof candidate.sourceMessageId !== "string")
+      return [];
+    if (candidate.agent !== "claude" && candidate.agent !== "codex" && candidate.agent !== "system")
+      return [];
+    const versionAdded = candidate.versionAdded;
+    if (typeof candidate.timestamp !== "string" || typeof versionAdded !== "number" || !Number.isInteger(versionAdded))
+      return [];
+    return [{
+      kind: candidate.kind,
+      text: candidate.text,
+      sourceMessageId: candidate.sourceMessageId,
+      agent: candidate.agent,
+      timestamp: candidate.timestamp,
+      versionAdded
+    }];
+  });
+  return {
+    version: version2,
+    entries,
+    ...typeof parsed.lastCompressedAt === "string" ? { lastCompressedAt: parsed.lastCompressedAt } : {}
+  };
 }
 function assertSessionPolicy(value) {
   if (value !== "auto" && value !== "reuse" && value !== "fresh") {
@@ -22870,6 +23203,9 @@ function buildTools(agentType2) {
             enum: [...DISCUSSION_MODES],
             description: "Depth contract: review is single-turn; discussion and deep-discussion are automatic alternating runs that converge on agreement or pause for user decision, with safety ceilings of 12 and 20 successful provider responses"
           },
+          taskType: { type: "string", enum: [...TASK_TYPES], description: "Task category used for optional evidence validation (default: explain)" },
+          validationMode: { type: "string", enum: [...VALIDATION_MODES], description: "Evidence gate: none (default) or evidence_required" },
+          peerTemperature: { type: "number", minimum: 0, maximum: 2, description: "Optional connector temperature hint; retained even when a provider cannot apply it" },
           maxTurns: { type: "integer", minimum: 1, maximum: 50, description: "Safety ceiling for substantive provider responses; agreement confirmations do not consume it" },
           sessionPolicy: { type: "string", enum: ["auto", "reuse", "fresh"], description: "Provider session policy (default: auto)" }
         },
@@ -23010,6 +23346,9 @@ function createServer(resolveRuntime2, options) {
       message: text,
       projectPath: external_exports.string().trim().min(1).max(4096).optional(),
       mode: external_exports.enum(DISCUSSION_MODES).optional(),
+      taskType: external_exports.enum(TASK_TYPES).optional(),
+      validationMode: external_exports.enum(VALIDATION_MODES).optional(),
+      peerTemperature: external_exports.number().min(0).max(2).optional(),
       maxTurns: external_exports.number().int().min(1).max(50).optional(),
       sessionPolicy: external_exports.enum(["auto", "reuse", "fresh"]).optional()
     }),
@@ -23058,6 +23397,9 @@ function createServer(resolveRuntime2, options) {
             projectPath: runtime.projectPath ?? input.projectPath,
             traceId: `tr_${randomUUID5()}`,
             mode: input.mode,
+            taskType: input.taskType,
+            validationMode: input.validationMode,
+            peerTemperature: input.peerTemperature,
             maxTurns: input.maxTurns,
             sessionPolicy: input.sessionPolicy
           });

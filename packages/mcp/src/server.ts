@@ -9,7 +9,7 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Storage } from '@agentbridge/storage';
 import type { CollaborationService } from '@agentbridge/collaboration';
-import { DISCUSSION_MODES, type AgentType } from '@agentbridge/protocol';
+import { DISCUSSION_MODES, TASK_TYPES, VALIDATION_MODES, type AgentType } from '@agentbridge/protocol';
 
 export interface MCPServerOptions {
   agentType?: AgentType;
@@ -53,6 +53,9 @@ function buildTools(agentType: AgentType): Tool[] {
             enum: [...DISCUSSION_MODES],
             description: 'Depth contract: review is single-turn; discussion and deep-discussion are automatic alternating runs that converge on agreement or pause for user decision, with safety ceilings of 12 and 20 successful provider responses',
           },
+          taskType: { type: 'string', enum: [...TASK_TYPES], description: 'Task category used for optional evidence validation (default: explain)' },
+          validationMode: { type: 'string', enum: [...VALIDATION_MODES], description: 'Evidence gate: none (default) or evidence_required' },
+          peerTemperature: { type: 'number', minimum: 0, maximum: 2, description: 'Optional connector temperature hint; retained even when a provider cannot apply it' },
           maxTurns: { type: 'integer', minimum: 1, maximum: 50, description: 'Safety ceiling for substantive provider responses; agreement confirmations do not consume it' },
           sessionPolicy: { type: 'string', enum: ['auto', 'reuse', 'fresh'], description: 'Provider session policy (default: auto)' },
         },
@@ -207,6 +210,9 @@ function createServer(resolveRuntime: MCPRuntimeResolver, options: MCPServerOpti
       message: text,
       projectPath: z.string().trim().min(1).max(4096).optional(),
       mode: z.enum(DISCUSSION_MODES).optional(),
+      taskType: z.enum(TASK_TYPES).optional(),
+      validationMode: z.enum(VALIDATION_MODES).optional(),
+      peerTemperature: z.number().min(0).max(2).optional(),
       maxTurns: z.number().int().min(1).max(50).optional(),
       sessionPolicy: z.enum(['auto', 'reuse', 'fresh']).optional(),
     }),
@@ -262,6 +268,9 @@ function createServer(resolveRuntime: MCPRuntimeResolver, options: MCPServerOpti
             projectPath: runtime.projectPath ?? input.projectPath,
             traceId: `tr_${randomUUID()}`,
             mode: input.mode,
+            taskType: input.taskType,
+            validationMode: input.validationMode,
+            peerTemperature: input.peerTemperature,
             maxTurns: input.maxTurns,
             sessionPolicy: input.sessionPolicy,
           });

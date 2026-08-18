@@ -7,6 +7,8 @@ import type {
   AgreementResolution,
   Discussion,
   DiscussionMode,
+  TaskType,
+  ValidationMode,
   SessionPolicy,
   Message,
   AskPeerOutput,
@@ -43,7 +45,9 @@ import {
   discussionPhase,
   isAutomaticDiscussionMode,
   parseDiscussionSignal,
+  parseStructuredTurn,
   resolveDiscussionMode,
+  stripDiscussionControl,
 } from './discussionPolicy.js';
 
 export {
@@ -54,7 +58,9 @@ export {
   discussionPhase,
   isAutomaticDiscussionMode,
   parseDiscussionSignal,
+  parseStructuredTurn,
   resolveDiscussionMode,
+  stripDiscussionControl,
 } from './discussionPolicy.js';
 
 export interface CollaborationConfig {
@@ -72,6 +78,8 @@ export interface CollaborationConfig {
   asyncDispatch?: boolean;
   archiveSessionsOnClose?: boolean;
   sessionPolicy?: SessionPolicy;
+  /** Default evidence gate; callers can make an individual discussion stricter. */
+  validationMode?: ValidationMode;
 }
 
 export type ConnectorRegistry = Partial<Record<AgentType, AgentConnector>>;
@@ -99,6 +107,7 @@ export class CollaborationService {
   private readonly asyncDispatch: boolean;
   private readonly archiveSessionsOnClose: boolean;
   private readonly sessionPolicy: SessionPolicy;
+  private readonly validationMode: ValidationMode;
   private readonly connectors: ConnectorRegistry;
   private readonly ownerId = `collaboration:${process.pid}:${randomUUID()}`;
   private readonly inFlight = new Map<string, InFlightOperation>();
@@ -130,7 +139,11 @@ export class CollaborationService {
     this.asyncDispatch = config.asyncDispatch ?? false;
     this.archiveSessionsOnClose = config.archiveSessionsOnClose ?? false;
     this.sessionPolicy = config.sessionPolicy ?? 'auto';
+    this.validationMode = config.validationMode ?? 'none';
     if (!['auto', 'reuse', 'fresh'].includes(this.sessionPolicy)) throw new Error('sessionPolicy must be auto, reuse, or fresh');
+    if (this.validationMode !== 'none' && this.validationMode !== 'evidence_required') {
+      throw new Error('validationMode must be none or evidence_required');
+    }
     if (!Number.isInteger(this.maxTurns) || this.maxTurns < 1 || this.maxTurns > 50) {
       throw new Error('maxTurns must be an integer between 1 and 50');
     }
@@ -174,10 +187,19 @@ export class CollaborationService {
     traceId: string;
     maxTurns?: number;
     mode?: DiscussionMode;
+    taskType?: TaskType;
+    validationMode?: ValidationMode;
+    peerTemperature?: number;
     sessionPolicy?: SessionPolicy;
   }): Promise<AskPeerOutput> {
     const projectPath = resolveProjectPath(params.projectPath);
     const mode = resolveDiscussionMode(params.mode);
+    const taskType = params.taskType ?? 'explain';
+    const validationMode = params.validationMode ?? this.validationMode;
+    const peerTemperature = params.peerTemperature ?? null;
+    assertTaskType(taskType);
+    assertValidationMode(validationMode);
+    assertPeerTemperature(peerTemperature);
     const maxTurns = params.maxTurns
       ?? (this.maxTurnsWasConfigured ? this.maxTurns : defaultMaxTurnsForMode(mode));
     if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 50) {
@@ -203,6 +225,9 @@ export class CollaborationService {
       projectPath,
       traceId: params.traceId,
       mode,
+      taskType,
+      validationMode,
+      peerTemperature,
       maxTurns,
       collaborationSessionId: collaborationSession.id,
       orchestration,
@@ -218,6 +243,9 @@ export class CollaborationService {
         topic: params.topic,
         projectPath,
         mode,
+        taskType,
+        validationMode,
+        peerTemperature,
         maxTurns,
         orchestration,
         sessionPolicy,
@@ -232,6 +260,12 @@ export class CollaborationService {
       role: 'proposal',
       content: params.initialMessage,
       projectPath,
+    });
+    this.storage.appendBlackboardEntry(discussion.id, {
+      kind: 'goal',
+      text: params.initialMessage,
+      sourceMessageId: message.id,
+      agent: params.driver,
     });
 
     this.audit.log({
@@ -646,6 +680,8 @@ export class CollaborationService {
     if (![discussion.driver, discussion.peer].includes(params.agent)) {
       throw new Error(`Agent ${params.agent} is not a participant in discussion ${params.discussionId}`);
     }
+    const validation = this.validateConclusion(discussion);
+    if (!validation.passed) throw new Error(validation.reason);
     this.ensureNoDispatchInFlight(params.discussionId);
 
     const otherAgent = params.agent === discussion.driver ? discussion.peer : discussion.driver;
@@ -684,7 +720,7 @@ export class CollaborationService {
     }
 
     if (!existingConclusion) {
-      this.storage.createMessage({
+      const conclusionMessage = this.storage.createMessage({
         discussionId: params.discussionId,
         sender: params.agent,
         receiver: otherAgent,
@@ -692,16 +728,28 @@ export class CollaborationService {
         content: params.conclusion,
         projectPath: discussion.projectPath,
       });
+      this.storage.appendBlackboardEntry(params.discussionId, {
+        kind: 'candidate',
+        text: params.conclusion,
+        sourceMessageId: conclusionMessage.id,
+        agent: params.agent,
+      });
     }
 
     const messages = this.storage.getMessages(params.discussionId);
-    const agreementPrompt = buildAgreementPrompt(params.conclusion, agreement.decisionHash);
+    const agreementPrompt = buildAgreementPrompt(
+      params.conclusion,
+      agreement.decisionHash,
+      discussion.taskType,
+      discussion.validationMode,
+    );
     const conclusionMessageId = messages.find((message) => (
       message.sender === params.agent
       && message.receiver === otherAgent
       && message.role === 'conclusion'
       && message.content === params.conclusion
     ))?.id ?? null;
+    this.storage.updateDiscussionStatus(params.discussionId, 'CONFIRMING');
     this.queueDispatch(params.discussionId, otherAgent);
     if (this.asyncDispatch) {
       this.startBackgroundAgreementConfirmation(
@@ -717,7 +765,7 @@ export class CollaborationService {
       discussionLeaseOwned = false;
       return {
         discussionId: params.discussionId,
-        status: 'DISCUSSING',
+        status: 'CONFIRMING',
         waitingFor: [otherAgent],
         dispatchState: 'QUEUED',
       };
@@ -749,6 +797,8 @@ export class CollaborationService {
     }
 
     if (!peerResponse) {
+      const current = this.storage.getDiscussion(params.discussionId);
+      if (current?.status === 'CONFIRMING') this.storage.updateDiscussionStatus(params.discussionId, 'DISCUSSING');
       return {
         discussionId: params.discussionId,
         status: 'DISCUSSING',
@@ -765,6 +815,8 @@ export class CollaborationService {
         this.storage.updateDiscussionSignal(params.discussionId, 'NEEDS_USER_DECISION');
         this.storage.updateDiscussionStatus(params.discussionId, 'NEEDS_USER_DECISION');
         this.storage.updateDiscussionDiagnostic(params.discussionId, 'UNRESOLVED_DISAGREEMENT');
+      } else {
+        this.storage.updateDiscussionStatus(params.discussionId, 'DISCUSSING');
       }
       this.audit.log({
         traceId: discussion.traceId,
@@ -1136,12 +1188,13 @@ export class CollaborationService {
         summary: conclusion,
       });
       const messages = this.storage.getMessages(discussionId);
+      this.storage.updateDiscussionStatus(discussionId, 'CONFIRMING');
       this.storage.updateDiscussionPending(discussionId, 'agreement_confirmation', conclusionMessage.id);
       this.storage.updateDiscussionDispatch(discussionId, 'RUNNING', receiver);
       const peerResponse = await this.dispatchToAgent(
         discussionId,
         receiver,
-        buildAgreementPrompt(conclusion, agreement.decisionHash),
+        buildAgreementPrompt(conclusion, agreement.decisionHash, discussion.taskType, discussion.validationMode),
         messages,
         {
           applyDiscussionPolicy: false,
@@ -1170,6 +1223,8 @@ export class CollaborationService {
       if (decision.resolution === 'user_decision') {
         this.storage.updateDiscussionStatus(discussionId, 'NEEDS_USER_DECISION');
         this.storage.updateDiscussionDiagnostic(discussionId, 'UNRESOLVED_DISAGREEMENT');
+      } else {
+        this.storage.updateDiscussionStatus(discussionId, 'DISCUSSING');
       }
       this.audit.log({
         traceId: discussion.traceId,
@@ -1222,6 +1277,10 @@ export class CollaborationService {
           originalRequest,
           latestMessage: latestMessage.content,
           latestSender: latestMessage.sender,
+          blackboard: discussion.sharedBlackboard,
+          taskType: discussion.taskType,
+          validationMode: discussion.validationMode,
+          peerTemperature: discussion.peerTemperature,
         });
         this.storage.updateDiscussionPending(discussionId, 'automatic_turn', latestMessageId);
         this.storage.updateDiscussionDispatch(discussionId, 'RUNNING', receiver);
@@ -1246,10 +1305,17 @@ export class CollaborationService {
         latestMessageId = response.id;
         this.storage.updateDiscussionPending(discussionId, null, null);
         const rawSignal = parseDiscussionSignal(response.content);
+        const structuredTurn = parseStructuredTurn(response.content);
         const afterResponse = this.storage.getDiscussion(discussionId);
         if (!afterResponse) return response;
 
         if (rawSignal === 'NEEDS_USER_DECISION') {
+          this.storage.appendBlackboardEntry(discussionId, {
+            kind: 'disputed',
+            text: structuredTurn?.summary ?? stripDiscussionControl(response.content),
+            sourceMessageId: response.id,
+            agent: response.sender,
+          });
           this.storage.updateDiscussionSignal(discussionId, rawSignal);
           this.storage.updateDiscussionStatus(discussionId, 'NEEDS_USER_DECISION');
           this.storage.updateDiscussionDiagnostic(discussionId, 'PEER_REQUESTED_USER_DECISION');
@@ -1291,9 +1357,33 @@ export class CollaborationService {
     discussion: Discussion,
     candidate: Message,
   ): Promise<{ accepted: boolean; response?: Message; resolution?: AgreementResolution }> {
-    const conclusion = stripDiscussionSignal(candidate.content);
+    const conclusion = stripDiscussionControl(candidate.content);
     if (!conclusion) return { accepted: false };
+    const validation = this.validateConclusion(discussion);
+    if (!validation.passed) {
+      this.storage.appendBlackboardEntry(discussion.id, {
+        kind: 'criterion',
+        text: validation.reason!,
+        sourceMessageId: candidate.id,
+        agent: 'system',
+      });
+      this.storage.updateDiscussionSignal(discussion.id, 'CONTINUE');
+      this.audit.log({
+        traceId: discussion.traceId,
+        discussionId: discussion.id,
+        action: 'agreement.validation_blocked',
+        agent: 'system',
+        metadata: { taskType: discussion.taskType, validationMode: discussion.validationMode, reason: validation.reason },
+      });
+      return { accepted: false };
+    }
     const otherAgent = oppositeAgent(candidate.sender);
+    this.storage.appendBlackboardEntry(discussion.id, {
+      kind: 'candidate',
+      text: conclusion,
+      sourceMessageId: candidate.id,
+      agent: candidate.sender,
+    });
     this.storage.clearAgreements(discussion.id);
     const agreement = this.storage.recordAgreement({
       discussionId: discussion.id,
@@ -1310,7 +1400,13 @@ export class CollaborationService {
       projectPath: discussion.projectPath,
     });
     const messages = this.storage.getMessages(discussion.id);
-    const agreementPrompt = buildAgreementPrompt(conclusion, agreement.decisionHash);
+    const agreementPrompt = buildAgreementPrompt(
+      conclusion,
+      agreement.decisionHash,
+      discussion.taskType,
+      discussion.validationMode,
+    );
+    this.storage.updateDiscussionStatus(discussion.id, 'CONFIRMING');
     this.storage.updateDiscussionPending(discussion.id, 'agreement_confirmation', conclusionMessage.id);
     this.storage.updateDiscussionDispatch(discussion.id, 'RUNNING', otherAgent);
     const peerResponse = await this.dispatchToAgent(
@@ -1333,6 +1429,8 @@ export class CollaborationService {
       if (decision.resolution === 'user_decision') {
         this.storage.updateDiscussionStatus(discussion.id, 'NEEDS_USER_DECISION');
         this.storage.updateDiscussionDiagnostic(discussion.id, 'UNRESOLVED_DISAGREEMENT');
+      } else {
+        this.storage.updateDiscussionStatus(discussion.id, 'DISCUSSING');
       }
       this.audit.log({
         traceId: discussion.traceId,
@@ -1564,10 +1662,13 @@ export class CollaborationService {
       const effectivePrompt = options.applyDiscussionPolicy === false
         ? prompt
         : buildDiscussionPrompt({
-            mode: discussion.mode,
-            completedResponses,
-            maxTurns: discussion.maxTurns,
-            prompt,
+          mode: discussion.mode,
+          completedResponses,
+          maxTurns: discussion.maxTurns,
+          prompt,
+          taskType: discussion.taskType,
+          validationMode: discussion.validationMode,
+          peerTemperature: discussion.peerTemperature,
           });
       providerPromise = connector.sendAndWait({
           projectPath: discussion.projectPath,
@@ -1577,6 +1678,7 @@ export class CollaborationService {
           previousMessages,
           providerSessionId: persistedSession?.sessionId,
           providerSessionKind,
+          ...(discussion.peerTemperature === null ? {} : { peerTemperature: discussion.peerTemperature }),
           signal: controller.signal,
           onActivity: (activity) => this.recordPeerActivity(discussionId, dispatchId, activity),
           onPermissionRequest: (request) => this.requestPeerPermission(request, controller.signal),
@@ -1948,6 +2050,7 @@ export class CollaborationService {
           connectionAlive: activity.connectionAlive,
           sessionAlive: activity.sessionAlive,
           detail: activity.detail,
+          toolResult: activity.toolResult,
         },
       });
     } catch {
@@ -2049,12 +2152,23 @@ export class CollaborationService {
         operationKind: 'agreement_confirmation',
       },
     ).then((peerResponse) => {
-      if (!peerResponse) return;
+      if (!peerResponse) {
+        const current = this.storage.getDiscussion(discussionId);
+        if (current?.status === 'CONFIRMING') this.storage.updateDiscussionStatus(discussionId, 'DISCUSSING');
+        return;
+      }
       const decision = parseAgreementResponse(peerResponse.content, decisionHash);
       const discussion = this.storage.getDiscussion(discussionId);
       if (!discussion || isTerminal(discussion.status) || isPaused(discussion.status)) return;
       if (!decision.accepted) {
         this.storage.updateDiscussionDispatch(discussionId, 'COMPLETED', agent);
+        if (decision.resolution === 'user_decision') {
+          this.storage.updateDiscussionSignal(discussionId, 'NEEDS_USER_DECISION');
+          this.storage.updateDiscussionStatus(discussionId, 'NEEDS_USER_DECISION');
+          this.storage.updateDiscussionDiagnostic(discussionId, 'UNRESOLVED_DISAGREEMENT');
+        } else {
+          this.storage.updateDiscussionStatus(discussionId, 'DISCUSSING');
+        }
         this.audit.log({
           traceId: discussion.traceId,
           discussionId,
@@ -2121,6 +2235,22 @@ export class CollaborationService {
       });
       throw new Error(`Discussion ${discussion.id} exceeded message budget`);
     }
+  }
+
+  private validateConclusion(discussion: Discussion): { passed: boolean; reason?: string } {
+    if (discussion.validationMode !== 'evidence_required') return { passed: true };
+    // Natural-language design, explanation, and source-review tasks are
+    // checked by the confirmation prompt. Only code has a reliable runtime
+    // evidence channel today, so only it receives a backend hard gate.
+    if (discussion.taskType !== 'code') return { passed: true };
+    const results = this.storage.getPeerRuntimeEvents(discussion.id, 0, 1_000)
+      .filter((event) => event.type === 'tool_finished')
+      .map((event) => readToolResultStatus(event.metadata.toolResult));
+    if (results.includes('failed')) {
+      return { passed: false, reason: 'Code-task conclusion is blocked: a recorded tool result failed. Resolve or supersede that result before closing.' };
+    }
+    if (results.includes('passed')) return { passed: true };
+    return { passed: false, reason: 'Code-task conclusion requires at least one recorded passing tool result. Run and report a relevant verification command before closing.' };
   }
 
   private completeDiscussion(
@@ -2203,7 +2333,12 @@ export class CollaborationService {
   }
 }
 
-function buildAgreementPrompt(conclusion: string, decisionHash: string): string {
+function buildAgreementPrompt(
+  conclusion: string,
+  decisionHash: string,
+  taskType?: TaskType,
+  validationMode?: ValidationMode,
+): string {
   return [
     'AgentBridge agreement confirmation request.',
     'Review the canonical conclusion below against the discussion context.',
@@ -2212,6 +2347,9 @@ function buildAgreementPrompt(conclusion: string, decisionHash: string): string 
     `Otherwise use {"agentbridgeDecision":"reject","decisionHash":"${decisionHash}","resolution":"continue","reason":"brief reason"} or set resolution to "user_decision".`,
     'Use resolution="continue" only when new evidence or a concrete revision can still resolve the objection.',
     'Use resolution="user_decision" when the disagreement depends on incompatible goals, risk tolerance, permissions, or product preferences.',
+    ...(validationMode === 'evidence_required'
+      ? [`This is an evidence-gated ${taskType ?? 'explain'} task. Reject if the conclusion does not meet the stated acceptance evidence.`]
+      : []),
     'Canonical conclusion:',
     conclusion,
   ].join('\n\n');
@@ -2263,12 +2401,6 @@ function oppositeAgent(agent: AgentType): AgentType {
   return agent === 'claude' ? 'codex' : 'claude';
 }
 
-function stripDiscussionSignal(content: string): string {
-  return content
-    .replace(/\s*\[AGENTBRIDGE_SIGNAL:\s*(?:CONTINUE|READY_TO_CLOSE|NEEDS_USER_DECISION)\]\s*$/, '')
-    .trim();
-}
-
 function isAutomaticDiscussion(discussion: Discussion): boolean {
   return discussion.orchestration === 'automatic';
 }
@@ -2287,6 +2419,31 @@ function assertText(value: string, label: string): void {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new Error(`${label} must be a non-empty string`);
   }
+}
+
+function assertTaskType(value: unknown): asserts value is TaskType {
+  if (!['code', 'design', 'qa', 'explain'].includes(value as string)) {
+    throw new Error('taskType must be one of: code, design, qa, explain');
+  }
+}
+
+function assertValidationMode(value: unknown): asserts value is ValidationMode {
+  if (value !== 'none' && value !== 'evidence_required') {
+    throw new Error('validationMode must be none or evidence_required');
+  }
+}
+
+function assertPeerTemperature(value: number | null): void {
+  if (value === null) return;
+  if (!Number.isFinite(value) || value < 0 || value > 2) {
+    throw new Error('peerTemperature must be between 0 and 2');
+  }
+}
+
+function readToolResultStatus(value: unknown): 'passed' | 'failed' | 'unknown' {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return 'unknown';
+  const status = (value as { status?: unknown }).status;
+  return status === 'passed' || status === 'failed' ? status : 'unknown';
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, onTimeout?: () => void): Promise<T> {
