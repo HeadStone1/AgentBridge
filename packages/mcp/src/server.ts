@@ -41,7 +41,7 @@ function buildTools(agentType: AgentType): Tool[] {
   return [
     {
       name: 'ask_peer',
-      description: 'Start a peer interaction. review performs one independent review; discussion and deep-discussion automatically alternate both providers until agreement or an unresolved user decision. Both providers must be configured; automatic modes never silently downgrade to single-turn. Follow nextAction=WAIT with wait_discussion/watch_discussion and do not return an intermediate response as final.',
+      description: 'Start a peer interaction. review performs one independent review; discussion and deep-discussion automatically alternate both providers and normally return after the discussion settles. Both providers must be configured. Use wait_discussion/watch_discussion only when explicit background dispatch returns nextAction=WAIT.',
       inputSchema: {
         type: 'object',
         properties: {

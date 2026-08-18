@@ -3,4 +3,4 @@ interface:
   short_description: "Run a bounded evidence-backed peer review"
   default_prompt: "Use $agentbridge-peer-review to independently review this change and verify every material finding."
 policy:
-  allow_implicit_invocation: true
+  allow_implicit_invocation: false

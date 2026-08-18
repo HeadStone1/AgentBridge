@@ -3,4 +3,4 @@ interface:
   short_description: "Diagnose bugs with falsifiable evidence loops"
   default_prompt: "Use $agentbridge-debug to reproduce this failure, test competing hypotheses, and verify the root-cause fix."
 policy:
-  allow_implicit_invocation: true
+  allow_implicit_invocation: false

@@ -2,6 +2,20 @@
 
 ## 2026-08-18
 
+### v0.7.6 完整通信优先与提示词精简
+
+- MCP 运行时将自动讨论默认改为同步完成：`ask_peer` 在 `discussion` / `deep-discussion` 中等待两个 Provider 完成交流并返回最终状态；只有显式设置 `AGENTBRIDGE_ASYNC_DISPATCH=1` 才返回 `nextAction=WAIT`。
+- 完整讨论 Contract 改为每个 Provider 在当前 discussion 首次发言时注入一次；后续回合仅保留一行模式、阶段和控制状态。原始目标同样只在各 Provider 首轮发送，避免每轮重复。
+- 自动讨论仍支持自然语言正文。新 Prompt 只要求在关闭或请求用户决策时追加结构化控制事件，不再向模型说明 Legacy 信号，也不再注入未实际生效的 temperature 提示。
+- Shared Blackboard 延迟到两个有效回复后启用，增加确定性去重和 1,800 字符渲染上限；新 discussion 不再把完整初始请求复制到 Blackboard。
+- Provider 会话重建历史从 48,000 字符收紧为 24,000 字符，保留最初目标和最近最多六条消息；上下文包装说明同步精简。
+- 四项托管 Skill 改为最少路由说明，不再强制请求模板、讨论阶段或输出格式；debug、decision-debate、peer-review 三项专项 Skill 关闭隐式触发，避免同一任务叠加多套约束。
+
+### 验证
+
+- 全量 TypeScript 构建通过。
+- 23 个测试文件、153 项测试全部通过；新增连续四轮双 Provider 通信用例，验证双方均能完成多轮交流，且后续回合不再重复完整 Contract 和原始目标。
+
 ### v0.7.5 柔性双 Agent 讨论协议
 
 - 汇总自动化讨论架构的三份设计结论，采用“自由讨论，状态受控”的原则：正文可以保持自然语言；只有需要推进状态时，Agent 才附加可选的 JSON 控制事件。既有 `[AGENTBRIDGE_SIGNAL: ...]` 文本信号继续兼容。

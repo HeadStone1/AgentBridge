@@ -627,7 +627,7 @@ node packages/cli/dist/index.js status .
 - 返回的 `discussionId` 用于后续所有操作。
 - `mode` 可选：`review`、`discussion`、`deep-discussion`。`review` 是一次独立评审；`discussion` 和 `deep-discussion` 会在两个 Provider 间自动交替，达成共识后立即进行结论 hash 双签；安全上限分别为 3、12、20，不是必须完成的次数。
 - 自动模式要求 Claude 和 Codex 两个 connector 都已配置；缺少任意一个时会明确返回 `UNAVAILABLE`，不会静默降级为单轮回答。
-- 自动模式返回 `nextAction=WAIT` 时，必须继续使用同一个 `discussionId` 调用 `wait_discussion` 或 `watch_discussion`，不能把中间回复直接当成最终答案。
+- 自动模式默认在 `ask_peer` 内完成整场讨论并返回最终状态。只有显式启用后台派发后返回 `nextAction=WAIT` 时，才继续使用同一个 `discussionId` 调用 `wait_discussion` 或 `watch_discussion`，不能把中间回复直接当成最终答案。
 - `maxTurns` 可选，范围 1–50；它覆盖模式默认值，只是安全上限，不是必须聊满的目标。
 - `get_discussion` 会返回持久化的 `mode`、`maxTurns` 和最新 `lastSignal`；对端明确返回 `NEEDS_USER_DECISION` 时讨论会暂停交给用户决策。
 
@@ -666,7 +666,7 @@ node packages/cli/dist/index.js status .
 }
 ```
 
-同一问题必须复用原 `discussionId`；不要为了轮询结果再次调用 `ask_peer`。`setup` 会为 Claude Code 和 Codex 安全安装四项聚焦 Skill：`agentbridge-collaboration`、`agentbridge-peer-review`、`agentbridge-debug` 和 `agentbridge-decision-debate`，同名自定义或已修改 Skill 不会被覆盖。
+同一问题必须复用原 `discussionId`；不要为了轮询结果再次调用 `ask_peer`。`setup` 会为 Claude Code 和 Codex 安全安装四项轻量 Skill：核心协作 Skill 可自动路由，三个专项 Skill 仅在明确调用时启用；同名自定义或已修改 Skill 不会被覆盖。
 
 ### `list_discussions`
 

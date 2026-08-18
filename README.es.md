@@ -164,7 +164,7 @@ Reinicie los dos clientes después de actualizar. Las instalaciones Release guar
 
 ## Flujo de discusión y retención
 
-`setup` instala de forma segura cuatro Skills enfocadas para Claude Code y Codex: `agentbridge-collaboration`, `agentbridge-peer-review`, `agentbridge-debug` y `agentbridge-decision-debate`; nunca sobrescribe una Skill personalizada o modificada. Reutilice siempre el mismo `discussionId` y use `wait_discussion` cuando el envío esté `QUEUED` o `RUNNING`. `ask_peer.mode` admite `review`, `discussion` y `deep-discussion`, con límites predeterminados de 3, 12 y 20 respuestas correctas; `maxTurns` los sustituye como límite de seguridad.
+`setup` instala cuatro Skills ligeras para Claude Code y Codex sin sobrescribir Skills personalizadas o modificadas. Solo la Skill principal de colaboración puede activarse implícitamente; las tres Skills especializadas requieren uso explícito. Por defecto, `discussion` y `deep-discussion` terminan antes de que `ask_peer` responda. Use `wait_discussion` únicamente si el modo de fondo explícito devuelve `nextAction=WAIT`, reutilizando siempre el mismo `discussionId`.
 
 SQLite conserva el historial indefinidamente por defecto. `cleanup` solo previsualiza salvo que se añada `--yes`, y únicamente elimina conversaciones `COMPLETED` o `CANCELLED`. `AGENTBRIDGE_DISCUSSION_RETENTION_DAYS=1..3650` activa la limpieza al iniciar. Las sesiones nativas se conservan salvo que `AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE=1`; un proveedor sin archivado se omite sin impedir el cierre.
 

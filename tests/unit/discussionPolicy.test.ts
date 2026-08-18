@@ -36,9 +36,23 @@ describe('discussion depth policy', () => {
     expect(prompt).toContain('mode: deep-discussion');
     expect(prompt).toContain('phase: rebuttal');
     expect(prompt).toContain('2/20');
-    expect(prompt).toContain('safety ceiling, not a target');
+    expect(prompt).toContain('response limit is a ceiling');
     expect(prompt).toContain('<current-request>\nCompare migration A and B.\n</current-request>');
-    expect(prompt).toContain('[AGENTBRIDGE_SIGNAL: NEEDS_USER_DECISION]');
+    expect(prompt).toContain('action PROPOSE_CLOSE or REQUEST_USER');
+    expect(prompt).not.toContain('AGENTBRIDGE_SIGNAL');
+    expect(prompt).not.toContain('peer-temperature-hint');
+  });
+
+  it('uses only a compact state line after the first provider turn', () => {
+    const prompt = buildDiscussionPrompt({
+      mode: 'discussion',
+      completedResponses: 4,
+      maxTurns: 12,
+      prompt: 'Answer the latest objection.',
+      includeContract: false,
+    });
+    expect(prompt).toContain('[agentbridge discussion; synthesis; 4/12]');
+    expect(prompt).not.toContain('<agentbridge-discussion-contract>');
   });
 
   it('accepts only one exact final contract signal', () => {
@@ -63,8 +77,8 @@ describe('discussion depth policy', () => {
     expect(parseDiscussionSignal(content)).toBe('READY_TO_CLOSE');
   });
 
-  it('injects only a source-linked blackboard snapshot into automatic turns', () => {
-    const prompt = buildAutomaticTurnPrompt({
+  it('delays the blackboard until two responses and then injects a bounded snapshot', () => {
+    const params: Parameters<typeof buildAutomaticTurnPrompt>[0] = {
       mode: 'discussion',
       completedResponses: 1,
       maxTurns: 12,
@@ -82,9 +96,30 @@ describe('discussion depth policy', () => {
           versionAdded: 2,
         }],
       },
-    });
+    };
+    const earlyPrompt = buildAutomaticTurnPrompt(params);
+    expect(earlyPrompt).not.toContain('<shared-blackboard>');
+
+    const prompt = buildAutomaticTurnPrompt({ ...params, completedResponses: 2 });
     expect(prompt).toContain('<shared-blackboard>');
     expect(prompt).toContain('msg_source');
     expect(prompt).toContain('memory aid, not ground truth');
+    expect(prompt.length).toBeLessThan(3_000);
+  });
+
+  it('does not repeat the original goal after a provider has joined the discussion', () => {
+    const prompt = buildAutomaticTurnPrompt({
+      mode: 'discussion',
+      completedResponses: 3,
+      maxTurns: 12,
+      originalRequest: 'Choose a migration.',
+      latestMessage: 'The online path avoids downtime.',
+      latestSender: 'codex',
+      includeContract: false,
+      includeOriginalRequest: false,
+    });
+    expect(prompt).not.toContain('Choose a migration.');
+    expect(prompt).toContain('The online path avoids downtime.');
+    expect(prompt).not.toContain('<agentbridge-discussion-contract>');
   });
 });

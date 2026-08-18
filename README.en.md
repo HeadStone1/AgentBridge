@@ -164,7 +164,7 @@ Restart both clients after updating. Release updates keep versioned program file
 
 ## Discussion workflow and retention
 
-`setup` safely installs four focused Skills for both Claude Code and Codex: `agentbridge-collaboration`, `agentbridge-peer-review`, `agentbridge-debug`, and `agentbridge-decision-debate`. It never overwrites a same-name custom or user-modified Skill. Reuse the returned `discussionId`, and call `wait_discussion` while dispatch is `QUEUED` or `RUNNING`; do not create a duplicate discussion just to poll. `ask_peer.mode` supports `review`, `discussion`, and `deep-discussion` with default successful-response ceilings of 3, 12, and 20. An explicit `maxTurns` overrides that safety ceiling.
+`setup` safely installs four lightweight Skills for both Claude Code and Codex and never overwrites a same-name custom or user-modified Skill. Only the core collaboration Skill may route implicitly; focused Skills require explicit use. Automatic `discussion` and `deep-discussion` calls complete before `ask_peer` returns by default. Call `wait_discussion` only when explicit background dispatch returns `nextAction=WAIT`, and always reuse the returned `discussionId`.
 
 SQLite discussion history is retained permanently by default. `cleanup` is preview-only unless `--yes` is supplied, and deletes only old `COMPLETED` or `CANCELLED` discussions. Set `AGENTBRIDGE_DISCUSSION_RETENTION_DAYS=1..3650` for opt-in startup cleanup. Native Provider sessions are retained unless `AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE=1`; unsupported providers are skipped without failing discussion closure.
 

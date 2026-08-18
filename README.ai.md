@@ -328,9 +328,9 @@ Never use a destructive Git reset to hide unknown local changes.
 
 ## v0.7 discussion controls
 
-`setup` installs four managed Skills into the Claude and Codex user Skill locations: `agentbridge-collaboration` for routing/lifecycle, `agentbridge-peer-review` for bounded finding-driven reviews, `agentbridge-debug` for reproducible root-cause work, and `agentbridge-decision-debate` for high-impact tradeoff debates. It must not overwrite a custom or modified same-name Skill.
+`setup` installs four lightweight managed Skills into the Claude and Codex user Skill locations. Only `agentbridge-collaboration` is eligible for implicit routing; the three focused Skills require explicit use so multiple instruction sets are not stacked on one task. Setup must not overwrite a custom or modified same-name Skill.
 
-`ask_peer.mode` accepts `review`, `discussion`, or `deep-discussion`, with default successful-response ceilings of 3, 12, and 20. An explicit `maxTurns` overrides the mode default but remains a safety ceiling rather than a target. Each peer response must end in one exact convergence signal; AgentBridge persists it as `lastSignal` and pauses on `NEEDS_USER_DECISION`. Use `wait_discussion` for bounded SQLite-backed long polling; a wait timeout never changes discussion status.
+`ask_peer.mode` accepts `review`, `discussion`, or `deep-discussion`, with default successful-response ceilings of 3, 12, and 20. Automatic modes complete synchronously by default. Use `wait_discussion` only when explicit background dispatch returns `nextAction=WAIT`. Ordinary peer responses need no marker; a structured control event is used only to close or request a user decision. Legacy signals remain parser-compatible but are not injected into new prompts.
 
 Discussion records are permanent by default. `agentbridge cleanup <project> --older-than-days N` previews eligible terminal rows; `--yes` performs the transaction. `AGENTBRIDGE_DISCUSSION_RETENTION_DAYS` enables opt-in startup cleanup, and `AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE=1` enables best-effort native archival. Tests and automation must set a temporary `AGENTBRIDGE_SKILL_HOME` and must never write real Claude/Codex user directories.
 
