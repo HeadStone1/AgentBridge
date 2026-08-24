@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { Storage } from '../../packages/storage/src/index';
 import { AuditService } from '../../packages/audit/src/index';
-import { CollaborationService } from '../../packages/collaboration/src/index';
+import {
+  CollaborationService as RealCollaborationService,
+  type CollaborationConfig,
+  type ConnectorRegistry,
+} from '../../packages/collaboration/src/index';
 import { ProviderError } from '../../packages/protocol/src/index';
 import { ClaudeConnector } from '../../packages/connectors/src/claude';
 import { CodexConnector } from '../../packages/connectors/src/codex';
@@ -13,6 +17,20 @@ import { join } from 'node:path';
 
 const claudeFixture = resolve(fileURLToPath(new URL('../fixtures/fake-claude.mjs', import.meta.url)));
 const codexFixture = resolve(fileURLToPath(new URL('../fixtures/fake-codex.mjs', import.meta.url)));
+
+// Most legacy unit cases assert the synchronous compatibility contract. The
+// MCP runtime now opts into async dispatch explicitly; keep these tests
+// deterministic and add async coverage only where it is intentional.
+class CollaborationService extends RealCollaborationService {
+  constructor(
+    storage: Storage,
+    audit: AuditService,
+    config: CollaborationConfig = {},
+    connectors: ConnectorRegistry = {},
+  ) {
+    super(storage, audit, config, connectors);
+  }
+}
 
 describe('CollaborationService', () => {
   let storage: Storage;
@@ -234,6 +252,58 @@ describe('CollaborationService', () => {
     continuationStorage.close();
   });
 
+  it('moves automatic confirmation failures to a retryable state', async () => {
+    const failureStorage = new Storage(':memory:');
+    const service = new CollaborationService(
+      failureStorage,
+      new AuditService(failureStorage),
+      { maxTurns: 2 },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async () => ({
+            content: 'Candidate conclusion.\n[AGENTBRIDGE_SIGNAL: READY_TO_CLOSE]',
+            duration: 1,
+          }),
+        },
+        claude: {
+          agentType: 'claude',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async ({ prompt }) => {
+            if (prompt.includes('agreement confirmation request')) {
+              throw new Error('confirmation transport failed');
+            }
+            return { content: 'continue', duration: 1 };
+          },
+        },
+      },
+    );
+
+    await expect(service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'confirmation failure',
+      initialMessage: 'Reach a safe conclusion.',
+      traceId: 'tr_confirmation_failure',
+      mode: 'discussion',
+    })).rejects.toThrow('confirmation transport failed');
+
+    const discussion = failureStorage.listDiscussions()[0];
+    expect(discussion).toMatchObject({
+      status: 'FAILED',
+      dispatchState: 'FAILED',
+      pendingOperationKind: null,
+      failedOperationKind: 'agreement_confirmation',
+    });
+    expect(discussion.retryCount).toBe(1);
+    await expect(service.retryDiscussion({ discussionId: discussion.id, agent: 'claude' }))
+      .rejects.toThrow('confirmation transport failed');
+    failureStorage.close();
+  });
+
   it('rejects a changed conclusion after the first acceptance', async () => {
     const started = await collaboration.initiateDiscussion({
       driver: 'claude',
@@ -375,13 +445,13 @@ describe('CollaborationService', () => {
     autoStorage.close();
   });
 
-  it('keeps asynchronous automatic discussions in WAIT until the final decision', async () => {
+  it('returns the final automatic decision from the same call', async () => {
     const asyncStorage = new Storage(':memory:');
     let codexTurns = 0;
     const asyncCollaboration = new CollaborationService(
       asyncStorage,
       new AuditService(asyncStorage),
-      { timeoutMs: 5_000, asyncDispatch: true },
+      { timeoutMs: 5_000 },
       {
         codex: {
           agentType: 'codex',
@@ -414,21 +484,14 @@ describe('CollaborationService', () => {
     const started = await asyncCollaboration.initiateDiscussion({
       driver: 'claude',
       peer: 'codex',
-      topic: 'async automatic discussion',
-      initialMessage: 'Reach a bounded conclusion asynchronously.',
+      topic: 'synchronous automatic discussion',
+      initialMessage: 'Reach a bounded conclusion in this call.',
       traceId: 'tr_async_automatic',
       mode: 'discussion',
     });
-    expect(started.nextAction).toBe('WAIT');
-
-    let snapshot = await asyncCollaboration.waitForDiscussion(started.discussionId, 5_000, started.messageId);
-    while (snapshot.nextAction === 'WAIT') {
-      snapshot = await asyncCollaboration.waitForDiscussion(
-        started.discussionId,
-        5_000,
-        snapshot.messages.at(-1)?.id ?? started.messageId,
-      );
-    }
+    expect(started.status).toBe('COMPLETED');
+    expect(started.nextAction).toBe('NONE');
+    const snapshot = await asyncCollaboration.getDiscussion(started.discussionId);
     expect(snapshot.discussion.status).toBe('COMPLETED');
     expect(snapshot.nextAction).toBe('NONE');
     expect(snapshot.discussion.roundCount).toBe(3);
@@ -544,7 +607,7 @@ describe('CollaborationService', () => {
     const retryCollaboration = new CollaborationService(
       retryStorage,
       new AuditService(retryStorage),
-      { timeoutMs: 5_000, asyncDispatch: true },
+      { timeoutMs: 5_000 },
       {
         codex: {
           agentType: 'codex',
@@ -575,37 +638,20 @@ describe('CollaborationService', () => {
       },
     );
 
-    const started = await retryCollaboration.initiateDiscussion({
+    await expect(retryCollaboration.initiateDiscussion({
       driver: 'claude',
       peer: 'codex',
       topic: 'automatic retry',
       initialMessage: 'Recover this automatic discussion after a transient outage.',
       traceId: 'tr_automatic_retry',
       mode: 'discussion',
-    });
-    let failed = await retryCollaboration.waitForDiscussion(started.discussionId, 5_000, started.messageId);
-    while (failed.discussion.status === 'DISCUSSING') {
-      failed = await retryCollaboration.waitForDiscussion(
-        started.discussionId,
-        5_000,
-        failed.messages.at(-1)?.id ?? started.messageId,
-      );
-    }
+    })).rejects.toThrow('temporary provider outage');
+    const discussionId = retryStorage.listDiscussions()[0].id;
+    const failed = await retryCollaboration.getDiscussion(discussionId);
     expect(failed.discussion.status).toBe('PEER_BUSY');
 
-    await retryCollaboration.retryDiscussion({ discussionId: started.discussionId, agent: 'claude' });
-    let completed = await retryCollaboration.waitForDiscussion(
-      started.discussionId,
-      5_000,
-      failed.messages.at(-1)?.id ?? started.messageId,
-    );
-    while (completed.discussion.status === 'DISCUSSING') {
-      completed = await retryCollaboration.waitForDiscussion(
-        started.discussionId,
-        5_000,
-        completed.messages.at(-1)?.id ?? started.messageId,
-      );
-    }
+    await retryCollaboration.retryDiscussion({ discussionId, agent: 'claude' });
+    const completed = await retryCollaboration.getDiscussion(discussionId);
     expect(completed.discussion.status).toBe('COMPLETED');
     expect(completed.decision?.summary).toBe('Retry conclusion.');
     retryStorage.close();
@@ -882,14 +928,14 @@ describe('CollaborationService', () => {
     roundStorage.close();
   });
 
-  it('keeps one cancellable provider request per asynchronous discussion', async () => {
+  it('does not return from ask_peer before the provider response is complete', async () => {
     const asyncStorage = new Storage(':memory:');
     let release!: () => void;
     const providerGate = new Promise<void>((resolve) => { release = resolve; });
     const asyncCollaboration = new CollaborationService(
       asyncStorage,
       new AuditService(asyncStorage),
-      { asyncDispatch: true, timeoutMs: 5_000 },
+      { timeoutMs: 5_000 },
       {
         codex: {
           agentType: 'codex',
@@ -897,32 +943,77 @@ describe('CollaborationService', () => {
           isBusy: async () => false,
           sendAndWait: async () => {
             await providerGate;
-            return { content: 'async response', duration: 1 };
+            return { content: 'synchronous response', duration: 1 };
           },
         },
       },
     );
-    const started = await asyncCollaboration.initiateDiscussion({
+    let settled = false;
+    const pending = asyncCollaboration.initiateDiscussion({
       driver: 'claude',
       peer: 'codex',
       topic: 'single flight',
       initialMessage: 'first request',
       traceId: 'tr_single_flight',
       mode: 'review',
+    }).then((result) => {
+      settled = true;
+      return result;
     });
 
-    expect(['QUEUED', 'RUNNING']).toContain(asyncStorage.getDiscussion(started.discussionId)?.dispatchState);
-    await expect(asyncCollaboration.replyToDiscussion({
-      discussionId: started.discussionId,
-      sender: 'claude',
-      reply: 'too soon',
-    })).rejects.toMatchObject({ code: 'BUSY' });
-    expect(asyncStorage.getMessages(started.discussionId)).toHaveLength(1);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    const discussionId = asyncStorage.listDiscussions()[0].id;
+    expect(asyncStorage.getMessages(discussionId)).toHaveLength(1);
     release();
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    expect(asyncStorage.getMessages(started.discussionId).at(-1)?.content).toBe('async response');
+    const started = await pending;
+    expect(settled).toBe(true);
+    expect(started.nextAction).not.toBe('WAIT');
+    expect(asyncStorage.getMessages(started.discussionId).at(-1)?.content).toBe('synchronous response');
     expect(asyncStorage.getDiscussion(started.discussionId)?.dispatchState).toBe('COMPLETED');
     asyncStorage.close();
+  });
+
+  it('records and denies provider permission requests without blocking synchronous communication', async () => {
+    const permissionStorage = new Storage(':memory:');
+    const service = new RealCollaborationService(
+      permissionStorage,
+      new AuditService(permissionStorage),
+      { timeoutMs: 5_000 },
+      {
+        codex: {
+          agentType: 'codex',
+          isAvailable: async () => true,
+          isBusy: async () => false,
+          sendAndWait: async (context) => {
+            const decision = await context.onPermissionRequest?.({
+              discussionId: context.discussionId,
+              dispatchId: context.dispatchId ?? 'missing-dispatch',
+              provider: 'codex',
+              method: 'command',
+              actionType: 'run_command',
+              command: 'npm test',
+              risk: 'medium',
+            });
+            return { content: decision === 'approve' ? 'permission approved' : 'permission denied', duration: 1 };
+          },
+        },
+      },
+    );
+
+    const started = await service.initiateDiscussion({
+      driver: 'claude',
+      peer: 'codex',
+      topic: 'permission handshake',
+      initialMessage: 'Run the verification command.',
+      traceId: 'tr_permission_handshake',
+      mode: 'review',
+    });
+    expect(started.nextAction).not.toBe('WAIT');
+    const completed = await service.getDiscussion(started.discussionId);
+    expect(completed.messages.at(-1)?.content).toBe('permission denied');
+    expect(permissionStorage.listPermissionRequests(started.discussionId, ['DENIED'])[0]?.decision).toBe('deny');
+    permissionStorage.close();
   });
 
   it('cancels an in-flight provider request through its abort signal', async () => {
@@ -1564,57 +1655,4 @@ describe('CollaborationService', () => {
     runtimeStorage.close();
   });
 
-  it('moves silent providers through IDLE_SUSPECTED to STALLED and blocks retry while active', async () => {
-    const runtimeStorage = new Storage(':memory:');
-    const config = {
-      asyncDispatch: true,
-      startupTimeoutMs: 5_000,
-      idleTimeoutMs: 1_000,
-      stallGraceMs: 1_000,
-      turnHardLimitMs: 10_000,
-    };
-    const connector = {
-      agentType: 'codex' as const,
-      isAvailable: async () => true,
-      isBusy: async () => false,
-      sendAndWait: async ({ onActivity, signal }: { onActivity?: (activity: any) => void; signal?: AbortSignal }) => await new Promise<never>((_, reject) => {
-        onActivity?.({ kind: 'process_started', processAlive: true, connectionAlive: true });
-        signal?.addEventListener('abort', () => reject(new ProviderError('TIMEOUT', 'test stalled')), { once: true });
-      }),
-    };
-    const service = new CollaborationService(
-      runtimeStorage,
-      new AuditService(runtimeStorage),
-      config,
-      { codex: connector },
-    );
-
-    const started = await service.initiateDiscussion({
-      driver: 'claude',
-      peer: 'codex',
-      topic: 'runtime stall',
-      initialMessage: 'Wait for the silent peer.',
-      traceId: 'tr_runtime_stall',
-      mode: 'review',
-    });
-    runtimeStorage.updateDiscussionStatus(started.discussionId, 'TIMEOUT');
-    const retryService = new CollaborationService(
-      runtimeStorage,
-      new AuditService(runtimeStorage),
-      config,
-      { codex: connector },
-    );
-    await expect(retryService.retryDiscussion({ discussionId: started.discussionId, agent: 'claude' }))
-      .rejects.toThrow('PEER_STILL_RUNNING');
-
-    await new Promise((resolve) => setTimeout(resolve, 1_200));
-    expect((await service.getDiscussion(started.discussionId)).peerRuntime?.state)
-      .toBe('IDLE_SUSPECTED');
-    await new Promise((resolve) => setTimeout(resolve, 1_200));
-    expect((await service.getDiscussion(started.discussionId)).peerRuntime?.state)
-      .toBe('STALLED');
-    await service.shutdown(1_000);
-    await retryService.shutdown(1_000);
-    runtimeStorage.close();
-  });
 });

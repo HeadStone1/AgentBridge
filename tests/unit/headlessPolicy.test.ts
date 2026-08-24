@@ -23,6 +23,10 @@ describe('HEADLESS_PEER policy', () => {
     })).toBe('DENY');
     expect(policy.decide({
       method: 'item/fileChange/requestApproval',
+      params: { path: `${projectPath}/src/index.ts` },
+    })).toBe('NEEDS_USER_DECISION');
+    expect(policy.decide({
+      method: 'item/fileChange/requestApproval',
       params: { path: 'G:/other-project/secret.txt' },
     })).toBe('DENY');
   });

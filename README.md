@@ -4,7 +4,7 @@
 
 AgentBridge 是一个本地优先的 MCP 协作核心，让 Claude Code 和 Codex 能在同一个项目中互相提问、回复、重试、达成一致，并把讨论状态保存在项目本地的 SQLite 数据库中。
 
-> 当前开发版本：v0.7.3。本项目以 GitHub Release 分发本地 stdio MCP；便携包自带 Node.js 运行时，不要求用户另外安装 Node 或 npm。Release 安装后程序独立位于用户目录，不依赖下载目录或源码仓库。
+> 当前开发版本：v0.8.0。本项目以 GitHub Release 分发本地 stdio MCP；便携包自带 Node.js 运行时，不要求用户另外安装 Node 或 npm。Release 安装后程序独立位于用户目录，不依赖下载目录或源码仓库。
 
 > 当前源码验证状态：UTF-8 校验、TypeScript 构建以及完整自动化测试均已通过，其中 Release MCP 使用官方 SDK 连续完成 30 次握手。`auto/reuse` 会通过同一项目的 collaboration session 复用 Provider 原生会话；`fresh` 会建立隔离 room，并在该 room 内复用自己的 Provider 会话。上述自动化测试不等同于真实 Provider 端到端验收；只有 Claude → Codex 和 Codex → Claude 两个方向都完成实际 `ask_peer` 调用，才能声明真实双向通信可用。
 
@@ -28,7 +28,7 @@ agentbridge setup
 agentbridge doctor
 ```
 
-从 v0.5.x 升级时，安装 v0.7.1 后执行一次 `agentbridge setup`。它会把已登记的项目级 Claude/Codex 条目迁移为全局条目，保留其他 MCP 配置和各项目已有数据库。然后彻底退出并重启 Claude Code 与 ChatGPT/Codex。
+从 v0.5.x 升级时，安装最新版后执行一次 `agentbridge setup`。它会把已登记的项目级 Claude/Codex 条目迁移为全局条目，保留其他 MCP 配置和各项目已有数据库。然后彻底退出并重启 Claude Code 与 ChatGPT/Codex。
 
 ### 1. 先选择安装方式
 
@@ -627,7 +627,7 @@ node packages/cli/dist/index.js status .
 - 返回的 `discussionId` 用于后续所有操作。
 - `mode` 可选：`review`、`discussion`、`deep-discussion`。`review` 是一次独立评审；`discussion` 和 `deep-discussion` 会在两个 Provider 间自动交替，达成共识后立即进行结论 hash 双签；安全上限分别为 3、12、20，不是必须完成的次数。
 - 自动模式要求 Claude 和 Codex 两个 connector 都已配置；缺少任意一个时会明确返回 `UNAVAILABLE`，不会静默降级为单轮回答。
-- 自动模式默认在 `ask_peer` 内完成整场讨论并返回最终状态。只有显式启用后台派发后返回 `nextAction=WAIT` 时，才继续使用同一个 `discussionId` 调用 `wait_discussion` 或 `watch_discussion`，不能把中间回复直接当成最终答案。
+- `ask_peer` 固定同步执行：`review` 等待本次对端回复，自动模式等待整场讨论到完成、需要用户决策或已记录失败后才返回，不再转入后台并返回中间 `WAIT`。
 - `maxTurns` 可选，范围 1–50；它覆盖模式默认值，只是安全上限，不是必须聊满的目标。
 - `get_discussion` 会返回持久化的 `mode`、`maxTurns` 和最新 `lastSignal`；对端明确返回 `NEEDS_USER_DECISION` 时讨论会暂停交给用户决策。
 
@@ -656,7 +656,7 @@ node packages/cli/dist/index.js status .
 
 ### `wait_discussion`
 
-等待异步派发产生新消息或退出 `QUEUED/RUNNING`，不会因等待超时改变讨论状态：
+兼容性观察工具，用于读取已有 discussion 的后续状态；正常的同步 `ask_peer` / `reply_peer` 流程不需要调用它，等待超时也不会改变讨论状态：
 
 ```json
 {
@@ -666,7 +666,7 @@ node packages/cli/dist/index.js status .
 }
 ```
 
-同一问题必须复用原 `discussionId`；不要为了轮询结果再次调用 `ask_peer`。`setup` 会为 Claude Code 和 Codex 安全安装四项轻量 Skill：核心协作 Skill 可自动路由，三个专项 Skill 仅在明确调用时启用；同名自定义或已修改 Skill 不会被覆盖。
+同一问题必须复用原 `discussionId`；不要为了读取状态再次调用 `ask_peer`。`setup` 会为 Claude Code 和 Codex 安全安装四项轻量 Skill：核心协作 Skill 可自动路由，三个专项 Skill 仅在明确调用时启用；同名自定义或已修改 Skill 不会被覆盖。
 
 ### `list_discussions`
 

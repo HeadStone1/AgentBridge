@@ -17,7 +17,7 @@ Use AgentBridge as a direct communication channel between Claude Code and Codex.
 
 - `discussion` and `deep-discussion` normally run the complete alternating conversation before `ask_peer` returns.
 - Read the returned status, conclusion, and transcript. Do not stop at an intermediate message.
-- Use `wait_discussion` only if the call explicitly returns `nextAction=WAIT`, which means background dispatch was enabled.
+- The bridge is synchronous; do not poll or start a second discussion while the call is running. `wait_discussion` is only for observing an already existing discussion.
 - Use `reply_peer` only when the service requests a user decision or the user supplies material new information.
 
 ## Return the result

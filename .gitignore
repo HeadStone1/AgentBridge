@@ -1,6 +1,7 @@
 node_modules/
 dist/
 artifacts/
+docs/PERMISSION_DESIGN.md
 .agentbridge/*.sqlite
 .agentbridge/*.sqlite-shm
 .agentbridge/*.sqlite-wal

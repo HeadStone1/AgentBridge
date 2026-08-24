@@ -326,11 +326,11 @@ node packages/cli/dist/index.js setup
 
 Never use a destructive Git reset to hide unknown local changes.
 
-## v0.7 discussion controls
+## v0.8 discussion controls
 
 `setup` installs four lightweight managed Skills into the Claude and Codex user Skill locations. Only `agentbridge-collaboration` is eligible for implicit routing; the three focused Skills require explicit use so multiple instruction sets are not stacked on one task. Setup must not overwrite a custom or modified same-name Skill.
 
-`ask_peer.mode` accepts `review`, `discussion`, or `deep-discussion`, with default successful-response ceilings of 3, 12, and 20. Automatic modes complete synchronously by default. Use `wait_discussion` only when explicit background dispatch returns `nextAction=WAIT`. Ordinary peer responses need no marker; a structured control event is used only to close or request a user decision. Legacy signals remain parser-compatible but are not injected into new prompts.
+`ask_peer.mode` accepts `review`, `discussion`, or `deep-discussion`, with default successful-response ceilings of 3, 12, and 20. All modes are synchronous: the tool returns after the peer work completes, needs a user decision, or records a failure. `wait_discussion` remains an observation/compatibility tool and is not part of the normal call sequence. Ordinary peer responses need no marker; a structured control event is used only to close or request a user decision. Legacy signals remain parser-compatible but are not injected into new prompts.
 
 Discussion records are permanent by default. `agentbridge cleanup <project> --older-than-days N` previews eligible terminal rows; `--yes` performs the transaction. `AGENTBRIDGE_DISCUSSION_RETENTION_DAYS` enables opt-in startup cleanup, and `AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE=1` enables best-effort native archival. Tests and automation must set a temporary `AGENTBRIDGE_SKILL_HOME` and must never write real Claude/Codex user directories.
 

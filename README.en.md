@@ -164,7 +164,7 @@ Restart both clients after updating. Release updates keep versioned program file
 
 ## Discussion workflow and retention
 
-`setup` safely installs four lightweight Skills for both Claude Code and Codex and never overwrites a same-name custom or user-modified Skill. Only the core collaboration Skill may route implicitly; focused Skills require explicit use. Automatic `discussion` and `deep-discussion` calls complete before `ask_peer` returns by default. Call `wait_discussion` only when explicit background dispatch returns `nextAction=WAIT`, and always reuse the returned `discussionId`.
+`setup` safely installs four lightweight Skills for both Claude Code and Codex and never overwrites a same-name custom or user-modified Skill. Only the core collaboration Skill may route implicitly; focused Skills require explicit use. Every `ask_peer` and `reply_peer` call is synchronous and returns only after the peer work completes, needs a user decision, or records a failure. `wait_discussion` remains an observation/compatibility tool; always reuse the returned `discussionId`.
 
 SQLite discussion history is retained permanently by default. `cleanup` is preview-only unless `--yes` is supplied, and deletes only old `COMPLETED` or `CANCELLED` discussions. Set `AGENTBRIDGE_DISCUSSION_RETENTION_DAYS=1..3650` for opt-in startup cleanup. Native Provider sessions are retained unless `AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE=1`; unsupported providers are skipped without failing discussion closure.
 

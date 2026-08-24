@@ -41,7 +41,7 @@ function buildTools(agentType: AgentType): Tool[] {
   return [
     {
       name: 'ask_peer',
-      description: 'Start a peer interaction. review performs one independent review; discussion and deep-discussion automatically alternate both providers and normally return after the discussion settles. Both providers must be configured. Use wait_discussion/watch_discussion only when explicit background dispatch returns nextAction=WAIT.',
+      description: 'Start a synchronous peer interaction. review returns one independent peer response; discussion and deep-discussion alternate both providers and return only after agreement, a user decision, or a recorded failure. Both providers must be configured.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -64,7 +64,7 @@ function buildTools(agentType: AgentType): Tool[] {
     },
     {
       name: 'reply_peer',
-      description: 'Continue a manual/review discussion, or provide the requested user decision after an automatic discussion pauses. Automatic runs reject concurrent replies while nextAction=WAIT.',
+      description: 'Continue a manual/review discussion, or provide the requested user decision after an automatic discussion pauses. The call returns only after the peer turn or resumed automatic discussion settles.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -90,7 +90,7 @@ function buildTools(agentType: AgentType): Tool[] {
     },
     {
       name: 'wait_discussion',
-      description: 'Wait for a queued/running discussion message. Automatic discussions may wake on intermediate messages; continue waiting while nextAction=WAIT.',
+      description: 'Compatibility and observation tool for an existing discussion. Synchronous ask_peer/reply_peer calls do not require it during normal communication.',
       inputSchema: {
         type: 'object',
         properties: {

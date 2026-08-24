@@ -1,5 +1,25 @@
 # AgentBridge 开发日志
 
+## 2026-08-19
+
+### v0.8.0 同步双 Agent 完整通信
+
+- 删除 `asyncDispatch` 和 `AGENTBRIDGE_ASYNC_DISPATCH`，移除自动讨论、普通派发、Agreement 确认与重试的全部后台启动器。
+- `ask_peer`、`reply_peer`、`retry_discussion` 和 Agreement 确认固定在当前 MCP 调用内执行；只有完成、需要用户决策或已记录失败后才返回，主 Agent 不再因中间 `nextAction=WAIT` 提前中断。
+- 新增回归用例，验证 `ask_peer` 在 Provider 尚未完成时不会返回，并验证自动讨论的最终决策由同一次调用直接返回。
+- 完整讨论 Contract 改为每个 Provider 首次发言时注入一次，后续回合只保留必要状态；Shared Blackboard 延迟启用并限制为 1,800 字符；Provider 重建上下文限制为 24,000 字符和最近六条消息。
+- 四项托管 Skill 只保留最少路由说明，专项 Skill 不再隐式叠加，优先保证 Claude 与 Codex 能完成自然语言多轮通信。
+
+### 权限选择：仅保留设计，不进入 v0.8.0 运行时
+
+- 撤回未完成的 `set_permission_mode`、discussion 权限字段和自动全权限逻辑，不把尚未跑通的审批机制带入本版本。
+- 同步模式遇到 Provider 权限请求时记录并立即拒绝，避免隐藏审批等待阻塞整个通信调用。
+
+### 验证
+
+- `npm test` 通过：23 个测试文件、156 项测试全部成功，包括 30 次连续 MCP SDK 握手。
+- `npm run release:npm` 通过，生成版本为 `0.8.0` 的 Release bundle 与 npm 目录产物。
+
 ## 2026-08-18
 
 ### v0.7.6 完整通信优先与提示词精简

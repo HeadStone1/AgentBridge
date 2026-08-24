@@ -22,7 +22,6 @@ export async function runMcpSmoke(
       ...process.env,
       AGENTBRIDGE_AGENT: 'claude',
       AGENTBRIDGE_PROJECT_PATH: projectPath,
-      AGENTBRIDGE_ASYNC_DISPATCH: '0',
       AGENTBRIDGE_TEST_MAX_LIFETIME_MS: '30000',
     } as Record<string, string>,
   });
