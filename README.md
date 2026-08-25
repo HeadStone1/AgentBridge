@@ -215,6 +215,55 @@ node packages/cli/dist/index.js doctor
 
 配置后完全退出并重新启动 Claude Code 和 Codex App；仅关闭项目窗口不一定会重新加载 MCP。从 v0.5.x 升级也只需重新执行一次无参数 `agentbridge setup`。
 
+### 配置自主调用与讨论生命周期
+
+AgentBridge 的运行时配置分为“全局默认”和“项目覆盖”两层，不需要再为每个项目手工设置环境变量：
+
+- 全局配置：`~/.agentbridge/config.json`；可通过 `AGENTBRIDGE_CONFIG_HOME` 更换配置根目录。
+- 项目配置：`<项目>/.agentbridge/config.json`；可以提交到 Git，与团队共享项目规则。
+- 生效优先级：程序默认值 < 全局配置 < 项目配置 < 兼容性的 `AGENTBRIDGE_*` 环境变量。
+- 没有写入项目配置的字段会继承全局值；项目配置只需要保存差异。
+
+直接在项目目录运行下面的命令，会打开一次性的本地配置页面（监听 `127.0.0.1`；关闭页面或空闲超时后退出）：
+
+```bash
+agentbridge ui
+```
+
+页面可以分别编辑全局默认、当前项目覆盖，并显示最终生效值及其来源。Release 用户和源码用户分别替换为自己的 launcher 或 `node packages/cli/dist/index.js ui` 即可。项目路径未指定时会使用当前工作目录；从用户根目录、磁盘根目录或安装目录启动时不会把这些目录误当成项目。
+
+最小配置示例：
+
+```json
+{
+  "version": 1,
+  "invocation": {
+    "autonomous": true
+  },
+  "discussion": {
+    "maxDuration": "2h",
+    "idleTimeout": "10m",
+    "turnHardLimit": "1h",
+    "maxTurns": 20
+  },
+  "session": {
+    "retentionDays": 30,
+    "archiveOnClose": false
+  }
+}
+```
+
+`invocation.autonomous` 默认是 `true`，允许 Agent 在判断需要跨模型协作时自主调用 `ask_peer`。设置为 `false` 后，MCP 只接受明确由用户发起的调用；调用方需要把 `ask_peer.invocationOrigin` 标记为 `user_requested`，标记为 `autonomous` 的调用会被拒绝。Skill 只描述讨论流程和质量要求，不能绕过这项配置。
+
+生命周期字段支持 `ms`、`s`、`m`、`h`、`d`：
+
+- `discussion.maxDuration`：整场讨论的最长墙钟时间，支持 `null` 表示不设置整体时限。
+- `discussion.idleTimeout`：讨论在无新消息时的静默超时。
+- `discussion.startupTimeout`、`stallGrace`、`turnHardLimit`、`leaseTimeout`、`terminationGrace`：启动、卡顿、单轮、租约和终止宽限控制。
+- `discussion.maxTurns`：1–50 的安全上限，不代表必须完成这么多轮。
+
+即使将 `maxDuration` 设为 `null`，静默、单轮、provider 和进程级安全控制仍然生效。完整字段、校验范围、备份行为及环境变量兼容映射见 [配置说明](docs/CONFIGURATION.md)。
+
 ### 8. 分四层验证安装结果
 
 `doctor` 会检查安装模式、Node、项目元数据、项目登记、数据库读写、Claude/Codex MCP 配置、启动命令和 provider 后端。单项失败会写入 JSON 的 `recommendations`，不会因项目未初始化或 provider 不可用而中途崩溃，也不会为了检查而创建不存在的项目。它仍然**不能证明已经打开的 Claude Code 或 Codex App 已重新加载 MCP 配置**，因此请依次完成下面四层验证。
@@ -323,11 +372,11 @@ agentbridge uninstall /absolute/path/to/your-project --yes
 
 该命令只会：
 
-- 删除当前项目的 `.agentbridge` 目录和讨论数据库。
+- 删除当前项目的 `.agentbridge` 运行数据和讨论数据库，但保留 `.agentbridge/config.json` 项目配置。
 - 从自动清理登记中移除该项目。
 - 保留全局 Claude/Codex MCP 条目、其他项目、其他 MCP 服务以及 AgentBridge 程序本身。
 
-它**不会删除** Release 安装目录 `%USERPROFILE%\.agentbridge` 或 `~/.agentbridge`，也不会卸载 npm 全局包。需要保留讨论记录时，先备份项目的 `.agentbridge` 目录。Windows、Linux、macOS 使用相同语义。
+它**不会删除** Release 安装目录 `%USERPROFILE%\.agentbridge` 或 `~/.agentbridge`，也不会卸载 npm 全局包。需要保留讨论记录时，先备份项目的 `.agentbridge` 目录；项目配置会被自动保留。Windows、Linux、macOS 使用相同语义。
 
 要删除所有已登记项目的 AgentBridge 配置、讨论数据和程序本身，使用一键完整卸载。该命令需要两个明确确认参数，避免误操作。
 
@@ -363,6 +412,7 @@ agentbridge uninstall-all --yes --remove-program
 - [当前功能与边界](#当前功能与边界)
 - [虚拟机源码开发快速开始](#虚拟机源码开发快速开始)
 - [配置 Claude 和 Codex](#配置-claude-和-codex)
+- [配置自主调用与讨论生命周期](#配置自主调用与讨论生命周期)
 - [首次真实联通测试](#首次真实联通测试)
 - [MCP 工具说明](#mcp-工具说明)
 - [讨论状态说明](#讨论状态说明)
@@ -401,7 +451,8 @@ AgentBridge 不会把代码或讨论上传到自己的云服务。实际模型�
 - 自动发现 Codex Desktop 或新版 ChatGPT Desktop 自带的 Codex 运行程序，优先使用 App Server stdio 协议。
 - App Server 不可用时自动回退到 Codex CLI `exec --json` 和 `exec resume`。
 - 讨论轮数、重试次数、总消息长度和持续时间限制。
-- `init`、`setup`、`doctor`、`status`、`register-session`、`version`、`update`、`rollback`、项目 `uninstall` 和系统级 `uninstall-all` 管理命令。
+- 全局/项目两级 JSON 配置、配置来源追踪，以及用完即走的 `agentbridge ui` 配置页面。
+- `init`、`setup`、`ui`、`doctor`、`status`、`register-session`、`version`、`update`、`rollback`、项目 `uninstall` 和系统级 `uninstall-all` 管理命令。
 - 增量修改 Claude JSON 与 Codex TOML 配置，修改前生成备份。
 - 并发 SQLite 启动锁等待与双进程回归测试。
 
@@ -409,7 +460,7 @@ AgentBridge 不会把代码或讨论上传到自己的云服务。实际模型�
 
 - 必须在运行 AgentBridge 的系统或虚拟机内安装并登录 Claude/Codex；宿主机登录状态不会自动进入虚拟机。
 - Codex App Server 适配器会启动一个新的受控子进程，不会接管已打开的 Codex Desktop 私有进程。
-- 尚无常驻 HTTP 服务、Web UI、PostgreSQL/Redis、严格模式或等待队列。
+- `agentbridge ui` 只启动一次性的本地 HTTP 配置页面；没有常驻 Web 服务、PostgreSQL/Redis、严格模式或等待队列。
 - 正在执行中的 provider 请求仍无法在进程崩溃后原地恢复；代码签名、静默后台更新和云端部署仍是后续工作。
 - 是否能完成真实调用最终取决于本机 provider 版本、账号权限、网络和模型配额。
 
@@ -772,6 +823,7 @@ node packages/cli/dist/index.js <command> [path] [options]
 | `update --install` | 下载、校验并安装当前平台的最新稳定版 |
 | `update --channel beta` | 检查包含预发布版本的更新通道 |
 | `rollback` | 切换到本机已经安装的上一版本 |
+| `ui [path]` | 打开一次性的全局/项目配置页面；默认使用当前项目目录 |
 | `uninstall [path] --yes` | 删除该项目状态；保留全局 MCP 条目和程序目录 |
 | `uninstall-all --yes` | 删除所有已登记项目状态及全局/旧版 MCP 条目；保留程序 |
 | `uninstall-all --yes --remove-program` | 完整卸载所有项目和 Release/npm 程序；源码仓库不会自动删除 |
@@ -800,6 +852,7 @@ node packages/cli/dist/index.js register-session \
 | 变量 | 用途 | 默认值/说明 |
 |---|---|---|
 | `AGENTBRIDGE_AGENT` | 当前 MCP 身份 | `claude`；Codex 侧必须显式设置为 `codex` |
+| `AGENTBRIDGE_CONFIG_HOME` | 全局/项目配置根目录 | `~/.agentbridge` |
 | `AGENTBRIDGE_PROJECT_PATH` | 显式项目路径兼容覆盖 | 全局 setup 不写入；运行时优先于 `CLAUDE_PROJECT_DIR`、MCP roots 和 cwd |
 | `AGENTBRIDGE_DB_PATH` | 旧版/测试数据库覆盖 | 全局模式不写入；数据库自动位于 `<项目>/.agentbridge/agentbridge.sqlite` |
 | `AGENTBRIDGE_CLAUDE_COMMAND` | Claude CLI 命令或绝对路径 | `claude` |
@@ -812,6 +865,11 @@ node packages/cli/dist/index.js register-session \
 | `AGENTBRIDGE_MAX_TURNS` | 覆盖所有模式的实质性 Provider 回复安全上限 | 未设置时按模式取 3/12/20；协议确认不消耗上限，设置范围 1–50 |
 | `AGENTBRIDGE_DISCUSSION_RETENTION_DAYS` | 启动时清理终态讨论 | 未设置或 `0` 表示永久保留；可选 1–3650 |
 | `AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE` | close/cancel 后尝试归档 Provider 原生会话 | 默认关闭；设为 `1` 启用，Provider 不支持时安全跳过 |
+| `AGENTBRIDGE_AUTONOMOUS_INVOCATION` / `AGENTBRIDGE_ALLOW_AUTONOMOUS` | 兼容性覆盖自主调用开关 | `true`；JSON 配置优先级较低 |
+| `AGENTBRIDGE_MAX_DURATION_MS` | 兼容性覆盖整场讨论最长时间 | 毫秒；设为 `0` 表示不限制整体时长 |
+| `AGENTBRIDGE_IDLE_TIMEOUT_MS` | 兼容性覆盖静默超时 | 毫秒 |
+| `AGENTBRIDGE_STARTUP_TIMEOUT_MS`、`AGENTBRIDGE_STALL_GRACE_MS` | 兼容性覆盖启动/卡顿控制 | 毫秒 |
+| `AGENTBRIDGE_TURN_HARD_LIMIT_MS`、`AGENTBRIDGE_TIMEOUT_MS`、`AGENTBRIDGE_TERMINATION_GRACE_MS` | 兼容性覆盖单轮、租约/旧版超时和终止宽限 | 毫秒 |
 
 不要把测试专用的 `AGENTBRIDGE_TEST_*` 变量用于生产配置。
 
@@ -911,9 +969,9 @@ node packages/cli/dist/index.js uninstall . --yes
 
 - 从 Claude/Codex 配置中移除名为 `agentbridge` 的 MCP 条目。
 - 保留其他 MCP 服务和 provider 配置。
-- 删除当前项目的 `.agentbridge` 目录，包括讨论数据库。
+- 删除当前项目的 `.agentbridge` 运行数据和讨论数据库，保留 `.agentbridge/config.json`。
 
-卸载会删除本地讨论数据；需要保留时先执行备份。
+卸载会删除本地讨论数据；项目配置不会被删除，需要保留讨论数据时仍应先执行备份。
 
 这只是“项目卸载”：不会删除 Release 安装目录 `%USERPROFILE%\.agentbridge` / `~/.agentbridge`，也不会卸载 npm 全局包。完整卸载直接运行：
 
