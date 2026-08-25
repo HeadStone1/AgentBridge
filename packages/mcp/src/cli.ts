@@ -4,6 +4,7 @@ import { dirname, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { AuditService } from '@agentbridge/audit';
+import { resolveConfig } from '@agentbridge/config';
 import { CollaborationService } from '@agentbridge/collaboration';
 import { ClaudeConnector, CodexAutoConnector } from '@agentbridge/connectors';
 import {
@@ -13,7 +14,6 @@ import {
 } from '@agentbridge/storage';
 import type { AgentType } from '@agentbridge/protocol';
 import { runDynamicServer, type MCPRuntime } from './server.js';
-import { readOptionalBoundedInteger } from './runtimeConfig.js';
 
 const agentType: AgentType = process.env.AGENTBRIDGE_AGENT === 'codex' ? 'codex' : 'claude';
 let runtimePromise: Promise<MCPRuntime> | null = null;
@@ -33,6 +33,7 @@ async function resolveRuntime(requestedProjectPath: string | undefined, server: 
 }
 
 async function createRuntime(projectPath: string): Promise<MCPRuntime> {
+  const effective = resolveConfig(projectPath);
   ensureProjectMetadata(projectPath);
   registerProject({
     projectPath,
@@ -44,19 +45,9 @@ async function createRuntime(projectPath: string): Promise<MCPRuntime> {
   activeStorage = storage;
   const audit = new AuditService(storage);
   storage.recoverExpiredSessionLeases();
-  storage.pruneSessions(readBoundedInteger('AGENTBRIDGE_SESSION_PRUNE_MAX_AGE_MS', 30 * 24 * 60 * 60 * 1_000, 1_000, 365 * 24 * 60 * 60 * 1_000));
-  const idleTimeoutMs = readBoundedInteger(
-    'AGENTBRIDGE_IDLE_TIMEOUT_MS',
-    readBoundedInteger('AGENTBRIDGE_TIMEOUT_MS', 120_000, 1_000, 600_000),
-    1_000,
-    600_000,
-  );
-  const startupTimeoutMs = readBoundedInteger('AGENTBRIDGE_STARTUP_TIMEOUT_MS', 15_000, 1_000, 600_000);
-  const stallGraceMs = readBoundedInteger('AGENTBRIDGE_STALL_GRACE_MS', 180_000, 1_000, 600_000);
-  const turnHardLimitMs = readBoundedInteger('AGENTBRIDGE_TURN_HARD_LIMIT_MS', 30 * 60 * 1_000, 1_000, 7 * 24 * 60 * 60 * 1_000);
-  const maxDurationMs = readBoundedInteger('AGENTBRIDGE_MAX_DURATION_MS', 30 * 60 * 1_000, 1_000, 7 * 24 * 60 * 60 * 1_000);
-  const maxTurns = readOptionalBoundedInteger('AGENTBRIDGE_MAX_TURNS', 1, 50);
-  const retentionDays = readBoundedInteger('AGENTBRIDGE_DISCUSSION_RETENTION_DAYS', 0, 0, 3650);
+  storage.pruneSessions(effective.config.session.pruneMaxAgeMs);
+  const { discussion, session } = effective.config;
+  const retentionDays = session.retentionDays;
   if (retentionDays > 0) {
     const cleanup = storage.cleanupDiscussions(retentionDays, true);
     audit.log({
@@ -67,9 +58,8 @@ async function createRuntime(projectPath: string): Promise<MCPRuntime> {
       metadata: cleanup,
     });
   }
-  const recoveryAgeMs = Number.parseInt(process.env.AGENTBRIDGE_RECOVERY_MAX_AGE_MS ?? '', 10);
   const recovered = storage.recoverStaleDiscussions(
-    Number.isInteger(recoveryAgeMs) && recoveryAgeMs > 0 ? recoveryAgeMs : undefined,
+    session.recoveryMaxAgeMs,
   );
   for (const discussion of recovered) {
     audit.log({
@@ -84,44 +74,48 @@ async function createRuntime(projectPath: string): Promise<MCPRuntime> {
     storage,
     audit,
     {
-      maxTurns,
-      idleTimeoutMs,
-      startupTimeoutMs,
-      stallGraceMs,
-      turnHardLimitMs,
-      maxDurationMs,
-      archiveSessionsOnClose: readBoolean('AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE', false),
+      maxTurns: discussion.maxTurns,
+      idleTimeoutMs: discussion.idleTimeoutMs,
+      startupTimeoutMs: discussion.startupTimeoutMs,
+      stallGraceMs: discussion.stallGraceMs,
+      turnHardLimitMs: discussion.turnHardLimitMs,
+      maxDurationMs: discussion.maxDurationMs,
+      timeoutMs: discussion.leaseTimeoutMs,
+      terminationGraceMs: discussion.terminationGraceMs,
+      maxTotalMessageChars: discussion.maxTotalMessageChars,
+      archiveSessionsOnClose: session.archiveOnClose,
     },
     {
-      claude: new ClaudeConnector({ command: process.env.AGENTBRIDGE_CLAUDE_COMMAND, hardTimeoutMs: turnHardLimitMs }),
+      claude: new ClaudeConnector({ command: process.env.AGENTBRIDGE_CLAUDE_COMMAND, hardTimeoutMs: discussion.turnHardLimitMs }),
       codex: new CodexAutoConnector({
         model: process.env.AGENTBRIDGE_CODEX_MODEL,
-        hardTimeoutMs: turnHardLimitMs,
-        startupTimeoutMs,
+        hardTimeoutMs: discussion.turnHardLimitMs,
+        startupTimeoutMs: discussion.startupTimeoutMs,
       }),
     },
   );
   activeCollaboration = collaboration;
-  return { storage, collaboration, projectPath };
-}
-
-function readBoundedInteger(name: string, fallback: number, min: number, max: number): number {
-  const raw = process.env[name];
-  if (!raw?.trim()) return fallback;
-  const normalized = raw.trim();
-  const value = /^\d+$/.test(normalized) ? Number(normalized) : Number.NaN;
-  if (!Number.isInteger(value) || value < min || value > max) {
-    throw new Error(`${name} must be an integer between ${min} and ${max}`);
-  }
-  return value;
-}
-
-function readBoolean(name: string, fallback: boolean): boolean {
-  const raw = process.env[name]?.trim().toLowerCase();
-  if (!raw) return fallback;
-  if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
-  if (['0', 'false', 'no', 'off'].includes(raw)) return false;
-  throw new Error(`${name} must be a boolean value`);
+  return {
+    storage,
+    collaboration,
+    projectPath,
+    refreshConfig: () => {
+      const next = resolveConfig(projectPath);
+      collaboration.updateConfig({
+        maxTurns: next.config.discussion.maxTurns,
+        timeoutMs: next.config.discussion.leaseTimeoutMs,
+        idleTimeoutMs: next.config.discussion.idleTimeoutMs,
+        startupTimeoutMs: next.config.discussion.startupTimeoutMs,
+        stallGraceMs: next.config.discussion.stallGraceMs,
+        turnHardLimitMs: next.config.discussion.turnHardLimitMs,
+        maxDurationMs: next.config.discussion.maxDurationMs,
+        terminationGraceMs: next.config.discussion.terminationGraceMs,
+        maxTotalMessageChars: next.config.discussion.maxTotalMessageChars,
+        archiveSessionsOnClose: next.config.session.archiveOnClose,
+      });
+      return next;
+    },
+  };
 }
 
 async function detectProjectPath(requestedProjectPath: string | undefined, server: Server): Promise<string> {

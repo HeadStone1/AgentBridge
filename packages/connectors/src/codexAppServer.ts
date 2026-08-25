@@ -36,8 +36,8 @@ export class CodexAppServerConnector implements AgentConnector {
   readonly agentType = 'codex' as const;
   private readonly command: string;
   private readonly serverArgs: string[];
-  private readonly hardTimeoutMs: number;
-  private readonly startupTimeoutMs: number;
+  private hardTimeoutMs: number;
+  private startupTimeoutMs: number;
   private readonly model?: string;
   private readonly stderrBufferBytes: number;
   private readonly pending = new Map<number, { resolve: (value: JsonObject) => void; reject: (error: Error) => void }>();
@@ -66,15 +66,26 @@ export class CodexAppServerConnector implements AgentConnector {
     this.startupTimeoutMs = options.startupTimeoutMs ?? 15_000;
     this.model = options.model;
     this.stderrBufferBytes = options.stderrBufferBytes ?? 256 * 1024;
-    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1_000 || this.hardTimeoutMs > 7 * 24 * 60 * 60 * 1_000) {
-      throw new Error('Codex App Server hardTimeoutMs must be an integer between 1000 and 604800000');
+    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1_000 || this.hardTimeoutMs > 365 * 24 * 60 * 60 * 1_000) {
+      throw new Error('Codex App Server hardTimeoutMs must be an integer between 1000 and 31536000000');
     }
-    if (!Number.isInteger(this.startupTimeoutMs) || this.startupTimeoutMs < 1_000 || this.startupTimeoutMs > 600_000) {
-      throw new Error('Codex App Server startupTimeoutMs must be an integer between 1000 and 600000');
+    if (!Number.isInteger(this.startupTimeoutMs) || this.startupTimeoutMs < 1_000 || this.startupTimeoutMs > 24 * 24 * 60 * 60 * 1_000) {
+      throw new Error('Codex App Server startupTimeoutMs must be an integer between 1000 and 2073600000');
     }
     if (!Number.isInteger(this.stderrBufferBytes) || this.stderrBufferBytes < 4_096 || this.stderrBufferBytes > 1_024 * 1_024) {
       throw new Error('Codex App Server stderrBufferBytes must be between 4096 and 1048576');
     }
+  }
+
+  updateLimits(limits: { hardTimeoutMs: number; startupTimeoutMs?: number }): void {
+    if (!Number.isSafeInteger(limits.hardTimeoutMs) || limits.hardTimeoutMs < 1_000 || limits.hardTimeoutMs > 365 * 24 * 60 * 60 * 1_000) {
+      throw new Error('Codex App Server hardTimeoutMs must be between 1000 and 31536000000');
+    }
+    if (limits.startupTimeoutMs !== undefined && (!Number.isSafeInteger(limits.startupTimeoutMs) || limits.startupTimeoutMs < 1_000 || limits.startupTimeoutMs > 365 * 24 * 60 * 60 * 1_000)) {
+      throw new Error('Codex App Server startupTimeoutMs must be between 1000 and 31536000000');
+    }
+    this.hardTimeoutMs = limits.hardTimeoutMs;
+    if (limits.startupTimeoutMs !== undefined) this.startupTimeoutMs = limits.startupTimeoutMs;
   }
 
   async isAvailable(): Promise<boolean> {

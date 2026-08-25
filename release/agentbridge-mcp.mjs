@@ -2984,7 +2984,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve5.call(this, root, ref);
+      let _sch = resolve6.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a = root.localRefs) === null || _a === void 0 ? void 0 : _a[ref];
         const { schemaId } = this.opts;
@@ -3011,7 +3011,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve5(root, ref) {
+    function resolve6(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3642,7 +3642,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve5(baseURI, relativeURI, options) {
+    function resolve6(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const { parsed: baseParsed, malformedAuthorityOrPort: baseMalformed } = parseWithStatus(baseURI, schemelessOptions);
       const { parsed: relativeParsed, malformedAuthorityOrPort: relativeMalformed } = parseWithStatus(relativeURI, schemelessOptions);
@@ -3926,7 +3926,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve5,
+      resolve: resolve6,
       resolveComponent,
       equal,
       serialize,
@@ -6916,9 +6916,9 @@ var require_dist = __commonJS({
 });
 
 // packages/mcp/dist/cli.js
-import { existsSync as existsSync3, statSync as statSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { dirname as dirname4, join as join4, parse as parse4, resolve as resolve4 } from "node:path";
+import { existsSync as existsSync4, statSync as statSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { dirname as dirname5, join as join5, parse as parse4, resolve as resolve5 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // packages/audit/dist/index.js
@@ -7018,11 +7018,318 @@ var AuditService = class _AuditService {
   }
 };
 
+// packages/config/dist/index.js
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import process2 from "node:process";
+var DAY_MS = 24 * 60 * 60 * 1e3;
+var MAX_DURATION_MS = 365 * DAY_MS;
+var MAX_TIMER_MS = 24 * DAY_MS;
+var DEFAULT_CONFIG_FILE = {
+  version: 1,
+  invocation: { autonomous: true },
+  discussion: {
+    maxDuration: "30m",
+    idleTimeout: "2m",
+    startupTimeout: "15s",
+    stallGrace: "3m",
+    turnHardLimit: "30m",
+    leaseTimeout: "2m",
+    terminationGrace: "5s",
+    maxTotalMessageChars: 5e5
+  },
+  session: {
+    pruneMaxAge: "30d",
+    retentionDays: 0,
+    archiveOnClose: false
+  }
+};
+var KNOWN_KEYS = {
+  root: ["version", "invocation", "discussion", "session"],
+  invocation: ["autonomous"],
+  discussion: [
+    "maxDuration",
+    "idleTimeout",
+    "startupTimeout",
+    "stallGrace",
+    "turnHardLimit",
+    "leaseTimeout",
+    "terminationGrace",
+    "maxTurns",
+    "maxTotalMessageChars"
+  ],
+  session: ["recoveryMaxAge", "pruneMaxAge", "retentionDays", "archiveOnClose"]
+};
+function configHome(env = process2.env) {
+  return resolve(env.AGENTBRIDGE_CONFIG_HOME ?? join(homedir(), ".agentbridge"));
+}
+function globalConfigPath(env = process2.env) {
+  return join(configHome(env), "config.json");
+}
+function projectConfigPath(projectPath, env = process2.env) {
+  void env;
+  return join(resolve(projectPath), ".agentbridge", "config.json");
+}
+function readConfigFile(path) {
+  if (!existsSync(path))
+    return {};
+  let value;
+  try {
+    value = JSON.parse(readFileSync(path, "utf8"));
+  } catch (cause) {
+    throw new Error(`AgentBridge config is not valid JSON: ${path}`, { cause });
+  }
+  validateConfigFile(value, path);
+  return value;
+}
+function resolveConfig(projectPath, env = process2.env) {
+  const globalPath = globalConfigPath(env);
+  const resolvedProjectPath = projectPath ? resolve(projectPath) : null;
+  const projectPathValue = resolvedProjectPath ? projectConfigPath(resolvedProjectPath, env) : null;
+  const globalExists = existsSync(globalPath);
+  const projectExists = Boolean(projectPathValue && existsSync(projectPathValue));
+  const global = globalExists ? readConfigFile(globalPath) : {};
+  const project = projectPathValue && projectExists ? readConfigFile(projectPathValue) : {};
+  const sources = {
+    version: "default",
+    "invocation.autonomous": "default",
+    "discussion.maxDuration": "default",
+    "discussion.idleTimeout": "default",
+    "discussion.startupTimeout": "default",
+    "discussion.stallGrace": "default",
+    "discussion.turnHardLimit": "default",
+    "discussion.leaseTimeout": "default",
+    "discussion.terminationGrace": "default",
+    "discussion.maxTotalMessageChars": "default",
+    "session.pruneMaxAge": "default",
+    "session.retentionDays": "default",
+    "session.archiveOnClose": "default"
+  };
+  const merged = mergeConfig(cloneConfig(DEFAULT_CONFIG_FILE), global, "global", sources);
+  mergeConfig(merged, project, "project", sources);
+  applyEnvironmentOverrides(merged, env, sources);
+  return {
+    config: normalizeConfig(merged),
+    globalPath,
+    projectPath: projectPathValue,
+    globalExists,
+    projectExists,
+    sources
+  };
+}
+function formatDuration(ms) {
+  if (ms === null)
+    return "unlimited";
+  if (ms === void 0)
+    return "inherit";
+  const units = [[DAY_MS, "d"], [60 * 60 * 1e3, "h"], [60 * 1e3, "m"], [1e3, "s"]];
+  for (const [unit, label] of units) {
+    if (ms % unit === 0)
+      return `${ms / unit}${label}`;
+  }
+  return `${ms}ms`;
+}
+function parseDuration(value, field, options = {}) {
+  if (value === null) {
+    if (options.allowUnlimited)
+      return null;
+    throw new Error(`${field} cannot be unlimited`);
+  }
+  if (typeof value === "number") {
+    if (!Number.isInteger(value))
+      throw new Error(`${field} must be an integer duration in milliseconds`);
+    return validateDuration(value, field, options.maxMs ?? MAX_DURATION_MS);
+  }
+  const normalized = value.trim().toLowerCase();
+  if (options.allowUnlimited && ["unlimited", "none", "off"].includes(normalized))
+    return null;
+  const match = /^(\d+)\s*(ms|s|m|h|d)$/.exec(normalized);
+  if (!match)
+    throw new Error(`${field} must use a duration such as 30s, 10m, 2h, or 7d`);
+  const amount = Number(match[1]);
+  const multipliers = { ms: 1, s: 1e3, m: 6e4, h: 36e5, d: DAY_MS };
+  return validateDuration(amount * multipliers[match[2]], field, options.maxMs ?? MAX_DURATION_MS);
+}
+function validateDuration(value, field, maxMs) {
+  if (!Number.isSafeInteger(value) || value < 1e3 || value > maxMs) {
+    throw new Error(`${field} must be between 1s and ${formatDuration(maxMs)}`);
+  }
+  return value;
+}
+function normalizeConfig(value) {
+  const discussion = value.discussion ?? {};
+  const session = value.session ?? {};
+  return {
+    invocation: { autonomous: value.invocation?.autonomous ?? true },
+    discussion: {
+      maxDurationMs: parseDuration(discussion.maxDuration === void 0 ? "30m" : discussion.maxDuration, "discussion.maxDuration", { allowUnlimited: true }),
+      idleTimeoutMs: parseDuration(discussion.idleTimeout === void 0 ? "2m" : discussion.idleTimeout, "discussion.idleTimeout", { maxMs: MAX_TIMER_MS }),
+      startupTimeoutMs: parseDuration(discussion.startupTimeout === void 0 ? "15s" : discussion.startupTimeout, "discussion.startupTimeout", { maxMs: MAX_TIMER_MS }),
+      stallGraceMs: parseDuration(discussion.stallGrace === void 0 ? "3m" : discussion.stallGrace, "discussion.stallGrace", { maxMs: MAX_TIMER_MS }),
+      turnHardLimitMs: parseDuration(discussion.turnHardLimit === void 0 ? "30m" : discussion.turnHardLimit, "discussion.turnHardLimit", { maxMs: MAX_TIMER_MS }),
+      leaseTimeoutMs: parseDuration(discussion.leaseTimeout === void 0 ? "2m" : discussion.leaseTimeout, "discussion.leaseTimeout", { maxMs: MAX_TIMER_MS }),
+      terminationGraceMs: parseDuration(discussion.terminationGrace === void 0 ? "5s" : discussion.terminationGrace, "discussion.terminationGrace", { maxMs: 6e4 }),
+      ...discussion.maxTurns === void 0 ? {} : { maxTurns: assertInteger(discussion.maxTurns, "discussion.maxTurns", 1, 50) },
+      maxTotalMessageChars: assertInteger(discussion.maxTotalMessageChars === void 0 ? 5e5 : discussion.maxTotalMessageChars, "discussion.maxTotalMessageChars", 1e3, 1e7)
+    },
+    session: {
+      ...session.recoveryMaxAge === void 0 ? {} : { recoveryMaxAgeMs: parseDuration(session.recoveryMaxAge, "session.recoveryMaxAge") },
+      pruneMaxAgeMs: parseDuration(session.pruneMaxAge === void 0 ? "30d" : session.pruneMaxAge, "session.pruneMaxAge"),
+      retentionDays: assertInteger(session.retentionDays === void 0 ? 0 : session.retentionDays, "session.retentionDays", 0, 3650),
+      archiveOnClose: session.archiveOnClose === void 0 ? false : session.archiveOnClose
+    }
+  };
+}
+function assertInteger(value, field, min, max) {
+  if (!Number.isInteger(value) || value < min || value > max)
+    throw new Error(`${field} must be an integer between ${min} and ${max}`);
+  return value;
+}
+function mergeConfig(target, source, sourceName, sources) {
+  if (source.version !== void 0) {
+    target.version = source.version;
+    sources.version = sourceName;
+  }
+  if (source.invocation) {
+    target.invocation = { ...target.invocation ?? {}, ...source.invocation };
+    if (source.invocation.autonomous !== void 0)
+      sources["invocation.autonomous"] = sourceName;
+  }
+  if (source.discussion) {
+    target.discussion = { ...target.discussion ?? {}, ...source.discussion };
+    for (const key of Object.keys(source.discussion))
+      sources[`discussion.${key}`] = sourceName;
+  }
+  if (source.session) {
+    target.session = { ...target.session ?? {}, ...source.session };
+    for (const key of Object.keys(source.session))
+      sources[`session.${key}`] = sourceName;
+  }
+  return target;
+}
+function applyEnvironmentOverrides(config2, env, sources) {
+  const durationMap = [
+    ["AGENTBRIDGE_MAX_DURATION_MS", "maxDuration", true],
+    ["AGENTBRIDGE_IDLE_TIMEOUT_MS", "idleTimeout", false],
+    ["AGENTBRIDGE_STARTUP_TIMEOUT_MS", "startupTimeout", false],
+    ["AGENTBRIDGE_STALL_GRACE_MS", "stallGrace", false],
+    ["AGENTBRIDGE_TURN_HARD_LIMIT_MS", "turnHardLimit", false],
+    ["AGENTBRIDGE_TIMEOUT_MS", "leaseTimeout", false],
+    ["AGENTBRIDGE_TERMINATION_GRACE_MS", "terminationGrace", false]
+  ];
+  for (const [name, key, allowUnlimited] of durationMap) {
+    const raw = env[name];
+    if (!raw?.trim())
+      continue;
+    const numeric = Number(raw.trim());
+    config2.discussion ??= {};
+    config2.discussion[key] = numeric === 0 && allowUnlimited ? null : numeric;
+    sources[`discussion.${key}`] = "environment";
+  }
+  if (env.AGENTBRIDGE_TIMEOUT_MS?.trim() && !env.AGENTBRIDGE_IDLE_TIMEOUT_MS?.trim()) {
+    config2.discussion ??= {};
+    config2.discussion.idleTimeout = Number(env.AGENTBRIDGE_TIMEOUT_MS);
+    sources["discussion.idleTimeout"] = "environment";
+  }
+  const boolean3 = env.AGENTBRIDGE_AUTONOMOUS_INVOCATION ?? env.AGENTBRIDGE_ALLOW_AUTONOMOUS;
+  if (boolean3?.trim()) {
+    config2.invocation ??= {};
+    config2.invocation.autonomous = parseBoolean(boolean3, "AGENTBRIDGE_AUTONOMOUS_INVOCATION");
+    sources["invocation.autonomous"] = "environment";
+  }
+  if (env.AGENTBRIDGE_MAX_TURNS?.trim()) {
+    config2.discussion ??= {};
+    config2.discussion.maxTurns = Number(env.AGENTBRIDGE_MAX_TURNS);
+    sources["discussion.maxTurns"] = "environment";
+  }
+  if (env.AGENTBRIDGE_DISCUSSION_RETENTION_DAYS?.trim()) {
+    config2.session ??= {};
+    config2.session.retentionDays = Number(env.AGENTBRIDGE_DISCUSSION_RETENTION_DAYS);
+    sources["session.retentionDays"] = "environment";
+  }
+  if (env.AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE?.trim()) {
+    config2.session ??= {};
+    config2.session.archiveOnClose = parseBoolean(env.AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE, "AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE");
+    sources["session.archiveOnClose"] = "environment";
+  }
+  if (env.AGENTBRIDGE_RECOVERY_MAX_AGE_MS?.trim() && Number(env.AGENTBRIDGE_RECOVERY_MAX_AGE_MS) > 0) {
+    config2.session ??= {};
+    config2.session.recoveryMaxAge = Number(env.AGENTBRIDGE_RECOVERY_MAX_AGE_MS);
+    sources["session.recoveryMaxAge"] = "environment";
+  }
+  if (env.AGENTBRIDGE_SESSION_PRUNE_MAX_AGE_MS?.trim() && Number(env.AGENTBRIDGE_SESSION_PRUNE_MAX_AGE_MS) > 0) {
+    config2.session ??= {};
+    config2.session.pruneMaxAge = Number(env.AGENTBRIDGE_SESSION_PRUNE_MAX_AGE_MS);
+    sources["session.pruneMaxAge"] = "environment";
+  }
+}
+function cloneConfig(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+function parseBoolean(value, field) {
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized))
+    return true;
+  if (["0", "false", "no", "off"].includes(normalized))
+    return false;
+  throw new Error(`${field} must be a boolean value`);
+}
+function validateConfigFile(value, path) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error(`AgentBridge config must be a JSON object: ${path}`);
+  const root = value;
+  assertKnownKeys(root, KNOWN_KEYS.root, path, "root");
+  if (root.version !== void 0 && root.version !== 1)
+    throw new Error(`Unsupported AgentBridge config version in ${path}`);
+  for (const [section, keys] of [["invocation", KNOWN_KEYS.invocation], ["discussion", KNOWN_KEYS.discussion], ["session", KNOWN_KEYS.session]]) {
+    if (root[section] === void 0)
+      continue;
+    if (!root[section] || typeof root[section] !== "object" || Array.isArray(root[section]))
+      throw new Error(`${section} must be an object in ${path}`);
+    assertKnownKeys(root[section], keys, path, section);
+  }
+  const invocation = root.invocation;
+  if (invocation?.autonomous !== void 0 && typeof invocation.autonomous !== "boolean") {
+    throw new Error(`invocation.autonomous must be a boolean in ${path}`);
+  }
+  const discussion = root.discussion;
+  for (const key of ["maxDuration", "idleTimeout", "startupTimeout", "stallGrace", "turnHardLimit", "leaseTimeout", "terminationGrace"]) {
+    const value2 = discussion?.[key];
+    if (value2 !== void 0 && value2 !== null && typeof value2 !== "string" && typeof value2 !== "number") {
+      throw new Error(`discussion.${key} must be a duration string or milliseconds in ${path}`);
+    }
+  }
+  for (const key of ["maxTurns", "maxTotalMessageChars"]) {
+    if (discussion?.[key] !== void 0 && typeof discussion[key] !== "number") {
+      throw new Error(`discussion.${key} must be a number in ${path}`);
+    }
+  }
+  const session = root.session;
+  for (const key of ["recoveryMaxAge", "pruneMaxAge"]) {
+    const value2 = session?.[key];
+    if (value2 !== void 0 && value2 !== null && typeof value2 !== "string" && typeof value2 !== "number") {
+      throw new Error(`session.${key} must be a duration string or milliseconds in ${path}`);
+    }
+  }
+  if (session?.retentionDays !== void 0 && typeof session.retentionDays !== "number") {
+    throw new Error(`session.retentionDays must be a number in ${path}`);
+  }
+  if (session?.archiveOnClose !== void 0 && typeof session.archiveOnClose !== "boolean") {
+    throw new Error(`session.archiveOnClose must be a boolean in ${path}`);
+  }
+}
+function assertKnownKeys(value, keys, path, section) {
+  for (const key of Object.keys(value))
+    if (!keys.includes(key))
+      throw new Error(`Unknown AgentBridge config key ${section}.${key} in ${path}`);
+}
+
 // packages/collaboration/dist/index.js
 import { randomUUID } from "node:crypto";
 
 // packages/protocol/dist/index.js
-import { resolve } from "node:path";
+import { resolve as resolve2 } from "node:path";
 
 // packages/protocol/dist/stateMachine.js
 var validTransitions = {
@@ -7088,7 +7395,7 @@ function isProviderError(value) {
 // packages/protocol/dist/index.js
 function resolveProjectPath(explicit, env = process.env, cwd = process.cwd()) {
   const candidate = [explicit, env.AGENTBRIDGE_PROJECT_PATH, env.CLAUDE_PROJECT_DIR, cwd].find((value) => typeof value === "string" && value.trim().length > 0);
-  return resolve(candidate ?? cwd);
+  return resolve2(candidate ?? cwd);
 }
 var DISCUSSION_MODES = ["review", "discussion", "deep-discussion"];
 var TASK_TYPES = ["code", "design", "qa", "explain"];
@@ -7269,6 +7576,7 @@ function isRecord(value) {
 }
 
 // packages/collaboration/dist/index.js
+var MAX_RUNTIME_TIMER_MS = 24 * 24 * 60 * 60 * 1e3;
 var CollaborationService = class {
   storage;
   audit;
@@ -7294,6 +7602,30 @@ var CollaborationService = class {
   constructor(storage, audit, config2 = {}, connectors = {}) {
     this.storage = storage;
     this.audit = audit;
+    this.maxTurns = 12;
+    this.maxTurnsWasConfigured = false;
+    this.timeoutMs = 12e4;
+    this.startupTimeoutMs = 3e4;
+    this.idleTimeoutMs = 12e4;
+    this.stallGraceMs = 18e4;
+    this.turnHardLimitMs = 30 * 60 * 1e3;
+    this.terminationGraceMs = 5e3;
+    this.maxDurationMs = 30 * 60 * 1e3;
+    this.maxTotalMessageChars = 5e5;
+    this.archiveSessionsOnClose = false;
+    this.sessionPolicy = "auto";
+    this.validationMode = "none";
+    this.connectors = connectors;
+    this.updateConfig(config2);
+    if (!["auto", "reuse", "fresh"].includes(this.sessionPolicy))
+      throw new Error("sessionPolicy must be auto, reuse, or fresh");
+    if (this.validationMode !== "none" && this.validationMode !== "evidence_required") {
+      throw new Error("validationMode must be none or evidence_required");
+    }
+    this.storage.recoverOrphanedDiscussions(isOwnerProcessAlive);
+  }
+  /** Apply the effective user/project configuration to future provider operations. */
+  updateConfig(config2) {
     this.maxTurnsWasConfigured = config2.maxTurns !== void 0;
     this.maxTurns = config2.maxTurns ?? 12;
     this.idleTimeoutMs = config2.idleTimeoutMs ?? config2.timeoutMs ?? 12e4;
@@ -7301,46 +7633,31 @@ var CollaborationService = class {
     this.startupTimeoutMs = config2.startupTimeoutMs ?? 3e4;
     this.stallGraceMs = config2.stallGraceMs ?? 18e4;
     this.turnHardLimitMs = config2.turnHardLimitMs ?? config2.timeoutMs ?? 30 * 60 * 1e3;
-    this.terminationGraceMs = config2.terminationGraceMs ?? 5e3;
-    this.maxDurationMs = config2.maxDurationMs ?? 30 * 60 * 1e3;
+    this.terminationGraceMs = config2.terminationGraceMs ?? Math.min(5e3, this.timeoutMs);
+    this.maxDurationMs = config2.maxDurationMs === null ? null : config2.maxDurationMs ?? 30 * 60 * 1e3;
     this.maxTotalMessageChars = config2.maxTotalMessageChars ?? 5e5;
     this.archiveSessionsOnClose = config2.archiveSessionsOnClose ?? false;
     this.sessionPolicy = config2.sessionPolicy ?? "auto";
     this.validationMode = config2.validationMode ?? "none";
     if (!["auto", "reuse", "fresh"].includes(this.sessionPolicy))
       throw new Error("sessionPolicy must be auto, reuse, or fresh");
-    if (this.validationMode !== "none" && this.validationMode !== "evidence_required") {
+    if (this.validationMode !== "none" && this.validationMode !== "evidence_required")
       throw new Error("validationMode must be none or evidence_required");
-    }
-    if (!Number.isInteger(this.maxTurns) || this.maxTurns < 1 || this.maxTurns > 50) {
+    if (!Number.isInteger(this.maxTurns) || this.maxTurns < 1 || this.maxTurns > 50)
       throw new Error("maxTurns must be an integer between 1 and 50");
+    for (const [name, value] of [["timeoutMs", this.timeoutMs], ["idleTimeoutMs", this.idleTimeoutMs], ["startupTimeoutMs", this.startupTimeoutMs], ["stallGraceMs", this.stallGraceMs], ["turnHardLimitMs", this.turnHardLimitMs]]) {
+      if (!Number.isSafeInteger(value) || value < 1e3 || value > MAX_RUNTIME_TIMER_MS)
+        throw new Error(`${name} must be between 1000 and ${MAX_RUNTIME_TIMER_MS}`);
     }
-    if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1e3 || this.timeoutMs > 6e5) {
-      throw new Error("timeoutMs must be an integer between 1000 and 600000");
-    }
-    if (!Number.isInteger(this.idleTimeoutMs) || this.idleTimeoutMs < 1e3 || this.idleTimeoutMs > 6e5) {
-      throw new Error("idleTimeoutMs must be an integer between 1000 and 600000");
-    }
-    if (!Number.isInteger(this.startupTimeoutMs) || this.startupTimeoutMs < 1e3 || this.startupTimeoutMs > 6e5) {
-      throw new Error("startupTimeoutMs must be an integer between 1000 and 600000");
-    }
-    if (!Number.isInteger(this.stallGraceMs) || this.stallGraceMs < 1e3 || this.stallGraceMs > 6e5) {
-      throw new Error("stallGraceMs must be an integer between 1000 and 600000");
-    }
-    if (!Number.isInteger(this.turnHardLimitMs) || this.turnHardLimitMs < 1e3 || this.turnHardLimitMs > 7 * 24 * 60 * 60 * 1e3) {
-      throw new Error("turnHardLimitMs must be an integer between 1000 and 604800000");
-    }
-    if (!Number.isInteger(this.terminationGraceMs) || this.terminationGraceMs < 1e3 || this.terminationGraceMs > 6e4) {
+    if (!Number.isSafeInteger(this.terminationGraceMs) || this.terminationGraceMs < 1e3 || this.terminationGraceMs > 6e4)
       throw new Error("terminationGraceMs must be an integer between 1000 and 60000");
-    }
-    if (!Number.isInteger(this.maxDurationMs) || this.maxDurationMs < 1e3 || this.maxDurationMs > 7 * 24 * 60 * 60 * 1e3) {
-      throw new Error("maxDurationMs must be an integer between 1000 and 604800000");
-    }
-    if (!Number.isInteger(this.maxTotalMessageChars) || this.maxTotalMessageChars < 1e3 || this.maxTotalMessageChars > 1e7) {
+    if (this.maxDurationMs !== null && (!Number.isSafeInteger(this.maxDurationMs) || this.maxDurationMs < 1e3 || this.maxDurationMs > 365 * 24 * 60 * 60 * 1e3))
+      throw new Error("maxDurationMs must be null or between 1000 and 31536000000");
+    if (!Number.isInteger(this.maxTotalMessageChars) || this.maxTotalMessageChars < 1e3 || this.maxTotalMessageChars > 1e7)
       throw new Error("maxTotalMessageChars must be an integer between 1000 and 10000000");
+    for (const connector of Object.values(this.connectors)) {
+      connector?.updateLimits?.({ hardTimeoutMs: this.turnHardLimitMs, startupTimeoutMs: this.startupTimeoutMs });
     }
-    this.connectors = connectors;
-    this.storage.recoverOrphanedDiscussions(isOwnerProcessAlive);
   }
   async initiateDiscussion(params) {
     const projectPath = resolveProjectPath(params.projectPath);
@@ -7610,7 +7927,7 @@ var CollaborationService = class {
       if (remaining <= 0) {
         return { ...snapshot, events: [], waitTimedOut: true, lastSequence: afterSequence || null };
       }
-      await new Promise((resolve5) => setTimeout(resolve5, Math.min(200, remaining)));
+      await new Promise((resolve6) => setTimeout(resolve6, Math.min(200, remaining)));
     }
   }
   listPermissionRequests(discussionId, includeResolved = false) {
@@ -7670,7 +7987,7 @@ var CollaborationService = class {
       const remaining = deadline - Date.now();
       if (remaining <= 0)
         return { ...snapshot, waitTimedOut: true, lastMessageId };
-      await new Promise((resolve5) => setTimeout(resolve5, Math.min(200, remaining)));
+      await new Promise((resolve6) => setTimeout(resolve6, Math.min(200, remaining)));
     }
   }
   async closeDiscussion(params) {
@@ -8348,8 +8665,8 @@ var CollaborationService = class {
     let resolveDone;
     const operation = {
       controller,
-      done: new Promise((resolve5) => {
-        resolveDone = resolve5;
+      done: new Promise((resolve6) => {
+        resolveDone = resolve6;
       }),
       resolveDone: () => resolveDone()
     };
@@ -8868,7 +9185,7 @@ var CollaborationService = class {
   }
   ensureWithinBudget(discussion, extraContent = "") {
     const elapsed = Date.now() - Date.parse(discussion.createdAt);
-    if (elapsed > this.maxDurationMs) {
+    if (this.maxDurationMs !== null && elapsed > this.maxDurationMs) {
       this.storage.updateDiscussionStatus(discussion.id, "TIMEOUT", { endedAt: (/* @__PURE__ */ new Date()).toISOString() });
       this.storage.updateDiscussionDiagnostic(discussion.id, "MAX_DURATION");
       this.audit.log({
@@ -9141,8 +9458,8 @@ async function waitForCompletion(promise, timeoutMs) {
   try {
     return await Promise.race([
       promise.then(() => true, () => true),
-      new Promise((resolve5) => {
-        timer = setTimeout(() => resolve5(false), timeoutMs);
+      new Promise((resolve6) => {
+        timer = setTimeout(() => resolve6(false), timeoutMs);
       })
     ]);
   } finally {
@@ -9218,9 +9535,15 @@ var ClaudeConnector = class {
     this.command = options.command ?? "claude";
     this.hardTimeoutMs = options.hardTimeoutMs ?? options.timeoutMs ?? 30 * 60 * 1e3;
     this.extraArgs = options.extraArgs ?? [];
-    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1e3 || this.hardTimeoutMs > 7 * 24 * 60 * 60 * 1e3) {
-      throw new Error("Claude connector hardTimeoutMs must be an integer between 1000 and 604800000");
+    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1e3 || this.hardTimeoutMs > 365 * 24 * 60 * 60 * 1e3) {
+      throw new Error("Claude connector hardTimeoutMs must be an integer between 1000 and 31536000000");
     }
+  }
+  updateLimits(limits) {
+    if (!Number.isSafeInteger(limits.hardTimeoutMs) || limits.hardTimeoutMs < 1e3 || limits.hardTimeoutMs > 365 * 24 * 60 * 60 * 1e3) {
+      throw new Error("Claude connector hardTimeoutMs must be between 1000 and 31536000000");
+    }
+    this.hardTimeoutMs = limits.hardTimeoutMs;
   }
   async isAvailable() {
     try {
@@ -9290,7 +9613,7 @@ function parseClaudeOutput(stdout) {
   }
 }
 function runProcess(command, args, cwd, timeoutMs, signal, onActivity) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     const child = spawn(command, args, {
       cwd,
       windowsHide: true,
@@ -9362,7 +9685,7 @@ function runProcess(command, args, cwd, timeoutMs, signal, onActivity) {
       if (termination) {
         finish(() => reject(new ProviderError(termination.code, termination.message)));
       } else {
-        finish(() => resolve5({ exitCode, stdout, stderr }));
+        finish(() => resolve6({ exitCode, stdout, stderr }));
       }
     });
     if (signal?.aborted)
@@ -9402,9 +9725,15 @@ var CodexConnector = class {
     this.extraArgs = options.extraArgs ?? [];
     if (!this.command.trim())
       throw new Error("Codex connector command must not be empty");
-    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1e3 || this.hardTimeoutMs > 7 * 24 * 60 * 60 * 1e3) {
-      throw new Error("Codex connector hardTimeoutMs must be an integer between 1000 and 604800000");
+    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1e3 || this.hardTimeoutMs > 365 * 24 * 60 * 60 * 1e3) {
+      throw new Error("Codex connector hardTimeoutMs must be an integer between 1000 and 31536000000");
     }
+  }
+  updateLimits(limits) {
+    if (!Number.isSafeInteger(limits.hardTimeoutMs) || limits.hardTimeoutMs < 1e3 || limits.hardTimeoutMs > 365 * 24 * 60 * 60 * 1e3) {
+      throw new Error("Codex connector hardTimeoutMs must be between 1000 and 31536000000");
+    }
+    this.hardTimeoutMs = limits.hardTimeoutMs;
   }
   async isAvailable() {
     try {
@@ -9503,7 +9832,7 @@ function isRecord2(value) {
   return typeof value === "object" && value !== null;
 }
 function runProcess2(command, args, cwd, timeoutMs, signal, onActivity) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     const child = spawn2(command, args, {
       cwd,
       windowsHide: true,
@@ -9575,7 +9904,7 @@ function runProcess2(command, args, cwd, timeoutMs, signal, onActivity) {
       if (termination) {
         finish(() => reject(new ProviderError(termination.code, termination.message)));
       } else {
-        finish(() => resolve5({ exitCode, stdout, stderr }));
+        finish(() => resolve6({ exitCode, stdout, stderr }));
       }
     });
     if (signal?.aborted)
@@ -9598,12 +9927,12 @@ ${result.stdout}`.toLowerCase();
 import { spawn as spawn3 } from "node:child_process";
 
 // packages/connectors/dist/policy.js
-import { isAbsolute, relative, resolve as resolve2, win32 } from "node:path";
+import { isAbsolute, relative, resolve as resolve3, win32 } from "node:path";
 var HeadlessPeerPolicy = class {
   profile = "HEADLESS_PEER";
   projectPath;
   constructor(projectPath) {
-    this.projectPath = isWindowsPath(projectPath) ? win32.normalize(projectPath) : resolve2(projectPath);
+    this.projectPath = isWindowsPath(projectPath) ? win32.normalize(projectPath) : resolve3(projectPath);
   }
   decide(request) {
     const method = request.method.toLowerCase();
@@ -9637,7 +9966,7 @@ ${command ?? ""}`;
       const remainder2 = win32.relative(projectRoot, candidate2);
       return remainder2 === "" || !remainder2.startsWith("..") && !win32.isAbsolute(remainder2);
     }
-    const candidate = resolve2(isAbsolute(value) ? value : resolve2(this.projectPath, value));
+    const candidate = resolve3(isAbsolute(value) ? value : resolve3(this.projectPath, value));
     const remainder = relative(this.projectPath, candidate);
     return remainder === "" || !remainder.startsWith("..") && !isAbsolute(remainder);
   }
@@ -9689,15 +10018,26 @@ var CodexAppServerConnector = class {
     this.startupTimeoutMs = options.startupTimeoutMs ?? 15e3;
     this.model = options.model;
     this.stderrBufferBytes = options.stderrBufferBytes ?? 256 * 1024;
-    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1e3 || this.hardTimeoutMs > 7 * 24 * 60 * 60 * 1e3) {
-      throw new Error("Codex App Server hardTimeoutMs must be an integer between 1000 and 604800000");
+    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1e3 || this.hardTimeoutMs > 365 * 24 * 60 * 60 * 1e3) {
+      throw new Error("Codex App Server hardTimeoutMs must be an integer between 1000 and 31536000000");
     }
-    if (!Number.isInteger(this.startupTimeoutMs) || this.startupTimeoutMs < 1e3 || this.startupTimeoutMs > 6e5) {
-      throw new Error("Codex App Server startupTimeoutMs must be an integer between 1000 and 600000");
+    if (!Number.isInteger(this.startupTimeoutMs) || this.startupTimeoutMs < 1e3 || this.startupTimeoutMs > 24 * 24 * 60 * 60 * 1e3) {
+      throw new Error("Codex App Server startupTimeoutMs must be an integer between 1000 and 2073600000");
     }
     if (!Number.isInteger(this.stderrBufferBytes) || this.stderrBufferBytes < 4096 || this.stderrBufferBytes > 1024 * 1024) {
       throw new Error("Codex App Server stderrBufferBytes must be between 4096 and 1048576");
     }
+  }
+  updateLimits(limits) {
+    if (!Number.isSafeInteger(limits.hardTimeoutMs) || limits.hardTimeoutMs < 1e3 || limits.hardTimeoutMs > 365 * 24 * 60 * 60 * 1e3) {
+      throw new Error("Codex App Server hardTimeoutMs must be between 1000 and 31536000000");
+    }
+    if (limits.startupTimeoutMs !== void 0 && (!Number.isSafeInteger(limits.startupTimeoutMs) || limits.startupTimeoutMs < 1e3 || limits.startupTimeoutMs > 365 * 24 * 60 * 60 * 1e3)) {
+      throw new Error("Codex App Server startupTimeoutMs must be between 1000 and 31536000000");
+    }
+    this.hardTimeoutMs = limits.hardTimeoutMs;
+    if (limits.startupTimeoutMs !== void 0)
+      this.startupTimeoutMs = limits.startupTimeoutMs;
   }
   async isAvailable() {
     if (!this.command.trim())
@@ -9825,8 +10165,8 @@ var CodexAppServerConnector = class {
   async runSerial(operation) {
     const previous = this.serial;
     let release;
-    this.serial = new Promise((resolve5) => {
-      release = resolve5;
+    this.serial = new Promise((resolve6) => {
+      release = resolve6;
     });
     await previous;
     try {
@@ -9945,7 +10285,7 @@ var CodexAppServerConnector = class {
       return Promise.reject(new ProviderError("UNAVAILABLE", "Codex App Server is not running"));
     }
     const id2 = this.nextRequestId++;
-    return new Promise((resolve5, reject) => {
+    return new Promise((resolve6, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id2);
         reject(new ProviderError("TIMEOUT", `Codex App Server request timed out: ${method}`));
@@ -9953,7 +10293,7 @@ var CodexAppServerConnector = class {
       this.pending.set(id2, {
         resolve: (value) => {
           clearTimeout(timer);
-          resolve5(value);
+          resolve6(value);
         },
         reject: (error3) => {
           clearTimeout(timer);
@@ -10078,10 +10418,10 @@ var CodexAppServerConnector = class {
     const queued = this.events.shift();
     if (queued)
       return Promise.resolve(queued);
-    return new Promise((resolve5, reject) => {
+    return new Promise((resolve6, reject) => {
       const waiter = (event) => {
         clearTimeout(timer);
-        resolve5(event);
+        resolve6(event);
       };
       const timer = setTimeout(() => {
         const index = this.eventWaiters.indexOf(waiter);
@@ -10255,14 +10595,14 @@ function withStderr(error3, stderrTail, ambiguous = false) {
 
 // packages/connectors/dist/codexDiscovery.js
 import { createRequire } from "node:module";
-import { existsSync, readdirSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join, posix, win32 as win322 } from "node:path";
+import { existsSync as existsSync2, readdirSync } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { dirname as dirname2, join as join2, posix, win32 as win322 } from "node:path";
 function discoverCodexCommands(options = {}) {
   const platform = options.platform ?? process.platform;
   const env = options.env ?? process.env;
-  const home = options.homeDirectory ?? homedir();
-  const pathExists = options.pathExists ?? existsSync;
+  const home = options.homeDirectory ?? homedir2();
+  const pathExists = options.pathExists ?? existsSync2;
   const readDirectory = options.readDirectory ?? ((path) => readdirSync(path));
   const pathApi = platform === "win32" ? win322 : posix;
   const candidates = [];
@@ -10312,8 +10652,8 @@ function resolveBundledCodexEntrypoint() {
   try {
     const require3 = createRequire(import.meta.url);
     const packageJson = require3.resolve("@openai/codex/package.json");
-    const entrypoint = join(dirname(packageJson), "bin", "codex.js");
-    return existsSync(entrypoint) ? entrypoint : void 0;
+    const entrypoint = join2(dirname2(packageJson), "bin", "codex.js");
+    return existsSync2(entrypoint) ? entrypoint : void 0;
   } catch {
     return void 0;
   }
@@ -10419,6 +10759,12 @@ var CodexAutoConnector = class {
       return false;
     return selected.connector.archiveSession?.(sessionId, sessionKind) ?? false;
   }
+  updateLimits(limits) {
+    this.options.hardTimeoutMs = limits.hardTimeoutMs;
+    if (limits.startupTimeoutMs !== void 0)
+      this.options.startupTimeoutMs = limits.startupTimeoutMs;
+    void this.selection?.then((selected) => selected?.connector.updateLimits?.(limits));
+  }
   async getSelection() {
     return (await this.selectBackend())?.info;
   }
@@ -10509,33 +10855,33 @@ function withBackend(error3, backend) {
 
 // packages/storage/dist/index.js
 import { createHash, randomUUID as randomUUID4 } from "crypto";
-import { dirname as dirname3, join as join3 } from "path";
-import { mkdirSync as mkdirSync2 } from "fs";
+import { dirname as dirname4, join as join4 } from "path";
+import { mkdirSync as mkdirSync3 } from "fs";
 import { createRequire as createRequire2 } from "node:module";
 
 // packages/storage/dist/registry.js
-import { closeSync, copyFileSync, existsSync as existsSync2, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync as copyFileSync2, existsSync as existsSync3, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync2, renameSync as renameSync2, rmSync, statSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { randomUUID as randomUUID3 } from "node:crypto";
-import { homedir as homedir2 } from "node:os";
-import { basename, dirname as dirname2, join as join2, resolve as resolve3 } from "node:path";
-import process2 from "node:process";
+import { homedir as homedir3 } from "node:os";
+import { basename, dirname as dirname3, join as join3, resolve as resolve4 } from "node:path";
+import process3 from "node:process";
 var LOCK_RETRY_MS = 20;
 var LOCK_TIMEOUT_MS = 5e3;
 var LOCK_STALE_MS = 3e4;
 var WAIT_BUFFER = new Int32Array(new SharedArrayBuffer(4));
-function registryRoot(env = process2.env) {
-  return resolve3(env.AGENTBRIDGE_INSTALL_ROOT ?? join2(homedir2(), ".agentbridge"));
+function registryRoot(env = process3.env) {
+  return resolve4(env.AGENTBRIDGE_INSTALL_ROOT ?? join3(homedir3(), ".agentbridge"));
 }
-function registryPath(env = process2.env) {
-  return join2(registryRoot(env), "projects.json");
+function registryPath(env = process3.env) {
+  return join3(registryRoot(env), "projects.json");
 }
-function readProjectRegistry(env = process2.env) {
+function readProjectRegistry(env = process3.env) {
   const path = registryPath(env);
-  if (!existsSync2(path))
+  if (!existsSync3(path))
     return [];
   let value;
   try {
-    value = JSON.parse(readFileSync(path, "utf8"));
+    value = JSON.parse(readFileSync2(path, "utf8"));
   } catch (cause) {
     throw new Error(`Project registry is corrupt: ${path}`, { cause });
   }
@@ -10545,11 +10891,11 @@ function readProjectRegistry(env = process2.env) {
   if (value.projects.some((item) => !isRegisteredProject(item))) {
     throw new Error(`Project registry contains an invalid project entry: ${path}`);
   }
-  return value.projects.map((item) => ({ ...item, projectPath: resolve3(item.projectPath) }));
+  return value.projects.map((item) => ({ ...item, projectPath: resolve4(item.projectPath) }));
 }
-function registerProject(registration, env = process2.env) {
+function registerProject(registration, env = process3.env) {
   return withRegistryLock(env, () => {
-    const projectPath = resolve3(registration.projectPath);
+    const projectPath = resolve4(registration.projectPath);
     const projects = readProjectRegistry(env).filter((item) => !samePath(item.projectPath, projectPath));
     projects.push({ ...registration, projectPath, setupAt: (/* @__PURE__ */ new Date()).toISOString() });
     projects.sort((left, right) => left.projectPath.localeCompare(right.projectPath));
@@ -10558,14 +10904,14 @@ function registerProject(registration, env = process2.env) {
   });
 }
 function ensureProjectMetadata(projectPathValue) {
-  const projectPath = resolve3(projectPathValue);
-  if (!existsSync2(projectPath) || !statSync(projectPath).isDirectory()) {
+  const projectPath = resolve4(projectPathValue);
+  if (!existsSync3(projectPath) || !statSync(projectPath).isDirectory()) {
     throw new Error(`Project directory does not exist: ${projectPath}`);
   }
-  const stateDir = join2(projectPath, ".agentbridge");
-  const projectFile = join2(stateDir, "project.json");
-  mkdirSync(stateDir, { recursive: true });
-  if (!existsSync2(projectFile)) {
+  const stateDir = join3(projectPath, ".agentbridge");
+  const projectFile = join3(stateDir, "project.json");
+  mkdirSync2(stateDir, { recursive: true });
+  if (!existsSync3(projectFile)) {
     const value = {
       projectId: `prj_${randomUUID3().replace(/-/g, "").slice(0, 12)}`,
       name: basename(projectPath),
@@ -10573,25 +10919,25 @@ function ensureProjectMetadata(projectPathValue) {
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     try {
-      writeFileSync(projectFile, `${JSON.stringify(value, null, 2)}
+      writeFileSync2(projectFile, `${JSON.stringify(value, null, 2)}
 `, { encoding: "utf8", flag: "wx" });
     } catch (cause) {
-      if (!existsSync2(projectFile))
+      if (!existsSync3(projectFile))
         throw cause;
     }
   }
-  return JSON.parse(readFileSync(projectFile, "utf8"));
+  return JSON.parse(readFileSync2(projectFile, "utf8"));
 }
 function writeRegistry(projects, env) {
   const path = registryPath(env);
-  mkdirSync(dirname2(path), { recursive: true });
-  if (existsSync2(path))
-    copyFileSync(path, `${path}.bak`);
-  const tempPath = `${path}.tmp-${process2.pid}-${randomUUID3()}`;
+  mkdirSync2(dirname3(path), { recursive: true });
+  if (existsSync3(path))
+    copyFileSync2(path, `${path}.bak`);
+  const tempPath = `${path}.tmp-${process3.pid}-${randomUUID3()}`;
   const value = { version: 1, projects };
-  writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}
+  writeFileSync2(tempPath, `${JSON.stringify(value, null, 2)}
 `, "utf8");
-  renameSync(tempPath, path);
+  renameSync2(tempPath, path);
 }
 function isRegisteredProject(value) {
   if (!value || typeof value !== "object")
@@ -10602,7 +10948,7 @@ function isRegisteredProject(value) {
 function withRegistryLock(env, action) {
   const path = registryPath(env);
   const lockPath = `${path}.lock`;
-  mkdirSync(dirname2(path), { recursive: true });
+  mkdirSync2(dirname3(path), { recursive: true });
   const started = Date.now();
   let descriptor;
   while (descriptor === void 0) {
@@ -10630,9 +10976,9 @@ function withRegistryLock(env, action) {
   }
 }
 function samePath(left, right) {
-  const a = resolve3(left);
-  const b = resolve3(right);
-  return process2.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+  const a = resolve4(left);
+  const b = resolve4(right);
+  return process3.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
 // packages/storage/dist/index.js
@@ -10839,9 +11185,9 @@ CREATE INDEX IF NOT EXISTS idx_discussions_project_path ON discussions(project_p
 `;
 var Storage = class {
   db;
-  constructor(dbPath = process.env.AGENTBRIDGE_DB_PATH ?? join3(resolveProjectPath(), ".agentbridge", "agentbridge.sqlite")) {
+  constructor(dbPath = process.env.AGENTBRIDGE_DB_PATH ?? join4(resolveProjectPath(), ".agentbridge", "agentbridge.sqlite")) {
     if (dbPath !== ":memory:" && !dbPath.startsWith("file:")) {
-      mkdirSync2(dirname3(dbPath), { recursive: true });
+      mkdirSync3(dirname4(dbPath), { recursive: true });
     }
     this.db = new DatabaseSync(dbPath);
     try {
@@ -21776,7 +22122,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve5) => setTimeout(resolve5, pollInterval));
+        await new Promise((resolve6) => setTimeout(resolve6, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error3) {
@@ -21793,7 +22139,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve5, reject) => {
+    return new Promise((resolve6, reject) => {
       const earlyReject = (error3) => {
         reject(error3);
       };
@@ -21871,7 +22217,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve5(parseResult.data);
+            resolve6(parseResult.data);
           }
         } catch (error3) {
           reject(error3);
@@ -22132,12 +22478,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve5, reject) => {
+    return new Promise((resolve6, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve5, interval);
+      const timeoutId = setTimeout(resolve6, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -22918,7 +23264,7 @@ var Server = class extends Protocol {
 };
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
-import process3 from "node:process";
+import process4 from "node:process";
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/shared/stdio.js
 var STDIO_DEFAULT_MAX_BUFFER_SIZE = 10 * 1024 * 1024;
@@ -22959,7 +23305,7 @@ function serializeMessage(message) {
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
 var StdioServerTransport = class {
-  constructor(_stdin = process3.stdin, _stdout = process3.stdout, options) {
+  constructor(_stdin = process4.stdin, _stdout = process4.stdout, options) {
     this._stdin = _stdin;
     this._stdout = _stdout;
     this._started = false;
@@ -23013,12 +23359,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve5) => {
+    return new Promise((resolve6) => {
       const json = serializeMessage(message);
       if (this._stdout.write(json)) {
-        resolve5();
+        resolve6();
       } else {
-        this._stdout.once("drain", resolve5);
+        this._stdout.once("drain", resolve6);
       }
     });
   }
@@ -23037,13 +23383,14 @@ function buildTools(agentType2) {
   return [
     {
       name: "ask_peer",
-      description: "Start a synchronous peer interaction. review returns one independent peer response; discussion and deep-discussion alternate both providers and return only after agreement, a user decision, or a recorded failure. Both providers must be configured.",
+      description: "Start a synchronous peer interaction. review returns one independent peer response; discussion and deep-discussion alternate both providers and return only after agreement, a user decision, or a recorded failure. Whether autonomous use is allowed is enforced by the active global/project AgentBridge configuration. Both providers must be configured.",
       inputSchema: {
         type: "object",
         properties: {
           peer: { type: "string", enum: [peer], description: "The agent to discuss with" },
           message: { type: "string", description: "Proposal or question for the peer" },
           projectPath: { type: "string", description: "Project path; defaults to the current working directory" },
+          invocationOrigin: { type: "string", enum: ["autonomous", "user_requested"], description: "Whether the user explicitly requested peer discussion or the agent initiated it from task context" },
           mode: {
             type: "string",
             enum: [...DISCUSSION_MODES],
@@ -23191,6 +23538,7 @@ function createServer(resolveRuntime2, options) {
       peer: external_exports.literal(opposite(agentType2)),
       message: text,
       projectPath: external_exports.string().trim().min(1).max(4096).optional(),
+      invocationOrigin: external_exports.enum(["autonomous", "user_requested"]).optional(),
       mode: external_exports.enum(DISCUSSION_MODES).optional(),
       taskType: external_exports.enum(TASK_TYPES).optional(),
       validationMode: external_exports.enum(VALIDATION_MODES).optional(),
@@ -23235,6 +23583,10 @@ function createServer(resolveRuntime2, options) {
           }
           const input = parse3(schemas.ask, args);
           const runtime = await resolveRuntime2(input.projectPath, server);
+          const effective = runtime.refreshConfig();
+          if (!effective.config.invocation.autonomous && input.invocationOrigin !== "user_requested") {
+            throw new Error("Autonomous peer invocation is disabled by the active AgentBridge configuration; retry only after the user explicitly requests discussion.");
+          }
           const result = await runtime.collaboration.initiateDiscussion({
             driver: agentType2,
             peer: input.peer,
@@ -23254,6 +23606,7 @@ function createServer(resolveRuntime2, options) {
         case "reply_peer": {
           const input = parse3(schemas.reply, args);
           const runtime = await resolveRuntime2(void 0, server);
+          runtime.refreshConfig();
           return ok(await runtime.collaboration.replyToDiscussion({
             discussionId: input.discussionId,
             reply: input.message,
@@ -23346,19 +23699,6 @@ function error2(message) {
   return { content: [{ type: "text", text: JSON.stringify({ error: message }) }], isError: true };
 }
 
-// packages/mcp/dist/runtimeConfig.js
-function readOptionalBoundedInteger(name, min, max, env = process.env) {
-  const raw = env[name];
-  if (!raw?.trim())
-    return void 0;
-  const normalized = raw.trim();
-  const value = /^\d+$/.test(normalized) ? Number(normalized) : Number.NaN;
-  if (!Number.isInteger(value) || value < min || value > max) {
-    throw new Error(`${name} must be an integer between ${min} and ${max}`);
-  }
-  return value;
-}
-
 // packages/mcp/dist/cli.js
 var agentType = process.env.AGENTBRIDGE_AGENT === "codex" ? "codex" : "claude";
 var runtimePromise = null;
@@ -23377,25 +23717,21 @@ async function resolveRuntime(requestedProjectPath, server) {
   return runtimePromise;
 }
 async function createRuntime(projectPath) {
+  const effective = resolveConfig(projectPath);
   ensureProjectMetadata(projectPath);
   registerProject({
     projectPath,
-    claudeConfig: process.env.AGENTBRIDGE_CLAUDE_CONFIG ?? join4(homedir3(), ".claude.json"),
-    codexConfig: process.env.AGENTBRIDGE_CODEX_CONFIG ?? join4(homedir3(), ".codex", "config.toml"),
+    claudeConfig: process.env.AGENTBRIDGE_CLAUDE_CONFIG ?? join5(homedir4(), ".claude.json"),
+    codexConfig: process.env.AGENTBRIDGE_CODEX_CONFIG ?? join5(homedir4(), ".codex", "config.toml"),
     scope: "global"
   });
-  const storage = new Storage(process.env.AGENTBRIDGE_DB_PATH ?? join4(projectPath, ".agentbridge", "agentbridge.sqlite"));
+  const storage = new Storage(process.env.AGENTBRIDGE_DB_PATH ?? join5(projectPath, ".agentbridge", "agentbridge.sqlite"));
   activeStorage = storage;
   const audit = new AuditService(storage);
   storage.recoverExpiredSessionLeases();
-  storage.pruneSessions(readBoundedInteger("AGENTBRIDGE_SESSION_PRUNE_MAX_AGE_MS", 30 * 24 * 60 * 60 * 1e3, 1e3, 365 * 24 * 60 * 60 * 1e3));
-  const idleTimeoutMs = readBoundedInteger("AGENTBRIDGE_IDLE_TIMEOUT_MS", readBoundedInteger("AGENTBRIDGE_TIMEOUT_MS", 12e4, 1e3, 6e5), 1e3, 6e5);
-  const startupTimeoutMs = readBoundedInteger("AGENTBRIDGE_STARTUP_TIMEOUT_MS", 15e3, 1e3, 6e5);
-  const stallGraceMs = readBoundedInteger("AGENTBRIDGE_STALL_GRACE_MS", 18e4, 1e3, 6e5);
-  const turnHardLimitMs = readBoundedInteger("AGENTBRIDGE_TURN_HARD_LIMIT_MS", 30 * 60 * 1e3, 1e3, 7 * 24 * 60 * 60 * 1e3);
-  const maxDurationMs = readBoundedInteger("AGENTBRIDGE_MAX_DURATION_MS", 30 * 60 * 1e3, 1e3, 7 * 24 * 60 * 60 * 1e3);
-  const maxTurns = readOptionalBoundedInteger("AGENTBRIDGE_MAX_TURNS", 1, 50);
-  const retentionDays = readBoundedInteger("AGENTBRIDGE_DISCUSSION_RETENTION_DAYS", 0, 0, 3650);
+  storage.pruneSessions(effective.config.session.pruneMaxAgeMs);
+  const { discussion, session } = effective.config;
+  const retentionDays = session.retentionDays;
   if (retentionDays > 0) {
     const cleanup = storage.cleanupDiscussions(retentionDays, true);
     audit.log({
@@ -23406,56 +23742,57 @@ async function createRuntime(projectPath) {
       metadata: cleanup
     });
   }
-  const recoveryAgeMs = Number.parseInt(process.env.AGENTBRIDGE_RECOVERY_MAX_AGE_MS ?? "", 10);
-  const recovered = storage.recoverStaleDiscussions(Number.isInteger(recoveryAgeMs) && recoveryAgeMs > 0 ? recoveryAgeMs : void 0);
-  for (const discussion of recovered) {
+  const recovered = storage.recoverStaleDiscussions(session.recoveryMaxAgeMs);
+  for (const discussion2 of recovered) {
     audit.log({
-      traceId: discussion.traceId,
-      discussionId: discussion.id,
+      traceId: discussion2.traceId,
+      discussionId: discussion2.id,
       action: "discussion.recovered",
       agent: "system",
-      metadata: { status: discussion.status, reason: "stale_process_recovery" }
+      metadata: { status: discussion2.status, reason: "stale_process_recovery" }
     });
   }
   const collaboration = new CollaborationService(storage, audit, {
-    maxTurns,
-    idleTimeoutMs,
-    startupTimeoutMs,
-    stallGraceMs,
-    turnHardLimitMs,
-    maxDurationMs,
-    archiveSessionsOnClose: readBoolean("AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE", false)
+    maxTurns: discussion.maxTurns,
+    idleTimeoutMs: discussion.idleTimeoutMs,
+    startupTimeoutMs: discussion.startupTimeoutMs,
+    stallGraceMs: discussion.stallGraceMs,
+    turnHardLimitMs: discussion.turnHardLimitMs,
+    maxDurationMs: discussion.maxDurationMs,
+    timeoutMs: discussion.leaseTimeoutMs,
+    terminationGraceMs: discussion.terminationGraceMs,
+    maxTotalMessageChars: discussion.maxTotalMessageChars,
+    archiveSessionsOnClose: session.archiveOnClose
   }, {
-    claude: new ClaudeConnector({ command: process.env.AGENTBRIDGE_CLAUDE_COMMAND, hardTimeoutMs: turnHardLimitMs }),
+    claude: new ClaudeConnector({ command: process.env.AGENTBRIDGE_CLAUDE_COMMAND, hardTimeoutMs: discussion.turnHardLimitMs }),
     codex: new CodexAutoConnector({
       model: process.env.AGENTBRIDGE_CODEX_MODEL,
-      hardTimeoutMs: turnHardLimitMs,
-      startupTimeoutMs
+      hardTimeoutMs: discussion.turnHardLimitMs,
+      startupTimeoutMs: discussion.startupTimeoutMs
     })
   });
   activeCollaboration = collaboration;
-  return { storage, collaboration, projectPath };
-}
-function readBoundedInteger(name, fallback, min, max) {
-  const raw = process.env[name];
-  if (!raw?.trim())
-    return fallback;
-  const normalized = raw.trim();
-  const value = /^\d+$/.test(normalized) ? Number(normalized) : Number.NaN;
-  if (!Number.isInteger(value) || value < min || value > max) {
-    throw new Error(`${name} must be an integer between ${min} and ${max}`);
-  }
-  return value;
-}
-function readBoolean(name, fallback) {
-  const raw = process.env[name]?.trim().toLowerCase();
-  if (!raw)
-    return fallback;
-  if (["1", "true", "yes", "on"].includes(raw))
-    return true;
-  if (["0", "false", "no", "off"].includes(raw))
-    return false;
-  throw new Error(`${name} must be a boolean value`);
+  return {
+    storage,
+    collaboration,
+    projectPath,
+    refreshConfig: () => {
+      const next = resolveConfig(projectPath);
+      collaboration.updateConfig({
+        maxTurns: next.config.discussion.maxTurns,
+        timeoutMs: next.config.discussion.leaseTimeoutMs,
+        idleTimeoutMs: next.config.discussion.idleTimeoutMs,
+        startupTimeoutMs: next.config.discussion.startupTimeoutMs,
+        stallGraceMs: next.config.discussion.stallGraceMs,
+        turnHardLimitMs: next.config.discussion.turnHardLimitMs,
+        maxDurationMs: next.config.discussion.maxDurationMs,
+        terminationGraceMs: next.config.discussion.terminationGraceMs,
+        maxTotalMessageChars: next.config.discussion.maxTotalMessageChars,
+        archiveSessionsOnClose: next.config.session.archiveOnClose
+      });
+      return next;
+    }
+  };
 }
 async function detectProjectPath(requestedProjectPath, server) {
   const authoritative = [
@@ -23485,18 +23822,18 @@ async function detectProjectPath(requestedProjectPath, server) {
   return cwd;
 }
 function validateProjectPath(value) {
-  const path = resolve4(value);
-  if (!existsSync3(path) || !statSync2(path).isDirectory())
+  const path = resolve5(value);
+  if (!existsSync4(path) || !statSync2(path).isDirectory())
     throw new Error(`Project directory does not exist: ${path}`);
   return path;
 }
 function isUnsafeImplicitPath(path) {
-  const roots = [parse4(path).root, homedir3(), process.env.AGENTBRIDGE_INSTALL_ROOT].filter((value) => Boolean(value)).map((value) => resolve4(value));
-  return roots.some((value) => samePath2(value, path)) || samePath2(dirname4(process.execPath), path);
+  const roots = [parse4(path).root, homedir4(), process.env.AGENTBRIDGE_INSTALL_ROOT].filter((value) => Boolean(value)).map((value) => resolve5(value));
+  return roots.some((value) => samePath2(value, path)) || samePath2(dirname5(process.execPath), path);
 }
 function samePath2(left, right) {
-  const a = resolve4(left);
-  const b = resolve4(right);
+  const a = resolve5(left);
+  const b = resolve5(right);
   return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 var shuttingDown = false;
@@ -23521,7 +23858,7 @@ var testLifetimeMs = Number.parseInt(process.env.AGENTBRIDGE_TEST_MAX_LIFETIME_M
 if (Number.isInteger(testLifetimeMs) && testLifetimeMs > 0)
   setTimeout(shutdown, testLifetimeMs);
 if (process.env.AGENTBRIDGE_BASELINE_FILE) {
-  writeFileSync2(process.env.AGENTBRIDGE_BASELINE_FILE, JSON.stringify({
+  writeFileSync3(process.env.AGENTBRIDGE_BASELINE_FILE, JSON.stringify({
     rssBytes: process.memoryUsage().rss,
     heapUsedBytes: process.memoryUsage().heapUsed,
     node: process.versions.node

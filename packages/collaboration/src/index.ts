@@ -72,7 +72,8 @@ export interface CollaborationConfig {
   stallGraceMs?: number;
   turnHardLimitMs?: number;
   terminationGraceMs?: number;
-  maxDurationMs?: number;
+  /** null disables the overall discussion wall-clock limit; turn/idle limits still apply. */
+  maxDurationMs?: number | null;
   maxTotalMessageChars?: number;
   archiveSessionsOnClose?: boolean;
   sessionPolicy?: SessionPolicy;
@@ -88,22 +89,24 @@ interface InFlightOperation {
   resolveDone: () => void;
 }
 
+const MAX_RUNTIME_TIMER_MS = 24 * 24 * 60 * 60 * 1_000;
+
 export class CollaborationService {
   private readonly storage: StoragePort;
   private readonly audit: AuditService;
-  private readonly maxTurns: number;
-  private readonly maxTurnsWasConfigured: boolean;
-  private readonly timeoutMs: number;
-  private readonly startupTimeoutMs: number;
-  private readonly idleTimeoutMs: number;
-  private readonly stallGraceMs: number;
-  private readonly turnHardLimitMs: number;
-  private readonly terminationGraceMs: number;
-  private readonly maxDurationMs: number;
-  private readonly maxTotalMessageChars: number;
-  private readonly archiveSessionsOnClose: boolean;
-  private readonly sessionPolicy: SessionPolicy;
-  private readonly validationMode: ValidationMode;
+  private maxTurns: number;
+  private maxTurnsWasConfigured: boolean;
+  private timeoutMs: number;
+  private startupTimeoutMs: number;
+  private idleTimeoutMs: number;
+  private stallGraceMs: number;
+  private turnHardLimitMs: number;
+  private terminationGraceMs: number;
+  private maxDurationMs: number | null;
+  private maxTotalMessageChars: number;
+  private archiveSessionsOnClose: boolean;
+  private sessionPolicy: SessionPolicy;
+  private validationMode: ValidationMode;
   private readonly connectors: ConnectorRegistry;
   private readonly ownerId = `collaboration:${process.pid}:${randomUUID()}`;
   private readonly inFlight = new Map<string, InFlightOperation>();
@@ -119,54 +122,56 @@ export class CollaborationService {
   ) {
     this.storage = storage;
     this.audit = audit;
+    this.maxTurns = 12;
+    this.maxTurnsWasConfigured = false;
+    this.timeoutMs = 120_000;
+    this.startupTimeoutMs = 30_000;
+    this.idleTimeoutMs = 120_000;
+    this.stallGraceMs = 180_000;
+    this.turnHardLimitMs = 30 * 60 * 1_000;
+    this.terminationGraceMs = 5_000;
+    this.maxDurationMs = 30 * 60 * 1_000;
+    this.maxTotalMessageChars = 500_000;
+    this.archiveSessionsOnClose = false;
+    this.sessionPolicy = 'auto';
+    this.validationMode = 'none';
+    this.connectors = connectors;
+    this.updateConfig(config);
+    if (!['auto', 'reuse', 'fresh'].includes(this.sessionPolicy)) throw new Error('sessionPolicy must be auto, reuse, or fresh');
+    if (this.validationMode !== 'none' && this.validationMode !== 'evidence_required') {
+      throw new Error('validationMode must be none or evidence_required');
+    }
+    this.storage.recoverOrphanedDiscussions(isOwnerProcessAlive);
+  }
+
+  /** Apply the effective user/project configuration to future provider operations. */
+  updateConfig(config: CollaborationConfig): void {
     this.maxTurnsWasConfigured = config.maxTurns !== undefined;
     this.maxTurns = config.maxTurns ?? 12;
     this.idleTimeoutMs = config.idleTimeoutMs ?? config.timeoutMs ?? 120_000;
     // Keep lease renewal independent from the provider's output-idle budget.
-    // A short idle threshold must not make a healthy session lease expire.
     this.timeoutMs = config.timeoutMs ?? 120_000;
     this.startupTimeoutMs = config.startupTimeoutMs ?? 30_000;
     this.stallGraceMs = config.stallGraceMs ?? 180_000;
     this.turnHardLimitMs = config.turnHardLimitMs ?? config.timeoutMs ?? 30 * 60 * 1_000;
-    this.terminationGraceMs = config.terminationGraceMs ?? 5_000;
-    this.maxDurationMs = config.maxDurationMs ?? 30 * 60 * 1_000;
+    this.terminationGraceMs = config.terminationGraceMs ?? Math.min(5_000, this.timeoutMs);
+    this.maxDurationMs = config.maxDurationMs === null ? null : (config.maxDurationMs ?? 30 * 60 * 1_000);
     this.maxTotalMessageChars = config.maxTotalMessageChars ?? 500_000;
     this.archiveSessionsOnClose = config.archiveSessionsOnClose ?? false;
     this.sessionPolicy = config.sessionPolicy ?? 'auto';
     this.validationMode = config.validationMode ?? 'none';
     if (!['auto', 'reuse', 'fresh'].includes(this.sessionPolicy)) throw new Error('sessionPolicy must be auto, reuse, or fresh');
-    if (this.validationMode !== 'none' && this.validationMode !== 'evidence_required') {
-      throw new Error('validationMode must be none or evidence_required');
+    if (this.validationMode !== 'none' && this.validationMode !== 'evidence_required') throw new Error('validationMode must be none or evidence_required');
+    if (!Number.isInteger(this.maxTurns) || this.maxTurns < 1 || this.maxTurns > 50) throw new Error('maxTurns must be an integer between 1 and 50');
+    for (const [name, value] of [['timeoutMs', this.timeoutMs], ['idleTimeoutMs', this.idleTimeoutMs], ['startupTimeoutMs', this.startupTimeoutMs], ['stallGraceMs', this.stallGraceMs], ['turnHardLimitMs', this.turnHardLimitMs]] as const) {
+      if (!Number.isSafeInteger(value) || value < 1_000 || value > MAX_RUNTIME_TIMER_MS) throw new Error(`${name} must be between 1000 and ${MAX_RUNTIME_TIMER_MS}`);
     }
-    if (!Number.isInteger(this.maxTurns) || this.maxTurns < 1 || this.maxTurns > 50) {
-      throw new Error('maxTurns must be an integer between 1 and 50');
+    if (!Number.isSafeInteger(this.terminationGraceMs) || this.terminationGraceMs < 1_000 || this.terminationGraceMs > 60_000) throw new Error('terminationGraceMs must be an integer between 1000 and 60000');
+    if (this.maxDurationMs !== null && (!Number.isSafeInteger(this.maxDurationMs) || this.maxDurationMs < 1_000 || this.maxDurationMs > 365 * 24 * 60 * 60 * 1_000)) throw new Error('maxDurationMs must be null or between 1000 and 31536000000');
+    if (!Number.isInteger(this.maxTotalMessageChars) || this.maxTotalMessageChars < 1_000 || this.maxTotalMessageChars > 10_000_000) throw new Error('maxTotalMessageChars must be an integer between 1000 and 10000000');
+    for (const connector of Object.values(this.connectors)) {
+      connector?.updateLimits?.({ hardTimeoutMs: this.turnHardLimitMs, startupTimeoutMs: this.startupTimeoutMs });
     }
-    if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1_000 || this.timeoutMs > 600_000) {
-      throw new Error('timeoutMs must be an integer between 1000 and 600000');
-    }
-    if (!Number.isInteger(this.idleTimeoutMs) || this.idleTimeoutMs < 1_000 || this.idleTimeoutMs > 600_000) {
-      throw new Error('idleTimeoutMs must be an integer between 1000 and 600000');
-    }
-    if (!Number.isInteger(this.startupTimeoutMs) || this.startupTimeoutMs < 1_000 || this.startupTimeoutMs > 600_000) {
-      throw new Error('startupTimeoutMs must be an integer between 1000 and 600000');
-    }
-    if (!Number.isInteger(this.stallGraceMs) || this.stallGraceMs < 1_000 || this.stallGraceMs > 600_000) {
-      throw new Error('stallGraceMs must be an integer between 1000 and 600000');
-    }
-    if (!Number.isInteger(this.turnHardLimitMs) || this.turnHardLimitMs < 1_000 || this.turnHardLimitMs > 7 * 24 * 60 * 60 * 1_000) {
-      throw new Error('turnHardLimitMs must be an integer between 1000 and 604800000');
-    }
-    if (!Number.isInteger(this.terminationGraceMs) || this.terminationGraceMs < 1_000 || this.terminationGraceMs > 60_000) {
-      throw new Error('terminationGraceMs must be an integer between 1000 and 60000');
-    }
-    if (!Number.isInteger(this.maxDurationMs) || this.maxDurationMs < 1_000 || this.maxDurationMs > 7 * 24 * 60 * 60 * 1_000) {
-      throw new Error('maxDurationMs must be an integer between 1000 and 604800000');
-    }
-    if (!Number.isInteger(this.maxTotalMessageChars) || this.maxTotalMessageChars < 1_000 || this.maxTotalMessageChars > 10_000_000) {
-      throw new Error('maxTotalMessageChars must be an integer between 1000 and 10000000');
-    }
-    this.connectors = connectors;
-    this.storage.recoverOrphanedDiscussions(isOwnerProcessAlive);
   }
 
   async initiateDiscussion(params: {
@@ -1973,7 +1978,7 @@ export class CollaborationService {
     status: string;
   }, extraContent = ''): void {
     const elapsed = Date.now() - Date.parse(discussion.createdAt);
-    if (elapsed > this.maxDurationMs) {
+    if (this.maxDurationMs !== null && elapsed > this.maxDurationMs) {
       this.storage.updateDiscussionStatus(discussion.id, 'TIMEOUT', { endedAt: new Date().toISOString() });
       this.storage.updateDiscussionDiagnostic(discussion.id, 'MAX_DURATION');
       this.audit.log({

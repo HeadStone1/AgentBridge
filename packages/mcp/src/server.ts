@@ -9,6 +9,7 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Storage } from '@agentbridge/storage';
 import type { CollaborationService } from '@agentbridge/collaboration';
+import { resolveConfig, type EffectiveConfig } from '@agentbridge/config';
 import { DISCUSSION_MODES, TASK_TYPES, VALIDATION_MODES, type AgentType } from '@agentbridge/protocol';
 
 export interface MCPServerOptions {
@@ -21,6 +22,7 @@ export interface MCPRuntime {
   storage: Storage;
   collaboration: CollaborationService;
   projectPath?: string;
+  refreshConfig: () => EffectiveConfig;
 }
 
 export type MCPRuntimeResolver = (
@@ -35,19 +37,35 @@ function opposite(agent: AgentType): AgentType {
   return agent === 'claude' ? 'codex' : 'claude';
 }
 
+function applyEffectiveConfig(collaboration: CollaborationService, effective: EffectiveConfig): void {
+  collaboration.updateConfig({
+    maxTurns: effective.config.discussion.maxTurns,
+    timeoutMs: effective.config.discussion.leaseTimeoutMs,
+    idleTimeoutMs: effective.config.discussion.idleTimeoutMs,
+    startupTimeoutMs: effective.config.discussion.startupTimeoutMs,
+    stallGraceMs: effective.config.discussion.stallGraceMs,
+    turnHardLimitMs: effective.config.discussion.turnHardLimitMs,
+    maxDurationMs: effective.config.discussion.maxDurationMs,
+    terminationGraceMs: effective.config.discussion.terminationGraceMs,
+    maxTotalMessageChars: effective.config.discussion.maxTotalMessageChars,
+    archiveSessionsOnClose: effective.config.session.archiveOnClose,
+  });
+}
+
 function buildTools(agentType: AgentType): Tool[] {
   if (process.env.AGENTBRIDGE_PEER_INVOCATION === '1') return [];
   const peer = opposite(agentType);
   return [
     {
       name: 'ask_peer',
-      description: 'Start a synchronous peer interaction. review returns one independent peer response; discussion and deep-discussion alternate both providers and return only after agreement, a user decision, or a recorded failure. Both providers must be configured.',
+      description: 'Start a synchronous peer interaction. review returns one independent peer response; discussion and deep-discussion alternate both providers and return only after agreement, a user decision, or a recorded failure. Whether autonomous use is allowed is enforced by the active global/project AgentBridge configuration. Both providers must be configured.',
       inputSchema: {
         type: 'object',
         properties: {
           peer: { type: 'string', enum: [peer], description: 'The agent to discuss with' },
           message: { type: 'string', description: 'Proposal or question for the peer' },
           projectPath: { type: 'string', description: 'Project path; defaults to the current working directory' },
+          invocationOrigin: { type: 'string', enum: ['autonomous', 'user_requested'], description: 'Whether the user explicitly requested peer discussion or the agent initiated it from task context' },
           mode: {
             type: 'string',
             enum: [...DISCUSSION_MODES],
@@ -190,7 +208,15 @@ export function createMCPServer(
   collaboration: CollaborationService,
   options: MCPServerOptions = {},
 ) {
-  return createServer(async () => ({ storage, collaboration }), options);
+  return createServer(async () => ({
+    storage,
+    collaboration,
+    refreshConfig: () => {
+      const effective = resolveConfig();
+      applyEffectiveConfig(collaboration, effective);
+      return effective;
+    },
+  }), options);
 }
 
 /** Create a server that binds to its project lazily after MCP initialization. */
@@ -209,6 +235,7 @@ function createServer(resolveRuntime: MCPRuntimeResolver, options: MCPServerOpti
       peer: z.literal(opposite(agentType)),
       message: text,
       projectPath: z.string().trim().min(1).max(4096).optional(),
+      invocationOrigin: z.enum(['autonomous', 'user_requested']).optional(),
       mode: z.enum(DISCUSSION_MODES).optional(),
       taskType: z.enum(TASK_TYPES).optional(),
       validationMode: z.enum(VALIDATION_MODES).optional(),
@@ -260,6 +287,10 @@ function createServer(resolveRuntime: MCPRuntimeResolver, options: MCPServerOpti
           }
           const input = parse(schemas.ask, args);
           const runtime = await resolveRuntime(input.projectPath, server);
+          const effective = runtime.refreshConfig();
+          if (!effective.config.invocation.autonomous && input.invocationOrigin !== 'user_requested') {
+            throw new Error('Autonomous peer invocation is disabled by the active AgentBridge configuration; retry only after the user explicitly requests discussion.');
+          }
           const result = await runtime.collaboration.initiateDiscussion({
             driver: agentType,
             peer: input.peer,
@@ -279,6 +310,7 @@ function createServer(resolveRuntime: MCPRuntimeResolver, options: MCPServerOpti
         case 'reply_peer': {
           const input = parse(schemas.reply, args);
           const runtime = await resolveRuntime(undefined, server);
+          runtime.refreshConfig();
           return ok(await runtime.collaboration.replyToDiscussion({
             discussionId: input.discussionId,
             reply: input.message,

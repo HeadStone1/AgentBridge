@@ -15,6 +15,7 @@ const documentationFiles = [
   'NOTICE',
   'LICENSE_HISTORY.md',
   'COMMERCIAL_LICENSE.md',
+  'docs/CONFIGURATION.md',
 ];
 
 for (const required of [
@@ -31,7 +32,9 @@ mkdirSync(join(output, 'skills'), { recursive: true });
 copyFileSync(join(root, 'release', 'agentbridge-cli.mjs'), join(releaseDirectory, 'agentbridge-cli.mjs'));
 copyFileSync(join(root, 'release', 'agentbridge-mcp.mjs'), join(releaseDirectory, 'agentbridge-mcp.mjs'));
 for (const file of documentationFiles) {
-  copyFileSync(join(root, file), join(output, file));
+  const target = join(output, file);
+  mkdirSync(dirname(target), { recursive: true });
+  copyFileSync(join(root, file), target);
 }
 copyDirectory(join(root, 'skills'), join(output, 'skills'));
 

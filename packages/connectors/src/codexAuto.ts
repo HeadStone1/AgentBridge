@@ -124,6 +124,12 @@ export class CodexAutoConnector implements AgentConnector {
     return selected.connector.archiveSession?.(sessionId, sessionKind) ?? false;
   }
 
+  updateLimits(limits: { hardTimeoutMs: number; startupTimeoutMs?: number }): void {
+    this.options.hardTimeoutMs = limits.hardTimeoutMs;
+    if (limits.startupTimeoutMs !== undefined) this.options.startupTimeoutMs = limits.startupTimeoutMs;
+    void this.selection?.then((selected) => selected?.connector.updateLimits?.(limits));
+  }
+
   async getSelection(): Promise<CodexBackendSelection | undefined> {
     return (await this.selectBackend())?.info;
   }

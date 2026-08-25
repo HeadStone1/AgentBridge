@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, rmSync } from 'node:fs';
-import { join, parse, resolve } from 'node:path';
+import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { dirname, join, parse, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import process from 'node:process';
 import {
@@ -41,6 +41,7 @@ import {
   rollbackInstalledRelease,
 } from './releaseManager.js';
 import { ClaudeConnector, CodexAutoConnector, discoverCodexCommands } from '@agentbridge/connectors';
+import { startConfigUi } from './ui.js';
 
 type Options = Record<string, string | boolean>;
 
@@ -59,6 +60,12 @@ async function main(argv: string[]): Promise<void> {
       return;
     case 'setup':
       console.log(JSON.stringify(setupGlobal(projectArgument ? projectPath : undefined, options), null, 2));
+      return;
+    case 'ui':
+      await startConfigUi({
+        projectPath: projectArgument ? projectPath : detectUiProject(projectPath),
+        projects: readProjectRegistry().map((item) => item.projectPath),
+      });
       return;
     case 'register-session':
       console.log(JSON.stringify(registerSession(options, projectPath), null, 2));
@@ -107,6 +114,18 @@ async function main(argv: string[]): Promise<void> {
 
 function initProject(projectPath: string): Record<string, unknown> {
   return ensureProjectMetadata(projectPath);
+}
+
+function detectUiProject(currentPath: string): string | undefined {
+  const unsafeRoots = [parse(currentPath).root, homedir(), process.env.AGENTBRIDGE_INSTALL_ROOT, dirname(process.execPath)]
+    .filter((value): value is string => Boolean(value));
+  return unsafeRoots.some((root) => samePath(root, currentPath)) ? undefined : currentPath;
+}
+
+function samePath(left: string, right: string): boolean {
+  const a = resolve(left);
+  const b = resolve(right);
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
 function setupGlobal(projectPath: string | undefined, options: Options): Record<string, unknown> {
@@ -487,11 +506,27 @@ function removeProject(
       }
     }
   } else if (existsSync(stateDir)) {
-    rmSync(stateDir, { recursive: true, force: true });
-    removed.push(stateDir);
+    // Project configuration is user/team data and must survive uninstall.
+    for (const entry of readdirSync(stateDir)) {
+      if (entry === 'config.json') continue;
+      const path = join(stateDir, entry);
+      rmSync(path, { recursive: true, force: true });
+      removed.push(path);
+    }
+    if (readdirSync(stateDir).length === 0) {
+      rmSync(stateDir, { recursive: true, force: true });
+      removed.push(stateDir);
+    }
   }
   if (updateRegistry) unregisterProject(projectPath);
-  return { projectPath, removed, configs, sharedInstallRoot, registrationMode: registration.scope ?? 'project' };
+  return {
+    projectPath,
+    removed,
+    preservedConfig: existsSync(join(stateDir, 'config.json')) ? join(stateDir, 'config.json') : null,
+    configs,
+    sharedInstallRoot,
+    registrationMode: registration.scope ?? 'project',
+  };
 }
 
 function parseCodexMode(value: string): CodexBackendMode {
@@ -544,6 +579,7 @@ function printHelp(): void {
     'Commands:',
     '  init [path]                 Create .agentbridge/project.json',
     '  setup [path]                Register MCP globally once; optional path initializes one project',
+    '  ui                          Open the one-time global/project configuration UI',
     '  register-session             Register a provider-native session',
     '  status [path]               Show sessions, discussions, and metrics',
     '  cleanup [path]              Preview/delete old completed discussions',

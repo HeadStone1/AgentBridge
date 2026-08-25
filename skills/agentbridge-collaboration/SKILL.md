@@ -1,6 +1,6 @@
 ---
 name: agentbridge-collaboration
-description: Use AgentBridge MCP when the user asks Claude Code and Codex to consult, discuss, review, or reach a joint conclusion.
+description: Use AgentBridge MCP when the active AgentBridge global/project configuration permits collaboration and the task benefits from Claude Code/Codex consultation, review, or a joint conclusion.
 ---
 
 # AgentBridge collaboration
@@ -9,7 +9,8 @@ Use AgentBridge as a direct communication channel between Claude Code and Codex.
 
 ## Start
 
-- Call `ask_peer` once with the user's goal and the active project path.
+- Call `ask_peer` once with the user's goal and the active project path. Set `invocationOrigin` to `user_requested` when the user explicitly asked for collaboration; otherwise set it to `autonomous`.
+- The MCP server's effective global/project configuration is authoritative. Do not try to bypass a disabled autonomous-invocation setting.
 - Use `review` for one independent response, `discussion` for an automatic exchange, and `deep-discussion` only when the user asks for a deeper debate.
 - Keep the returned `discussionId`; do not create a duplicate discussion for the same topic.
 

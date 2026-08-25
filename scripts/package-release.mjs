@@ -28,6 +28,7 @@ const documentationFiles = [
   'NOTICE',
   'LICENSE_HISTORY.md',
   'COMMERCIAL_LICENSE.md',
+  'docs/CONFIGURATION.md',
 ];
 const codexPlatformPackage = codexPlatformPackageName(targetPlatform, targetArch);
 const codexPackageRoot = join(root, 'node_modules', '@openai', 'codex');
@@ -54,7 +55,9 @@ mkdirSync(join(output, 'skills'), { recursive: true });
 copyFileSync(join(root, 'release', 'agentbridge-cli.mjs'), join(output, 'app', 'agentbridge-cli.mjs'));
 copyFileSync(join(root, 'release', 'agentbridge-mcp.mjs'), join(output, 'app', 'agentbridge-mcp.mjs'));
 for (const file of documentationFiles) {
-  copyFileSync(join(root, file), join(output, file));
+  const target = join(output, file);
+  mkdirSync(dirname(target), { recursive: true });
+  copyFileSync(join(root, file), target);
 }
 copyFileSync(join(root, 'scripts', 'install.ps1'), join(output, 'install.ps1'));
 copyFileSync(join(root, 'scripts', 'install.sh'), join(output, 'install.sh'));

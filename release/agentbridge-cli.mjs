@@ -2991,7 +2991,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve10.call(this, root, ref);
+      let _sch = resolve12.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a = root.localRefs) === null || _a === void 0 ? void 0 : _a[ref];
         const { schemaId } = this.opts;
@@ -3018,7 +3018,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve10(root, ref) {
+    function resolve12(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3649,7 +3649,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve10(baseURI, relativeURI, options) {
+    function resolve12(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const { parsed: baseParsed, malformedAuthorityOrPort: baseMalformed } = parseWithStatus(baseURI, schemelessOptions);
       const { parsed: relativeParsed, malformedAuthorityOrPort: relativeMalformed } = parseWithStatus(relativeURI, schemelessOptions);
@@ -3933,7 +3933,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve10,
+      resolve: resolve12,
       resolveComponent,
       equal,
       serialize,
@@ -7016,12 +7016,12 @@ var require_isexe = __commonJS({
         if (typeof Promise !== "function") {
           throw new TypeError("callback not provided");
         }
-        return new Promise(function(resolve10, reject) {
+        return new Promise(function(resolve12, reject) {
           isexe(path, options || {}, function(er, is) {
             if (er) {
               reject(er);
             } else {
-              resolve10(is);
+              resolve12(is);
             }
           });
         });
@@ -7087,27 +7087,27 @@ var require_which = __commonJS({
         opt = {};
       const { pathEnv, pathExt, pathExtExe } = getPathInfo(cmd, opt);
       const found = [];
-      const step = (i) => new Promise((resolve10, reject) => {
+      const step = (i) => new Promise((resolve12, reject) => {
         if (i === pathEnv.length)
-          return opt.all && found.length ? resolve10(found) : reject(getNotFoundError(cmd));
+          return opt.all && found.length ? resolve12(found) : reject(getNotFoundError(cmd));
         const ppRaw = pathEnv[i];
         const pathPart = /^".*"$/.test(ppRaw) ? ppRaw.slice(1, -1) : ppRaw;
         const pCmd = path.join(pathPart, cmd);
         const p = !pathPart && /^\.[\\\/]/.test(cmd) ? cmd.slice(0, 2) + pCmd : pCmd;
-        resolve10(subStep(p, i, 0));
+        resolve12(subStep(p, i, 0));
       });
-      const subStep = (p, i, ii) => new Promise((resolve10, reject) => {
+      const subStep = (p, i, ii) => new Promise((resolve12, reject) => {
         if (ii === pathExt.length)
-          return resolve10(step(i + 1));
+          return resolve12(step(i + 1));
         const ext = pathExt[ii];
         isexe(p + ext, { pathExt: pathExtExe }, (er, is) => {
           if (!er && is) {
             if (opt.all)
               found.push(p + ext);
             else
-              return resolve10(p + ext);
+              return resolve12(p + ext);
           }
-          return resolve10(subStep(p, i, ii + 1));
+          return resolve12(subStep(p, i, ii + 1));
         });
       });
       return cb ? step(0).then((res) => cb(null, res), cb) : step(0);
@@ -7399,7 +7399,7 @@ var require_cross_spawn = __commonJS({
     var cp = __require("child_process");
     var parse5 = require_parse();
     var enoent = require_enoent();
-    function spawn7(command, args, options) {
+    function spawn8(command, args, options) {
       const parsed = parse5(command, args, options);
       const spawned = cp.spawn(parsed.command, parsed.args, parsed.options);
       enoent.hookChildProcess(spawned, parsed);
@@ -7411,8 +7411,8 @@ var require_cross_spawn = __commonJS({
       result.error = result.error || enoent.verifyENOENTSync(result.status, parsed);
       return result;
     }
-    module.exports = spawn7;
-    module.exports.spawn = spawn7;
+    module.exports = spawn8;
+    module.exports.spawn = spawn8;
     module.exports.sync = spawnSync2;
     module.exports._parse = parse5;
     module.exports._enoent = enoent;
@@ -7420,10 +7420,10 @@ var require_cross_spawn = __commonJS({
 });
 
 // packages/cli/dist/index.js
-import { existsSync as existsSync8, readFileSync as readFileSync6, rmSync as rmSync5 } from "node:fs";
-import { join as join9, parse as parse4, resolve as resolve9 } from "node:path";
-import { homedir as homedir7 } from "node:os";
-import process9 from "node:process";
+import { existsSync as existsSync10, readFileSync as readFileSync7, readdirSync as readdirSync5, rmSync as rmSync5 } from "node:fs";
+import { dirname as dirname9, join as join10, parse as parse4, resolve as resolve11 } from "node:path";
+import { homedir as homedir8 } from "node:os";
+import process10 from "node:process";
 
 // packages/audit/dist/index.js
 var AuditService = class _AuditService {
@@ -9250,9 +9250,15 @@ var ClaudeConnector = class {
     this.command = options.command ?? "claude";
     this.hardTimeoutMs = options.hardTimeoutMs ?? options.timeoutMs ?? 30 * 60 * 1e3;
     this.extraArgs = options.extraArgs ?? [];
-    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1e3 || this.hardTimeoutMs > 7 * 24 * 60 * 60 * 1e3) {
-      throw new Error("Claude connector hardTimeoutMs must be an integer between 1000 and 604800000");
+    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1e3 || this.hardTimeoutMs > 365 * 24 * 60 * 60 * 1e3) {
+      throw new Error("Claude connector hardTimeoutMs must be an integer between 1000 and 31536000000");
     }
+  }
+  updateLimits(limits) {
+    if (!Number.isSafeInteger(limits.hardTimeoutMs) || limits.hardTimeoutMs < 1e3 || limits.hardTimeoutMs > 365 * 24 * 60 * 60 * 1e3) {
+      throw new Error("Claude connector hardTimeoutMs must be between 1000 and 31536000000");
+    }
+    this.hardTimeoutMs = limits.hardTimeoutMs;
   }
   async isAvailable() {
     try {
@@ -9322,7 +9328,7 @@ function parseClaudeOutput(stdout) {
   }
 }
 function runProcess(command, args, cwd, timeoutMs, signal, onActivity) {
-  return new Promise((resolve10, reject) => {
+  return new Promise((resolve12, reject) => {
     const child = spawn(command, args, {
       cwd,
       windowsHide: true,
@@ -9394,7 +9400,7 @@ function runProcess(command, args, cwd, timeoutMs, signal, onActivity) {
       if (termination) {
         finish(() => reject(new ProviderError(termination.code, termination.message)));
       } else {
-        finish(() => resolve10({ exitCode, stdout, stderr }));
+        finish(() => resolve12({ exitCode, stdout, stderr }));
       }
     });
     if (signal?.aborted)
@@ -9434,9 +9440,15 @@ var CodexConnector = class {
     this.extraArgs = options.extraArgs ?? [];
     if (!this.command.trim())
       throw new Error("Codex connector command must not be empty");
-    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1e3 || this.hardTimeoutMs > 7 * 24 * 60 * 60 * 1e3) {
-      throw new Error("Codex connector hardTimeoutMs must be an integer between 1000 and 604800000");
+    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1e3 || this.hardTimeoutMs > 365 * 24 * 60 * 60 * 1e3) {
+      throw new Error("Codex connector hardTimeoutMs must be an integer between 1000 and 31536000000");
     }
+  }
+  updateLimits(limits) {
+    if (!Number.isSafeInteger(limits.hardTimeoutMs) || limits.hardTimeoutMs < 1e3 || limits.hardTimeoutMs > 365 * 24 * 60 * 60 * 1e3) {
+      throw new Error("Codex connector hardTimeoutMs must be between 1000 and 31536000000");
+    }
+    this.hardTimeoutMs = limits.hardTimeoutMs;
   }
   async isAvailable() {
     try {
@@ -9535,7 +9547,7 @@ function isRecord2(value) {
   return typeof value === "object" && value !== null;
 }
 function runProcess2(command, args, cwd, timeoutMs, signal, onActivity) {
-  return new Promise((resolve10, reject) => {
+  return new Promise((resolve12, reject) => {
     const child = spawn2(command, args, {
       cwd,
       windowsHide: true,
@@ -9607,7 +9619,7 @@ function runProcess2(command, args, cwd, timeoutMs, signal, onActivity) {
       if (termination) {
         finish(() => reject(new ProviderError(termination.code, termination.message)));
       } else {
-        finish(() => resolve10({ exitCode, stdout, stderr }));
+        finish(() => resolve12({ exitCode, stdout, stderr }));
       }
     });
     if (signal?.aborted)
@@ -9721,15 +9733,26 @@ var CodexAppServerConnector = class {
     this.startupTimeoutMs = options.startupTimeoutMs ?? 15e3;
     this.model = options.model;
     this.stderrBufferBytes = options.stderrBufferBytes ?? 256 * 1024;
-    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1e3 || this.hardTimeoutMs > 7 * 24 * 60 * 60 * 1e3) {
-      throw new Error("Codex App Server hardTimeoutMs must be an integer between 1000 and 604800000");
+    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1e3 || this.hardTimeoutMs > 365 * 24 * 60 * 60 * 1e3) {
+      throw new Error("Codex App Server hardTimeoutMs must be an integer between 1000 and 31536000000");
     }
-    if (!Number.isInteger(this.startupTimeoutMs) || this.startupTimeoutMs < 1e3 || this.startupTimeoutMs > 6e5) {
-      throw new Error("Codex App Server startupTimeoutMs must be an integer between 1000 and 600000");
+    if (!Number.isInteger(this.startupTimeoutMs) || this.startupTimeoutMs < 1e3 || this.startupTimeoutMs > 24 * 24 * 60 * 60 * 1e3) {
+      throw new Error("Codex App Server startupTimeoutMs must be an integer between 1000 and 2073600000");
     }
     if (!Number.isInteger(this.stderrBufferBytes) || this.stderrBufferBytes < 4096 || this.stderrBufferBytes > 1024 * 1024) {
       throw new Error("Codex App Server stderrBufferBytes must be between 4096 and 1048576");
     }
+  }
+  updateLimits(limits) {
+    if (!Number.isSafeInteger(limits.hardTimeoutMs) || limits.hardTimeoutMs < 1e3 || limits.hardTimeoutMs > 365 * 24 * 60 * 60 * 1e3) {
+      throw new Error("Codex App Server hardTimeoutMs must be between 1000 and 31536000000");
+    }
+    if (limits.startupTimeoutMs !== void 0 && (!Number.isSafeInteger(limits.startupTimeoutMs) || limits.startupTimeoutMs < 1e3 || limits.startupTimeoutMs > 365 * 24 * 60 * 60 * 1e3)) {
+      throw new Error("Codex App Server startupTimeoutMs must be between 1000 and 31536000000");
+    }
+    this.hardTimeoutMs = limits.hardTimeoutMs;
+    if (limits.startupTimeoutMs !== void 0)
+      this.startupTimeoutMs = limits.startupTimeoutMs;
   }
   async isAvailable() {
     if (!this.command.trim())
@@ -9857,8 +9880,8 @@ var CodexAppServerConnector = class {
   async runSerial(operation) {
     const previous = this.serial;
     let release;
-    this.serial = new Promise((resolve10) => {
-      release = resolve10;
+    this.serial = new Promise((resolve12) => {
+      release = resolve12;
     });
     await previous;
     try {
@@ -9977,7 +10000,7 @@ var CodexAppServerConnector = class {
       return Promise.reject(new ProviderError("UNAVAILABLE", "Codex App Server is not running"));
     }
     const id = this.nextRequestId++;
-    return new Promise((resolve10, reject) => {
+    return new Promise((resolve12, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new ProviderError("TIMEOUT", `Codex App Server request timed out: ${method}`));
@@ -9985,7 +10008,7 @@ var CodexAppServerConnector = class {
       this.pending.set(id, {
         resolve: (value) => {
           clearTimeout(timer);
-          resolve10(value);
+          resolve12(value);
         },
         reject: (error2) => {
           clearTimeout(timer);
@@ -10110,10 +10133,10 @@ var CodexAppServerConnector = class {
     const queued = this.events.shift();
     if (queued)
       return Promise.resolve(queued);
-    return new Promise((resolve10, reject) => {
+    return new Promise((resolve12, reject) => {
       const waiter = (event) => {
         clearTimeout(timer);
-        resolve10(event);
+        resolve12(event);
       };
       const timer = setTimeout(() => {
         const index = this.eventWaiters.indexOf(waiter);
@@ -10450,6 +10473,12 @@ var CodexAutoConnector = class {
     if (selected?.info.mode !== "app-server")
       return false;
     return selected.connector.archiveSession?.(sessionId, sessionKind) ?? false;
+  }
+  updateLimits(limits) {
+    this.options.hardTimeoutMs = limits.hardTimeoutMs;
+    if (limits.startupTimeoutMs !== void 0)
+      this.options.startupTimeoutMs = limits.startupTimeoutMs;
+    void this.selection?.then((selected) => selected?.connector.updateLimits?.(limits));
   }
   async getSelection() {
     return (await this.selectBackend())?.info;
@@ -17081,7 +17110,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve10) => setTimeout(resolve10, pollInterval));
+        await new Promise((resolve12) => setTimeout(resolve12, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -17098,7 +17127,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve10, reject) => {
+    return new Promise((resolve12, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -17176,7 +17205,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve10(parseResult.data);
+            resolve12(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -17437,12 +17466,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve10, reject) => {
+    return new Promise((resolve12, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve10, interval);
+      const timeoutId = setTimeout(resolve12, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -18393,7 +18422,7 @@ var StdioClientTransport = class {
     if (this._process) {
       throw new Error("StdioClientTransport already started! If using Client class, note that connect() calls start() automatically.");
     }
-    return new Promise((resolve10, reject) => {
+    return new Promise((resolve12, reject) => {
       this._process = (0, import_cross_spawn.default)(this._serverParams.command, this._serverParams.args ?? [], {
         // merge default env with server env because mcp server needs some env vars
         env: {
@@ -18410,7 +18439,7 @@ var StdioClientTransport = class {
         this.onerror?.(error2);
       });
       this._process.on("spawn", () => {
-        resolve10();
+        resolve12();
       });
       this._process.on("close", (_code) => {
         this._process = void 0;
@@ -18475,22 +18504,22 @@ var StdioClientTransport = class {
     if (this._process) {
       const processToClose = this._process;
       this._process = void 0;
-      const closePromise = new Promise((resolve10) => {
+      const closePromise = new Promise((resolve12) => {
         processToClose.once("close", () => {
-          resolve10();
+          resolve12();
         });
       });
       try {
         processToClose.stdin?.end();
       } catch {
       }
-      await Promise.race([closePromise, new Promise((resolve10) => setTimeout(resolve10, 2e3).unref())]);
+      await Promise.race([closePromise, new Promise((resolve12) => setTimeout(resolve12, 2e3).unref())]);
       if (processToClose.exitCode === null) {
         try {
           processToClose.kill("SIGTERM");
         } catch {
         }
-        await Promise.race([closePromise, new Promise((resolve10) => setTimeout(resolve10, 2e3).unref())]);
+        await Promise.race([closePromise, new Promise((resolve12) => setTimeout(resolve12, 2e3).unref())]);
       }
       if (processToClose.exitCode === null) {
         try {
@@ -18502,15 +18531,15 @@ var StdioClientTransport = class {
     this._readBuffer.clear();
   }
   send(message) {
-    return new Promise((resolve10) => {
+    return new Promise((resolve12) => {
       if (!this._process?.stdin) {
         throw new Error("Not connected");
       }
       const json = serializeMessage(message);
       if (this._process.stdin.write(json)) {
-        resolve10();
+        resolve12();
       } else {
-        this._process.stdin.once("drain", resolve10);
+        this._process.stdin.once("drain", resolve12);
       }
     });
   }
@@ -18736,12 +18765,540 @@ function runInstaller(packageDirectory, targetRoot) {
     throw new Error(`Installer exited with status ${result.status ?? "unknown"}`);
 }
 
+// packages/cli/dist/ui.js
+import { existsSync as existsSync9 } from "node:fs";
+import { createServer } from "node:http";
+import { spawn as spawn7 } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { isAbsolute as isAbsolute4, resolve as resolve10 } from "node:path";
+
+// packages/config/dist/index.js
+import { copyFileSync as copyFileSync3, existsSync as existsSync8, mkdirSync as mkdirSync5, readFileSync as readFileSync6, renameSync as renameSync3, writeFileSync as writeFileSync5 } from "node:fs";
+import { homedir as homedir7 } from "node:os";
+import { dirname as dirname8, join as join9, resolve as resolve9 } from "node:path";
+import process9 from "node:process";
+var DAY_MS = 24 * 60 * 60 * 1e3;
+var MAX_DURATION_MS = 365 * DAY_MS;
+var MAX_TIMER_MS = 24 * DAY_MS;
+var DEFAULT_CONFIG_FILE = {
+  version: 1,
+  invocation: { autonomous: true },
+  discussion: {
+    maxDuration: "30m",
+    idleTimeout: "2m",
+    startupTimeout: "15s",
+    stallGrace: "3m",
+    turnHardLimit: "30m",
+    leaseTimeout: "2m",
+    terminationGrace: "5s",
+    maxTotalMessageChars: 5e5
+  },
+  session: {
+    pruneMaxAge: "30d",
+    retentionDays: 0,
+    archiveOnClose: false
+  }
+};
+var KNOWN_KEYS = {
+  root: ["version", "invocation", "discussion", "session"],
+  invocation: ["autonomous"],
+  discussion: [
+    "maxDuration",
+    "idleTimeout",
+    "startupTimeout",
+    "stallGrace",
+    "turnHardLimit",
+    "leaseTimeout",
+    "terminationGrace",
+    "maxTurns",
+    "maxTotalMessageChars"
+  ],
+  session: ["recoveryMaxAge", "pruneMaxAge", "retentionDays", "archiveOnClose"]
+};
+function configHome(env = process9.env) {
+  return resolve9(env.AGENTBRIDGE_CONFIG_HOME ?? join9(homedir7(), ".agentbridge"));
+}
+function globalConfigPath(env = process9.env) {
+  return join9(configHome(env), "config.json");
+}
+function projectConfigPath(projectPath, env = process9.env) {
+  void env;
+  return join9(resolve9(projectPath), ".agentbridge", "config.json");
+}
+function readConfigFile(path) {
+  if (!existsSync8(path))
+    return {};
+  let value;
+  try {
+    value = JSON.parse(readFileSync6(path, "utf8"));
+  } catch (cause) {
+    throw new Error(`AgentBridge config is not valid JSON: ${path}`, { cause });
+  }
+  validateConfigFile(value, path);
+  return value;
+}
+function resolveConfig(projectPath, env = process9.env) {
+  const globalPath = globalConfigPath(env);
+  const resolvedProjectPath = projectPath ? resolve9(projectPath) : null;
+  const projectPathValue = resolvedProjectPath ? projectConfigPath(resolvedProjectPath, env) : null;
+  const globalExists = existsSync8(globalPath);
+  const projectExists = Boolean(projectPathValue && existsSync8(projectPathValue));
+  const global2 = globalExists ? readConfigFile(globalPath) : {};
+  const project = projectPathValue && projectExists ? readConfigFile(projectPathValue) : {};
+  const sources = {
+    version: "default",
+    "invocation.autonomous": "default",
+    "discussion.maxDuration": "default",
+    "discussion.idleTimeout": "default",
+    "discussion.startupTimeout": "default",
+    "discussion.stallGrace": "default",
+    "discussion.turnHardLimit": "default",
+    "discussion.leaseTimeout": "default",
+    "discussion.terminationGrace": "default",
+    "discussion.maxTotalMessageChars": "default",
+    "session.pruneMaxAge": "default",
+    "session.retentionDays": "default",
+    "session.archiveOnClose": "default"
+  };
+  const merged = mergeConfig(cloneConfig(DEFAULT_CONFIG_FILE), global2, "global", sources);
+  mergeConfig(merged, project, "project", sources);
+  applyEnvironmentOverrides(merged, env, sources);
+  return {
+    config: normalizeConfig(merged),
+    globalPath,
+    projectPath: projectPathValue,
+    globalExists,
+    projectExists,
+    sources
+  };
+}
+function writeConfig(scope, value, projectPath, env = process9.env) {
+  if (scope === "project" && !projectPath)
+    throw new Error("A project path is required for project configuration");
+  validateConfigFile(value, scope === "global" ? globalConfigPath(env) : projectConfigPath(projectPath, env));
+  normalizeConfig(value);
+  const path = scope === "global" ? globalConfigPath(env) : projectConfigPath(projectPath, env);
+  mkdirSync5(dirname8(path), { recursive: true });
+  if (existsSync8(path))
+    copyFileSync3(path, `${path}.bak`);
+  const temporary = `${path}.tmp-${process9.pid}-${Date.now()}`;
+  writeFileSync5(temporary, `${JSON.stringify(value, null, 2)}
+`, "utf8");
+  renameSync3(temporary, path);
+  return path;
+}
+function formatDuration(ms) {
+  if (ms === null)
+    return "unlimited";
+  if (ms === void 0)
+    return "inherit";
+  const units = [[DAY_MS, "d"], [60 * 60 * 1e3, "h"], [60 * 1e3, "m"], [1e3, "s"]];
+  for (const [unit, label] of units) {
+    if (ms % unit === 0)
+      return `${ms / unit}${label}`;
+  }
+  return `${ms}ms`;
+}
+function parseDuration(value, field, options = {}) {
+  if (value === null) {
+    if (options.allowUnlimited)
+      return null;
+    throw new Error(`${field} cannot be unlimited`);
+  }
+  if (typeof value === "number") {
+    if (!Number.isInteger(value))
+      throw new Error(`${field} must be an integer duration in milliseconds`);
+    return validateDuration(value, field, options.maxMs ?? MAX_DURATION_MS);
+  }
+  const normalized = value.trim().toLowerCase();
+  if (options.allowUnlimited && ["unlimited", "none", "off"].includes(normalized))
+    return null;
+  const match = /^(\d+)\s*(ms|s|m|h|d)$/.exec(normalized);
+  if (!match)
+    throw new Error(`${field} must use a duration such as 30s, 10m, 2h, or 7d`);
+  const amount = Number(match[1]);
+  const multipliers = { ms: 1, s: 1e3, m: 6e4, h: 36e5, d: DAY_MS };
+  return validateDuration(amount * multipliers[match[2]], field, options.maxMs ?? MAX_DURATION_MS);
+}
+function validateDuration(value, field, maxMs) {
+  if (!Number.isSafeInteger(value) || value < 1e3 || value > maxMs) {
+    throw new Error(`${field} must be between 1s and ${formatDuration(maxMs)}`);
+  }
+  return value;
+}
+function normalizeConfig(value) {
+  const discussion = value.discussion ?? {};
+  const session = value.session ?? {};
+  return {
+    invocation: { autonomous: value.invocation?.autonomous ?? true },
+    discussion: {
+      maxDurationMs: parseDuration(discussion.maxDuration === void 0 ? "30m" : discussion.maxDuration, "discussion.maxDuration", { allowUnlimited: true }),
+      idleTimeoutMs: parseDuration(discussion.idleTimeout === void 0 ? "2m" : discussion.idleTimeout, "discussion.idleTimeout", { maxMs: MAX_TIMER_MS }),
+      startupTimeoutMs: parseDuration(discussion.startupTimeout === void 0 ? "15s" : discussion.startupTimeout, "discussion.startupTimeout", { maxMs: MAX_TIMER_MS }),
+      stallGraceMs: parseDuration(discussion.stallGrace === void 0 ? "3m" : discussion.stallGrace, "discussion.stallGrace", { maxMs: MAX_TIMER_MS }),
+      turnHardLimitMs: parseDuration(discussion.turnHardLimit === void 0 ? "30m" : discussion.turnHardLimit, "discussion.turnHardLimit", { maxMs: MAX_TIMER_MS }),
+      leaseTimeoutMs: parseDuration(discussion.leaseTimeout === void 0 ? "2m" : discussion.leaseTimeout, "discussion.leaseTimeout", { maxMs: MAX_TIMER_MS }),
+      terminationGraceMs: parseDuration(discussion.terminationGrace === void 0 ? "5s" : discussion.terminationGrace, "discussion.terminationGrace", { maxMs: 6e4 }),
+      ...discussion.maxTurns === void 0 ? {} : { maxTurns: assertInteger(discussion.maxTurns, "discussion.maxTurns", 1, 50) },
+      maxTotalMessageChars: assertInteger(discussion.maxTotalMessageChars === void 0 ? 5e5 : discussion.maxTotalMessageChars, "discussion.maxTotalMessageChars", 1e3, 1e7)
+    },
+    session: {
+      ...session.recoveryMaxAge === void 0 ? {} : { recoveryMaxAgeMs: parseDuration(session.recoveryMaxAge, "session.recoveryMaxAge") },
+      pruneMaxAgeMs: parseDuration(session.pruneMaxAge === void 0 ? "30d" : session.pruneMaxAge, "session.pruneMaxAge"),
+      retentionDays: assertInteger(session.retentionDays === void 0 ? 0 : session.retentionDays, "session.retentionDays", 0, 3650),
+      archiveOnClose: session.archiveOnClose === void 0 ? false : session.archiveOnClose
+    }
+  };
+}
+function assertInteger(value, field, min, max) {
+  if (!Number.isInteger(value) || value < min || value > max)
+    throw new Error(`${field} must be an integer between ${min} and ${max}`);
+  return value;
+}
+function mergeConfig(target, source, sourceName, sources) {
+  if (source.version !== void 0) {
+    target.version = source.version;
+    sources.version = sourceName;
+  }
+  if (source.invocation) {
+    target.invocation = { ...target.invocation ?? {}, ...source.invocation };
+    if (source.invocation.autonomous !== void 0)
+      sources["invocation.autonomous"] = sourceName;
+  }
+  if (source.discussion) {
+    target.discussion = { ...target.discussion ?? {}, ...source.discussion };
+    for (const key of Object.keys(source.discussion))
+      sources[`discussion.${key}`] = sourceName;
+  }
+  if (source.session) {
+    target.session = { ...target.session ?? {}, ...source.session };
+    for (const key of Object.keys(source.session))
+      sources[`session.${key}`] = sourceName;
+  }
+  return target;
+}
+function applyEnvironmentOverrides(config2, env, sources) {
+  const durationMap = [
+    ["AGENTBRIDGE_MAX_DURATION_MS", "maxDuration", true],
+    ["AGENTBRIDGE_IDLE_TIMEOUT_MS", "idleTimeout", false],
+    ["AGENTBRIDGE_STARTUP_TIMEOUT_MS", "startupTimeout", false],
+    ["AGENTBRIDGE_STALL_GRACE_MS", "stallGrace", false],
+    ["AGENTBRIDGE_TURN_HARD_LIMIT_MS", "turnHardLimit", false],
+    ["AGENTBRIDGE_TIMEOUT_MS", "leaseTimeout", false],
+    ["AGENTBRIDGE_TERMINATION_GRACE_MS", "terminationGrace", false]
+  ];
+  for (const [name, key, allowUnlimited] of durationMap) {
+    const raw = env[name];
+    if (!raw?.trim())
+      continue;
+    const numeric = Number(raw.trim());
+    config2.discussion ??= {};
+    config2.discussion[key] = numeric === 0 && allowUnlimited ? null : numeric;
+    sources[`discussion.${key}`] = "environment";
+  }
+  if (env.AGENTBRIDGE_TIMEOUT_MS?.trim() && !env.AGENTBRIDGE_IDLE_TIMEOUT_MS?.trim()) {
+    config2.discussion ??= {};
+    config2.discussion.idleTimeout = Number(env.AGENTBRIDGE_TIMEOUT_MS);
+    sources["discussion.idleTimeout"] = "environment";
+  }
+  const boolean3 = env.AGENTBRIDGE_AUTONOMOUS_INVOCATION ?? env.AGENTBRIDGE_ALLOW_AUTONOMOUS;
+  if (boolean3?.trim()) {
+    config2.invocation ??= {};
+    config2.invocation.autonomous = parseBoolean(boolean3, "AGENTBRIDGE_AUTONOMOUS_INVOCATION");
+    sources["invocation.autonomous"] = "environment";
+  }
+  if (env.AGENTBRIDGE_MAX_TURNS?.trim()) {
+    config2.discussion ??= {};
+    config2.discussion.maxTurns = Number(env.AGENTBRIDGE_MAX_TURNS);
+    sources["discussion.maxTurns"] = "environment";
+  }
+  if (env.AGENTBRIDGE_DISCUSSION_RETENTION_DAYS?.trim()) {
+    config2.session ??= {};
+    config2.session.retentionDays = Number(env.AGENTBRIDGE_DISCUSSION_RETENTION_DAYS);
+    sources["session.retentionDays"] = "environment";
+  }
+  if (env.AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE?.trim()) {
+    config2.session ??= {};
+    config2.session.archiveOnClose = parseBoolean(env.AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE, "AGENTBRIDGE_ARCHIVE_SESSIONS_ON_CLOSE");
+    sources["session.archiveOnClose"] = "environment";
+  }
+  if (env.AGENTBRIDGE_RECOVERY_MAX_AGE_MS?.trim() && Number(env.AGENTBRIDGE_RECOVERY_MAX_AGE_MS) > 0) {
+    config2.session ??= {};
+    config2.session.recoveryMaxAge = Number(env.AGENTBRIDGE_RECOVERY_MAX_AGE_MS);
+    sources["session.recoveryMaxAge"] = "environment";
+  }
+  if (env.AGENTBRIDGE_SESSION_PRUNE_MAX_AGE_MS?.trim() && Number(env.AGENTBRIDGE_SESSION_PRUNE_MAX_AGE_MS) > 0) {
+    config2.session ??= {};
+    config2.session.pruneMaxAge = Number(env.AGENTBRIDGE_SESSION_PRUNE_MAX_AGE_MS);
+    sources["session.pruneMaxAge"] = "environment";
+  }
+}
+function cloneConfig(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+function parseBoolean(value, field) {
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized))
+    return true;
+  if (["0", "false", "no", "off"].includes(normalized))
+    return false;
+  throw new Error(`${field} must be a boolean value`);
+}
+function validateConfigFile(value, path) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error(`AgentBridge config must be a JSON object: ${path}`);
+  const root = value;
+  assertKnownKeys(root, KNOWN_KEYS.root, path, "root");
+  if (root.version !== void 0 && root.version !== 1)
+    throw new Error(`Unsupported AgentBridge config version in ${path}`);
+  for (const [section, keys] of [["invocation", KNOWN_KEYS.invocation], ["discussion", KNOWN_KEYS.discussion], ["session", KNOWN_KEYS.session]]) {
+    if (root[section] === void 0)
+      continue;
+    if (!root[section] || typeof root[section] !== "object" || Array.isArray(root[section]))
+      throw new Error(`${section} must be an object in ${path}`);
+    assertKnownKeys(root[section], keys, path, section);
+  }
+  const invocation = root.invocation;
+  if (invocation?.autonomous !== void 0 && typeof invocation.autonomous !== "boolean") {
+    throw new Error(`invocation.autonomous must be a boolean in ${path}`);
+  }
+  const discussion = root.discussion;
+  for (const key of ["maxDuration", "idleTimeout", "startupTimeout", "stallGrace", "turnHardLimit", "leaseTimeout", "terminationGrace"]) {
+    const value2 = discussion?.[key];
+    if (value2 !== void 0 && value2 !== null && typeof value2 !== "string" && typeof value2 !== "number") {
+      throw new Error(`discussion.${key} must be a duration string or milliseconds in ${path}`);
+    }
+  }
+  for (const key of ["maxTurns", "maxTotalMessageChars"]) {
+    if (discussion?.[key] !== void 0 && typeof discussion[key] !== "number") {
+      throw new Error(`discussion.${key} must be a number in ${path}`);
+    }
+  }
+  const session = root.session;
+  for (const key of ["recoveryMaxAge", "pruneMaxAge"]) {
+    const value2 = session?.[key];
+    if (value2 !== void 0 && value2 !== null && typeof value2 !== "string" && typeof value2 !== "number") {
+      throw new Error(`session.${key} must be a duration string or milliseconds in ${path}`);
+    }
+  }
+  if (session?.retentionDays !== void 0 && typeof session.retentionDays !== "number") {
+    throw new Error(`session.retentionDays must be a number in ${path}`);
+  }
+  if (session?.archiveOnClose !== void 0 && typeof session.archiveOnClose !== "boolean") {
+    throw new Error(`session.archiveOnClose must be a boolean in ${path}`);
+  }
+}
+function assertKnownKeys(value, keys, path, section) {
+  for (const key of Object.keys(value))
+    if (!keys.includes(key))
+      throw new Error(`Unknown AgentBridge config key ${section}.${key} in ${path}`);
+}
+
+// packages/cli/dist/ui.js
+var MAX_BODY_BYTES = 1e6;
+var IDLE_CLOSE_MS = 15 * 60 * 1e3;
+async function startConfigUi(options = {}) {
+  const token = randomBytes(24).toString("hex");
+  const projects = uniqueProjects(options.projects ?? [], options.projectPath);
+  let server;
+  server = createServer((request, response) => {
+    void handleRequest(request, response, server, token, projects, options.projectPath);
+  });
+  let idleTimer;
+  const resetIdleTimer = () => {
+    if (idleTimer)
+      clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => server.close(), IDLE_CLOSE_MS);
+  };
+  server.on("request", resetIdleTimer);
+  await new Promise((resolvePromise, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolvePromise());
+  });
+  resetIdleTimer();
+  const address = server.address();
+  if (!address || typeof address === "string")
+    throw new Error("Could not determine the AgentBridge UI address");
+  const initial = options.projectPath ? `&projectPath=${encodeURIComponent(options.projectPath)}` : "";
+  const url = `http://127.0.0.1:${address.port}/?token=${token}${initial}`;
+  if (process.env.AGENTBRIDGE_UI_NO_OPEN !== "1")
+    openBrowser(url);
+  console.error(`AgentBridge configuration UI: ${url}`);
+  await new Promise((resolvePromise) => server.once("close", resolvePromise));
+  if (idleTimer)
+    clearTimeout(idleTimer);
+}
+async function handleRequest(request, response, server, token, projects, initialProjectPath) {
+  try {
+    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    if (url.pathname === "/" && request.method === "GET") {
+      if (url.searchParams.get("token") !== token)
+        return sendText(response, 403, "Invalid AgentBridge UI token");
+      return sendHtml(response, renderHtml(token, initialProjectPath));
+    }
+    if (!isAuthorized(request, token))
+      return sendJson(response, 403, { error: "Invalid AgentBridge UI token" });
+    if (url.pathname === "/api/bootstrap" && request.method === "GET") {
+      const projectPath = normalizeProjectPath(url.searchParams.get("projectPath"));
+      return sendJson(response, 200, bootstrap(projectPath, projects));
+    }
+    if (url.pathname === "/api/config" && request.method === "POST") {
+      const body = await readJson(request);
+      const scope = body.scope;
+      if (scope !== "global" && scope !== "project")
+        throw new Error("scope must be global or project");
+      const projectPath = scope === "project" ? normalizeProjectPath(String(body.projectPath ?? "")) : void 0;
+      if (scope === "project" && !projectPath)
+        throw new Error("A valid project path is required");
+      const value = body.value;
+      const path = writeConfig(scope, value, projectPath ?? void 0);
+      return sendJson(response, 200, { ok: true, path });
+    }
+    if (url.pathname === "/api/close" && request.method === "POST") {
+      sendJson(response, 200, { ok: true });
+      setTimeout(() => server.close(), 50);
+      return;
+    }
+    sendJson(response, 404, { error: "Not found" });
+  } catch (error2) {
+    sendJson(response, 400, { error: error2 instanceof Error ? error2.message : String(error2) });
+  }
+}
+function bootstrap(projectPath, projects) {
+  const globalPath = globalConfigPath();
+  const projectPathValue = projectPath ? projectConfigPath(projectPath) : null;
+  const effective = resolveConfig(projectPath);
+  return {
+    configHome: configHome(),
+    globalPath,
+    projectPath,
+    projectConfigPath: projectPathValue,
+    projects,
+    global: existsSync9(globalPath) ? readConfigFile(globalPath) : { version: 1 },
+    project: projectPathValue && existsSync9(projectPathValue) ? readConfigFile(projectPathValue) : { version: 1 },
+    effective: {
+      config: effective.config,
+      sources: effective.sources
+    }
+  };
+}
+function normalizeProjectPath(value) {
+  if (!value?.trim())
+    return null;
+  const path = resolve10(value);
+  if (!isAbsolute4(path) || !existsSync9(path))
+    throw new Error(`Project directory does not exist: ${path}`);
+  return path;
+}
+function uniqueProjects(values, selected) {
+  const candidates = [...values, ...selected ? [selected] : []];
+  return [...new Set(candidates.map((value) => resolve10(value)).filter((value) => existsSync9(value)))].sort();
+}
+function isAuthorized(request, token) {
+  const header = request.headers["x-agentbridge-token"];
+  return header === token;
+}
+async function readJson(request) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+    size += buffer.length;
+    if (size > MAX_BODY_BYTES)
+      throw new Error("Request body is too large");
+    chunks.push(buffer);
+  }
+  const value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Request body must be a JSON object");
+  return value;
+}
+function sendJson(response, status2, value) {
+  const body = JSON.stringify(value);
+  response.writeHead(status2, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+  response.end(body);
+}
+function sendText(response, status2, body) {
+  response.writeHead(status2, { "content-type": "text/plain; charset=utf-8" });
+  response.end(body);
+}
+function sendHtml(response, body) {
+  response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+  response.end(body);
+}
+function openBrowser(url) {
+  if (process.platform === "win32") {
+    spawn7("cmd.exe", ["/d", "/c", "start", "", url], { detached: true, stdio: "ignore" }).unref();
+  } else if (process.platform === "darwin") {
+    spawn7("open", [url], { detached: true, stdio: "ignore" }).unref();
+  } else {
+    spawn7("xdg-open", [url], { detached: true, stdio: "ignore" }).unref();
+  }
+}
+function renderHtml(token, initialProjectPath) {
+  const safeToken = JSON.stringify(token).replace(/</g, "\\u003c");
+  const safeProject = JSON.stringify(initialProjectPath ?? "").replace(/</g, "\\u003c");
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentBridge \u914D\u7F6E</title>
+<style>
+body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#f5f7fb;color:#172033;margin:0}
+main{max-width:980px;margin:32px auto;padding:0 20px}.card{background:#fff;border:1px solid #dfe5ef;border-radius:14px;padding:22px;margin:16px 0;box-shadow:0 4px 16px #1720330b}
+h1{margin:0 0 8px}h2{font-size:19px;margin:0 0 16px}h3{font-size:15px;margin:20px 0 8px;color:#526070}
+label{display:flex;align-items:center;gap:12px;margin:12px 0;flex-wrap:wrap}.field{display:grid;grid-template-columns:240px 1fr;gap:12px;align-items:center;margin:12px 0}
+input,select{font:inherit;border:1px solid #c7d0df;border-radius:8px;padding:8px;background:#fff}input[type=checkbox]{width:18px;height:18px}
+button{font:inherit;border:0;border-radius:8px;padding:10px 16px;background:#2463eb;color:white;cursor:pointer;margin-right:8px}button.secondary{background:#e9eef8;color:#172033}
+.muted{color:#657184;font-size:13px}.source{color:#64748b;font-size:12px;margin-left:8px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.disabled{opacity:.5;pointer-events:none}
+pre{background:#101827;color:#d7e2f0;border-radius:8px;padding:14px;overflow:auto;font-size:12px}.status{min-height:22px;color:#166534;margin:10px 0}.error{color:#b42318}
+@media(max-width:720px){.grid{grid-template-columns:1fr}.field{grid-template-columns:1fr}}
+</style></head>
+<body><main>
+<h1>AgentBridge \u914D\u7F6E</h1>
+<p class="muted">\u914D\u7F6E\u53EA\u4FDD\u5B58\u5230 AgentBridge \u7684\u5168\u5C40\u6216\u5F53\u524D\u9879\u76EE\u6587\u4EF6\uFF1B\u9875\u9762\u5173\u95ED\u540E\u672C\u5730\u670D\u52A1\u81EA\u52A8\u9000\u51FA\u3002</p>
+<div class="card"><div class="field"><label for="project">\u5F53\u524D\u9879\u76EE</label><select id="project"></select></div><div id="paths" class="muted"></div></div>
+<div class="grid"><section class="card"><h2>\u5168\u5C40\u9ED8\u8BA4</h2><div id="globalForm"></div><button id="saveGlobal">\u4FDD\u5B58\u5168\u5C40\u914D\u7F6E</button></section>
+<section class="card" id="projectCard"><h2>\u5F53\u524D\u9879\u76EE\u8986\u76D6</h2><div id="projectForm"></div><button id="saveProject">\u4FDD\u5B58\u9879\u76EE\u914D\u7F6E</button></section></div>
+<section class="card"><h2>\u6700\u7EC8\u751F\u6548\u914D\u7F6E</h2><div id="effective"></div><pre id="effectiveJson"></pre></section>
+<div class="status" id="status"></div><button class="secondary" id="close">\u4FDD\u5B58\u5B8C\u6210\uFF0C\u5173\u95ED\u9875\u9762</button>
+</main>
+<script>
+const token=${safeToken}; const initialProject=${safeProject}; let state=null;
+const $=id=>document.getElementById(id);
+const clone=v=>JSON.parse(JSON.stringify(v||{}));
+const own=(o,k)=>Object.prototype.hasOwnProperty.call(o||{},k);
+const duration=v=>v==null?'unlimited':String(v);
+const msDuration=ms=>ms===null?'\u65E0\u9650\u5236':(ms===undefined?'\u7EE7\u627F':(ms%86400000===0?ms/86400000+'\u5929':ms%3600000===0?ms/3600000+'\u5C0F\u65F6':ms%60000===0?ms/60000+'\u5206\u949F':ms/1000+'\u79D2'));
+async function api(path,opts={}){const r=await fetch(path,{...opts,headers:{'x-agentbridge-token':token,'content-type':'application/json',...(opts.headers||{})}});const v=await r.json();if(!r.ok)throw new Error(v.error||'\u8BF7\u6C42\u5931\u8D25');return v}
+async function load(project){state=await api('/api/bootstrap'+(project?'?projectPath='+encodeURIComponent(project):''));render()}
+function ensure(o,s){o[s]??={};return o[s]}
+function input(label,key,value,checked,section){return '<div class="field"><label>'+label+'</label><span>'+ (key==='autonomous'?'<input type="checkbox" data-section="'+section+'" data-key="'+key+'" '+(checked?'checked':'')+'>' : '<input data-section="'+section+'" data-key="'+key+'" value="'+String(value).replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'">') +'</span></div>'}
+function renderForm(kind){const source=kind==='global'?state.global:state.project;const inv=source.invocation||{};const d=source.discussion||{};const isProject=kind==='project';const has=(k)=>own(inv,k)||own(d,k);const inherit=(k)=>isProject&&!has(k);let html='';
+html+=isProject?'<p class="muted">\u52FE\u9009\u201C\u7EE7\u627F\u5168\u5C40\u201D\u5373\u53EF\u5220\u9664\u9879\u76EE\u8986\u76D6\u3002</p>':'';
+const auto=isProject? (inherit('autonomous')?'':String(inv.autonomous??true)) : String(inv.autonomous??true);
+html+='<div class="field"><label>\u5141\u8BB8 AI \u81EA\u4E3B\u53D1\u8D77\u8BA8\u8BBA</label><span><input type="checkbox" data-section="'+kind+'" data-key="autonomous" '+(auto==='true'?'checked':'')+' '+(inherit('autonomous')?'disabled':'')+'></span></div>';
+if(isProject)html+='<label><input type="checkbox" data-inherit="autonomous" '+(inherit('autonomous')?'checked':'')+'> \u7EE7\u627F\u5168\u5C40\u81EA\u4E3B\u8C03\u7528\u8BBE\u7F6E</label>';
+for(const [label,key] of [['\u6700\u5927\u8BA8\u8BBA\u65F6\u95F4','maxDuration'],['\u9759\u9ED8\u8D85\u65F6','idleTimeout'],['\u5355\u8F6E\u6700\u5927\u65F6\u95F4','turnHardLimit']]){const inh=inherit(key);html+='<div class="field"><label>'+label+'</label><span><input data-section="'+kind+'" data-key="'+key+'" value="'+duration(d[key]??'')+'" '+(inh?'disabled':'')+'></span></div>';if(isProject)html+='<label><input type="checkbox" data-inherit="'+key+'" '+(inh?'checked':'')+'> \u7EE7\u627F\u5168\u5C40 '+label+'</label>'}
+const inh=inherit('maxTurns');html+='<div class="field"><label>\u6700\u5927\u8BA8\u8BBA\u8F6E\u6570</label><span><input type="number" min="1" max="50" data-section="'+kind+'" data-key="maxTurns" value="'+(d.maxTurns??'')+'" '+(inh?'disabled':'')+'></span></div>';if(isProject)html+='<label><input type="checkbox" data-inherit="maxTurns" '+(inh?'checked':'')+'> \u7EE7\u627F\u5168\u5C40\u6700\u5927\u8F6E\u6570</label>';
+return html}
+function render(){const projects=state.projects||[];$('project').innerHTML='<option value="">\u4EC5\u914D\u7F6E\u5168\u5C40</option>'+projects.map(p=>'<option value="'+p.replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'">'+p.replace(/</g,'&lt;')+'</option>').join('');$('project').value=state.projectPath||'';$('paths').textContent='\u5168\u5C40\uFF1A'+state.globalPath+(state.projectConfigPath?' \uFF5C \u9879\u76EE\uFF1A'+state.projectConfigPath:'');$('globalForm').innerHTML=renderForm('global');$('projectForm').innerHTML=renderForm('project');$('projectCard').classList.toggle('disabled',!state.projectPath);$('effectiveJson').textContent=JSON.stringify(state.effective.config,null,2);const rows=[];const c=state.effective.config;rows.push('<p>\u81EA\u4E3B\u8C03\u7528\uFF1A<b>'+(c.invocation.autonomous?'\u5141\u8BB8':'\u5173\u95ED')+'</b><span class="source">\u6765\u6E90\uFF1A'+(state.effective.sources['invocation.autonomous']||'default')+'</span></p>');rows.push('<p>\u6700\u5927\u8BA8\u8BBA\u65F6\u95F4\uFF1A<b>'+msDuration(c.discussion.maxDurationMs)+'</b></p>');rows.push('<p>\u9759\u9ED8\u8D85\u65F6\uFF1A<b>'+msDuration(c.discussion.idleTimeoutMs)+'</b></p>');rows.push('<p>\u5355\u8F6E\u6700\u5927\u65F6\u95F4\uFF1A<b>'+msDuration(c.discussion.turnHardLimitMs)+'</b></p>');rows.push('<p>\u6700\u5927\u8BA8\u8BBA\u8F6E\u6570\uFF1A<b>'+(c.discussion.maxTurns??'\u6309\u8BA8\u8BBA\u6A21\u5F0F')+'</b></p>');$('effective').innerHTML=rows.join('');bindFormEvents()}
+function formValue(form,key){const el=form.querySelector('[data-key="'+key+'"]');if(!el)return undefined;return key==='autonomous'?el.checked:(key==='maxTurns'?(el.value?Number(el.value):undefined):el.value||undefined)}
+function buildValue(kind){const source=clone(kind==='global'?state.global:state.project);source.version=1;const inv=ensure(source,'invocation'),d=ensure(source,'discussion');for(const key of ['autonomous']){const inheritEl=document.querySelector('[data-inherit="'+key+'"]');if(kind==='project'&&inheritEl?.checked)delete inv[key];else{const v=formValue(document.querySelector('#'+(kind==='global'?'globalForm':'projectForm')),key);if(v!==undefined)inv[key]=v}}
+for(const key of ['maxDuration','idleTimeout','turnHardLimit','maxTurns']){const inheritEl=document.querySelector('[data-inherit="'+key+'"]');if(kind==='project'&&inheritEl?.checked)delete d[key];else{const v=formValue(document.querySelector('#'+(kind==='global'?'globalForm':'projectForm')),key);if(v!==undefined)d[key]=v}}
+if(!Object.keys(inv).length)delete source.invocation;if(!Object.keys(d).length)delete source.discussion;return source}
+function bindFormEvents(){document.querySelectorAll('[data-inherit]').forEach(el=>el.addEventListener('change',()=>render()));}
+async function save(kind){try{const value=buildValue(kind);await api('/api/config',{method:'POST',body:JSON.stringify({scope:kind,projectPath:state.projectPath,value})});$('status').textContent='\u5DF2\u4FDD\u5B58 '+(kind==='global'?'\u5168\u5C40':'\u9879\u76EE')+' \u914D\u7F6E';await load(state.projectPath)}catch(e){$('status').className='status error';$('status').textContent=e.message}}
+$('project').addEventListener('change',e=>load(e.target.value));$('saveGlobal').addEventListener('click',()=>save('global'));$('saveProject').addEventListener('click',()=>save('project'));$('close').addEventListener('click',async()=>{await api('/api/close',{method:'POST'});window.close()});load(initialProject).catch(e=>{$('status').className='status error';$('status').textContent=e.message});
+</script></body></html>`;
+}
+
 // packages/cli/dist/index.js
 async function main(argv) {
   const command = argv[0] ?? "help";
   const { options, positional } = parseArgs(argv.slice(1));
   const projectArgument = options["project-path"] ?? positional[0];
-  const projectPath = resolve9(String(projectArgument ?? process9.cwd()));
+  const projectPath = resolve11(String(projectArgument ?? process10.cwd()));
   switch (command) {
     case "help":
       printHelp();
@@ -18751,6 +19308,12 @@ async function main(argv) {
       return;
     case "setup":
       console.log(JSON.stringify(setupGlobal(projectArgument ? projectPath : void 0, options), null, 2));
+      return;
+    case "ui":
+      await startConfigUi({
+        projectPath: projectArgument ? projectPath : detectUiProject(projectPath),
+        projects: readProjectRegistry().map((item) => item.projectPath)
+      });
       return;
     case "register-session":
       console.log(JSON.stringify(registerSession(options, projectPath), null, 2));
@@ -18766,7 +19329,7 @@ async function main(argv) {
         const result = await runDoctor(projectPath, options);
         console.log(JSON.stringify(result, null, 2));
         if (!result.ok)
-          process9.exitCode = 1;
+          process10.exitCode = 1;
       }
       return;
     case "verify":
@@ -18774,7 +19337,7 @@ async function main(argv) {
         const result = await verify(options);
         console.log(JSON.stringify(result, null, 2));
         if (!result.ok)
-          process9.exitCode = 1;
+          process10.exitCode = 1;
       }
       return;
     case "version":
@@ -18801,17 +19364,26 @@ async function main(argv) {
 function initProject(projectPath) {
   return ensureProjectMetadata(projectPath);
 }
+function detectUiProject(currentPath) {
+  const unsafeRoots = [parse4(currentPath).root, homedir8(), process10.env.AGENTBRIDGE_INSTALL_ROOT, dirname9(process10.execPath)].filter((value) => Boolean(value));
+  return unsafeRoots.some((root) => samePath4(root, currentPath)) ? void 0 : currentPath;
+}
+function samePath4(left, right) {
+  const a = resolve11(left);
+  const b = resolve11(right);
+  return process10.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
 function setupGlobal(projectPath, options) {
   const project = projectPath ? initProject(projectPath) : null;
   const skills = installManagedSkills(CURRENT_VERSION);
-  const claudeConfig = String(options["claude-config"] ?? join9(homedir7(), ".claude.json"));
+  const claudeConfig = String(options["claude-config"] ?? join10(homedir8(), ".claude.json"));
   const codexConfig = String(options["codex-config"] ?? defaultGlobalCodexConfig());
   if (options["no-config"] === true) {
     const projects2 = projectPath ? registerProject({ projectPath, claudeConfig, codexConfig, scope: "global" }) : readProjectRegistry();
     return { registrationMode: "global", project, configured: [], skills, registeredProjects: projects2.length };
   }
-  const releaseLauncher = process9.env.AGENTBRIDGE_LAUNCHER;
-  const mcpCommand = String(options["mcp-command"] ?? releaseLauncher ?? process9.execPath);
+  const releaseLauncher = process10.env.AGENTBRIDGE_LAUNCHER;
+  const mcpCommand = String(options["mcp-command"] ?? releaseLauncher ?? process10.execPath);
   const mcpEntry = String(options["mcp-entry"] ?? defaultMcpEntry());
   const sharedEnv = {
     AGENTBRIDGE_CLAUDE_CONFIG: claudeConfig,
@@ -18826,7 +19398,7 @@ function setupGlobal(projectPath, options) {
   if (typeof options["codex-mode"] === "string") {
     sharedEnv.AGENTBRIDGE_CODEX_MODE = parseCodexMode2(options["codex-mode"]);
   }
-  const args = releaseLauncher && mcpCommand === releaseLauncher ? ["mcp"] : mcpCommand === process9.execPath ? [mcpEntry] : [];
+  const args = releaseLauncher && mcpCommand === releaseLauncher ? ["mcp"] : mcpCommand === process10.execPath ? [mcpEntry] : [];
   const claudeServer = {
     command: mcpCommand,
     args,
@@ -18842,7 +19414,7 @@ function setupGlobal(projectPath, options) {
     configureClaudeGlobal(claudeConfig, claudeServer),
     configureCodexToml(codexConfig, codexServer)
   ];
-  const migratedCodexConfigs = legacyRegistrations.filter((item) => item.scope !== "global" && resolve9(item.codexConfig) !== resolve9(codexConfig)).map((item) => removeCodexToml(item.codexConfig));
+  const migratedCodexConfigs = legacyRegistrations.filter((item) => item.scope !== "global" && resolve11(item.codexConfig) !== resolve11(codexConfig)).map((item) => removeCodexToml(item.codexConfig));
   let projects = legacyRegistrations;
   for (const registration of legacyRegistrations) {
     projects = registerProject({
@@ -18881,7 +19453,7 @@ function cleanup(projectPath, options) {
   }
 }
 function defaultMcpEntry() {
-  return resolveMcpEntry(process9.argv[1]);
+  return resolveMcpEntry(process10.argv[1]);
 }
 function registerSession(options, projectPath) {
   const provider = String(options.provider ?? "");
@@ -18931,10 +19503,10 @@ async function update(options) {
 }
 async function verify(options) {
   const liveRequested = options.live === true;
-  const liveConfigured = Boolean(process9.env.AGENTBRIDGE_CLAUDE_COMMAND) && Boolean(process9.env.AGENTBRIDGE_CODEX_COMMAND || process9.env.AGENTBRIDGE_CODEX_APP_COMMAND);
+  const liveConfigured = Boolean(process10.env.AGENTBRIDGE_CLAUDE_COMMAND) && Boolean(process10.env.AGENTBRIDGE_CODEX_COMMAND || process10.env.AGENTBRIDGE_CODEX_APP_COMMAND);
   const mcpEntry = defaultMcpEntry();
-  const mcpSmoke = await runMcpSmoke(mcpEntry, resolve9(String(options["project-path"] ?? process9.cwd())));
-  const live = liveRequested ? await runLiveProviderSmoke(resolve9(String(options["project-path"] ?? process9.cwd()))) : {
+  const mcpSmoke = await runMcpSmoke(mcpEntry, resolve11(String(options["project-path"] ?? process10.cwd())));
+  const live = liveRequested ? await runLiveProviderSmoke(resolve11(String(options["project-path"] ?? process10.cwd()))) : {
     claudeToCodex: { status: "NOT_TESTED", detail: "Pass --live with explicit provider commands to request live verification." },
     codexToClaude: { status: "NOT_TESTED", detail: "Pass --live with explicit provider commands to request live verification." }
   };
@@ -18975,10 +19547,10 @@ async function runLiveProviderSmoke(projectPath) {
       detail: "NOT_TESTED: set AGENTBRIDGE_CLAUDE_COMMAND and AGENTBRIDGE_CODEX_COMMAND or AGENTBRIDGE_CODEX_APP_COMMAND for live verification."
     }
   };
-  if (!process9.env.AGENTBRIDGE_CLAUDE_COMMAND || !process9.env.AGENTBRIDGE_CODEX_COMMAND && !process9.env.AGENTBRIDGE_CODEX_APP_COMMAND)
+  if (!process10.env.AGENTBRIDGE_CLAUDE_COMMAND || !process10.env.AGENTBRIDGE_CODEX_COMMAND && !process10.env.AGENTBRIDGE_CODEX_APP_COMMAND)
     return unavailable;
-  const timeoutMs = boundedVerifyTimeout(process9.env.AGENTBRIDGE_VERIFY_TIMEOUT_MS);
-  const claude = new ClaudeConnector({ command: process9.env.AGENTBRIDGE_CLAUDE_COMMAND, timeoutMs });
+  const timeoutMs = boundedVerifyTimeout(process10.env.AGENTBRIDGE_VERIFY_TIMEOUT_MS);
+  const claude = new ClaudeConnector({ command: process10.env.AGENTBRIDGE_CLAUDE_COMMAND, timeoutMs });
   const codex = new CodexAutoConnector({
     candidates: discoverCodexCommands(),
     timeoutMs,
@@ -19047,7 +19619,7 @@ function safeVerifyError(cause) {
 function uninstallProject(projectPath, confirmed, options) {
   if (!confirmed)
     throw new Error("Refusing to remove local state without --yes");
-  const claudeConfig = String(options["claude-config"] ?? join9(homedir7(), ".claude.json"));
+  const claudeConfig = String(options["claude-config"] ?? join10(homedir8(), ".claude.json"));
   const registration = readProjectRegistry().find((item) => projectPathKey(item.projectPath) === projectPathKey(projectPath));
   const codexConfig = String(options["codex-config"] ?? registration?.codexConfig ?? defaultGlobalCodexConfig());
   return removeProject(registration ?? { projectPath, claudeConfig, codexConfig, scope: "global" }, true);
@@ -19060,14 +19632,14 @@ function uninstallAll(confirmed, options) {
   if (removeProgram && installation.mode === "source") {
     throw new Error("Cannot automatically remove a source checkout. Run uninstall-all --yes without --remove-program, then delete the repository yourself.");
   }
-  const defaultClaudeConfig = String(options["claude-config"] ?? join9(homedir7(), ".claude.json"));
+  const defaultClaudeConfig = String(options["claude-config"] ?? join10(homedir8(), ".claude.json"));
   const defaultCodexGlobalConfig = String(options["codex-config"] ?? defaultGlobalCodexConfig());
   const registrations = readProjectRegistry();
   const byPath = /* @__PURE__ */ new Map();
   for (const registration of registrations)
     byPath.set(projectPathKey(registration.projectPath), registration);
   for (const discoveredPath of listClaudeAgentBridgeProjects(defaultClaudeConfig)) {
-    const projectPath = resolve9(discoveredPath);
+    const projectPath = resolve11(discoveredPath);
     const key = projectPathKey(projectPath);
     if (!byPath.has(key)) {
       byPath.set(key, {
@@ -19093,12 +19665,12 @@ function uninstallAll(confirmed, options) {
     }
   }
   const globalConfigTargets = /* @__PURE__ */ new Map();
-  globalConfigTargets.set(`${resolve9(defaultClaudeConfig)}\0${resolve9(defaultCodexGlobalConfig)}`, {
+  globalConfigTargets.set(`${resolve11(defaultClaudeConfig)}\0${resolve11(defaultCodexGlobalConfig)}`, {
     claudeConfig: defaultClaudeConfig,
     codexConfig: defaultCodexGlobalConfig
   });
   for (const registration of registrations.filter((item) => item.scope === "global")) {
-    globalConfigTargets.set(`${resolve9(registration.claudeConfig)}\0${resolve9(registration.codexConfig)}`, registration);
+    globalConfigTargets.set(`${resolve11(registration.claudeConfig)}\0${resolve11(registration.codexConfig)}`, registration);
   }
   const globalConfigs = [...globalConfigTargets.values()].flatMap((target) => [
     removeClaudeGlobal(target.claudeConfig),
@@ -19126,8 +19698,8 @@ function uninstallAll(confirmed, options) {
   };
 }
 function removeProject(registration, updateRegistry) {
-  const projectPath = resolve9(registration.projectPath);
-  const stateDir = resolve9(projectPath, ".agentbridge");
+  const projectPath = resolve11(registration.projectPath);
+  const stateDir = resolve11(projectPath, ".agentbridge");
   if (stateDir === parse4(stateDir).root || stateDir === projectPath) {
     throw new Error(`Refusing to remove an unsafe state path: ${stateDir}`);
   }
@@ -19139,19 +19711,35 @@ function removeProject(registration, updateRegistry) {
   const removed = [];
   if (sharedInstallRoot) {
     for (const name of ["project.json", "agentbridge.sqlite", "agentbridge.sqlite-wal", "agentbridge.sqlite-shm"]) {
-      const path = join9(stateDir, name);
-      if (existsSync8(path)) {
+      const path = join10(stateDir, name);
+      if (existsSync10(path)) {
         rmSync5(path, { force: true });
         removed.push(path);
       }
     }
-  } else if (existsSync8(stateDir)) {
-    rmSync5(stateDir, { recursive: true, force: true });
-    removed.push(stateDir);
+  } else if (existsSync10(stateDir)) {
+    for (const entry of readdirSync5(stateDir)) {
+      if (entry === "config.json")
+        continue;
+      const path = join10(stateDir, entry);
+      rmSync5(path, { recursive: true, force: true });
+      removed.push(path);
+    }
+    if (readdirSync5(stateDir).length === 0) {
+      rmSync5(stateDir, { recursive: true, force: true });
+      removed.push(stateDir);
+    }
   }
   if (updateRegistry)
     unregisterProject(projectPath);
-  return { projectPath, removed, configs, sharedInstallRoot, registrationMode: registration.scope ?? "project" };
+  return {
+    projectPath,
+    removed,
+    preservedConfig: existsSync10(join10(stateDir, "config.json")) ? join10(stateDir, "config.json") : null,
+    configs,
+    sharedInstallRoot,
+    registrationMode: registration.scope ?? "project"
+  };
 }
 function parseCodexMode2(value) {
   if (value === "auto" || value === "app-server" || value === "cli")
@@ -19159,18 +19747,18 @@ function parseCodexMode2(value) {
   throw new Error("--codex-mode must be auto, app-server, or cli");
 }
 function projectPathKey(value) {
-  const path = resolve9(value);
-  return process9.platform === "win32" ? path.toLowerCase() : path;
+  const path = resolve11(value);
+  return process10.platform === "win32" ? path.toLowerCase() : path;
 }
 function openStorage(projectPath) {
-  const dbPath = process9.env.AGENTBRIDGE_DB_PATH ?? join9(projectPath, ".agentbridge", "agentbridge.sqlite");
+  const dbPath = process10.env.AGENTBRIDGE_DB_PATH ?? join10(projectPath, ".agentbridge", "agentbridge.sqlite");
   return new Storage(dbPath);
 }
 function readProject(projectPath) {
-  const projectFile = join9(projectPath, ".agentbridge", "project.json");
-  if (!existsSync8(projectFile))
+  const projectFile = join10(projectPath, ".agentbridge", "project.json");
+  if (!existsSync10(projectFile))
     return null;
-  return JSON.parse(readFileSync6(projectFile, "utf8"));
+  return JSON.parse(readFileSync7(projectFile, "utf8"));
 }
 function parseArgs(args) {
   const options = {};
@@ -19200,6 +19788,7 @@ function printHelp() {
     "Commands:",
     "  init [path]                 Create .agentbridge/project.json",
     "  setup [path]                Register MCP globally once; optional path initializes one project",
+    "  ui                          Open the one-time global/project configuration UI",
     "  register-session             Register a provider-native session",
     "  status [path]               Show sessions, discussions, and metrics",
     "  cleanup [path]              Preview/delete old completed discussions",
@@ -19232,7 +19821,7 @@ function printHelp() {
     "  --codex-config PATH"
   ].join("\n"));
 }
-main(process9.argv.slice(2)).catch((error2) => {
+main(process10.argv.slice(2)).catch((error2) => {
   console.error(error2 instanceof Error ? error2.message : String(error2));
-  process9.exitCode = 1;
+  process10.exitCode = 1;
 });

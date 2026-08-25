@@ -60,6 +60,9 @@ export interface AgentConnector {
 
   /** Best-effort native archival. Unsupported providers return false. */
   archiveSession?(sessionId: string, sessionKind?: ProviderSessionKind): Promise<boolean>;
+
+  /** Refresh provider watchdog limits after AgentBridge configuration changes. */
+  updateLimits?(limits: { hardTimeoutMs: number; startupTimeoutMs?: number }): void;
 }
 
 export { ClaudeConnector } from './claude.js';

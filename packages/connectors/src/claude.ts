@@ -23,16 +23,23 @@ export interface ClaudeConnectorOptions {
 export class ClaudeConnector implements AgentConnector {
   readonly agentType = 'claude' as const;
   private readonly command: string;
-  private readonly hardTimeoutMs: number;
+  private hardTimeoutMs: number;
   private readonly extraArgs: string[];
 
   constructor(options: ClaudeConnectorOptions = {}) {
     this.command = options.command ?? 'claude';
     this.hardTimeoutMs = options.hardTimeoutMs ?? options.timeoutMs ?? 30 * 60 * 1_000;
     this.extraArgs = options.extraArgs ?? [];
-    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1_000 || this.hardTimeoutMs > 7 * 24 * 60 * 60 * 1_000) {
-      throw new Error('Claude connector hardTimeoutMs must be an integer between 1000 and 604800000');
+    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1_000 || this.hardTimeoutMs > 365 * 24 * 60 * 60 * 1_000) {
+      throw new Error('Claude connector hardTimeoutMs must be an integer between 1000 and 31536000000');
     }
+  }
+
+  updateLimits(limits: { hardTimeoutMs: number }): void {
+    if (!Number.isSafeInteger(limits.hardTimeoutMs) || limits.hardTimeoutMs < 1_000 || limits.hardTimeoutMs > 365 * 24 * 60 * 60 * 1_000) {
+      throw new Error('Claude connector hardTimeoutMs must be between 1000 and 31536000000');
+    }
+    this.hardTimeoutMs = limits.hardTimeoutMs;
   }
 
   async isAvailable(): Promise<boolean> {

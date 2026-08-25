@@ -9,6 +9,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@agentbridge/protocol': packageSource('protocol'),
+      '@agentbridge/config': packageSource('config'),
       '@agentbridge/storage': packageSource('storage'),
       '@agentbridge/audit': packageSource('audit'),
       '@agentbridge/connectors': packageSource('connectors'),

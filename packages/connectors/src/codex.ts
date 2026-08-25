@@ -28,7 +28,7 @@ export interface CodexConnectorOptions {
 export class CodexConnector implements AgentConnector {
   readonly agentType = 'codex' as const;
   private readonly command: string;
-  private readonly hardTimeoutMs: number;
+  private hardTimeoutMs: number;
   private readonly model?: string;
   private readonly sandbox: NonNullable<CodexConnectorOptions['sandbox']>;
   private readonly skipGitRepoCheck: boolean;
@@ -45,9 +45,16 @@ export class CodexConnector implements AgentConnector {
     this.extraArgs = options.extraArgs ?? [];
 
     if (!this.command.trim()) throw new Error('Codex connector command must not be empty');
-    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1_000 || this.hardTimeoutMs > 7 * 24 * 60 * 60 * 1_000) {
-      throw new Error('Codex connector hardTimeoutMs must be an integer between 1000 and 604800000');
+    if (!Number.isInteger(this.hardTimeoutMs) || this.hardTimeoutMs < 1_000 || this.hardTimeoutMs > 365 * 24 * 60 * 60 * 1_000) {
+      throw new Error('Codex connector hardTimeoutMs must be an integer between 1000 and 31536000000');
     }
+  }
+
+  updateLimits(limits: { hardTimeoutMs: number }): void {
+    if (!Number.isSafeInteger(limits.hardTimeoutMs) || limits.hardTimeoutMs < 1_000 || limits.hardTimeoutMs > 365 * 24 * 60 * 60 * 1_000) {
+      throw new Error('Codex connector hardTimeoutMs must be between 1000 and 31536000000');
+    }
+    this.hardTimeoutMs = limits.hardTimeoutMs;
   }
 
   async isAvailable(): Promise<boolean> {

@@ -11,6 +11,7 @@
     "build": "tsc"
   },
   "dependencies": {
+    "@agentbridge/config": "0.1.0",
     "@agentbridge/connectors": "0.1.0",
     "@agentbridge/audit": "0.1.0",
     "@agentbridge/storage": "0.1.0",

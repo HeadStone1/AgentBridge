@@ -12,8 +12,9 @@
     "tests"
   ],
   "scripts": {
-    "build": "npm run build:protocol && npm run build:storage && npm run build:audit && npm run build:connectors && npm run build:collaboration && npm run build:mcp && npm run build:cli",
+    "build": "npm run build:protocol && npm run build:config && npm run build:storage && npm run build:audit && npm run build:connectors && npm run build:collaboration && npm run build:mcp && npm run build:cli",
     "build:protocol": "npm run build -w @agentbridge/protocol",
+    "build:config": "npm run build -w @agentbridge/config",
     "build:storage": "npm run build -w @agentbridge/storage",
     "build:audit": "npm run build -w @agentbridge/audit",
     "build:collaboration": "npm run build -w @agentbridge/collaboration",

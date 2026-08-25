@@ -295,6 +295,8 @@ export interface AskPeerInput {
   peer: AgentType;
   message: string;
   projectPath?: string;
+  /** Whether the user explicitly requested discussion or the agent initiated it from task context. */
+  invocationOrigin?: 'autonomous' | 'user_requested';
   /** Discussion behavior contract; defaults to discussion. */
   mode?: DiscussionMode;
   taskType?: TaskType;
