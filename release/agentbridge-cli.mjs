@@ -18592,7 +18592,7 @@ import { homedir as homedir6, tmpdir } from "node:os";
 import { basename as basename3, join as join8, resolve as resolve8 } from "node:path";
 import { spawnSync } from "node:child_process";
 import process8 from "node:process";
-var CURRENT_VERSION = true ? "0.8.0" : readWorkspaceVersion();
+var CURRENT_VERSION = true ? "0.8.1" : readWorkspaceVersion();
 var DEFAULT_RELEASE_REPOSITORY = "HeadStone1/AgentBridge";
 function normalizeVersion(value) {
   return value.trim().replace(/^v/i, "").split("+", 1)[0];

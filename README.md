@@ -4,7 +4,7 @@
 
 AgentBridge 是一个本地优先的 MCP 协作核心，让 Claude Code 和 Codex 能在同一个项目中互相提问、回复、重试、达成一致，并把讨论状态保存在项目本地的 SQLite 数据库中。
 
-> 当前开发版本：v0.8.0。本项目以 GitHub Release 分发本地 stdio MCP；便携包自带 Node.js 运行时，不要求用户另外安装 Node 或 npm。Release 安装后程序独立位于用户目录，不依赖下载目录或源码仓库。
+> 当前开发版本：v0.8.1。本项目以 GitHub Release 分发本地 stdio MCP；便携包自带 Node.js 运行时，不要求用户另外安装 Node 或 npm。Release 安装后程序独立位于用户目录，不依赖下载目录或源码仓库。
 
 > 当前源码验证状态：UTF-8 校验、TypeScript 构建以及完整自动化测试均已通过，其中 Release MCP 使用官方 SDK 连续完成 30 次握手。`auto/reuse` 会通过同一项目的 collaboration session 复用 Provider 原生会话；`fresh` 会建立隔离 room，并在该 room 内复用自己的 Provider 会话。上述自动化测试不等同于真实 Provider 端到端验收；只有 Claude → Codex 和 Codex → Claude 两个方向都完成实际 `ask_peer` 调用，才能声明真实双向通信可用。
 
